@@ -76,7 +76,7 @@ try {
   mark('real extension UI pairing and WebSocket handshake');
   client = new Client({ name: 'e2e-ai-client', version: '1' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
-  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.3.5'); mark('MCP tool discovery and extension version handshake');
+  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.3.6'); mark('MCP tool discovery and extension version handshake');
   async function call(name, args = {}) {
     const result = await client.callTool({ name, arguments: args });
     if (result.isError) throw new Error(result.content[0].text);
@@ -108,6 +108,8 @@ try {
   const judge = await call('browser_local_judge', { goal: 'Send a harmless local test message.', observation: JSON.stringify({ title: read.title, url: read.url, text: read.text.slice(0, 500) }), proposedAction: 'Click the local test page send button after filling a non-sensitive draft field.', riskLevel: 'low' });
   assert.ok(['allow', 'warn', 'block', 'unsure', 'unavailable'].includes(judge.verdict));
   assert.equal(judge.model, 'chrome-built-in-ai');
+  assert.equal(typeof judge.schemaValid, 'boolean');
+  assert.ok(Object.hasOwn(judge, 'parseWarning'));
   assert.equal(typeof judge.checks.needsHumanConfirm === 'boolean' || judge.checks.needsHumanConfirm === null, true);
   mark('optional Chrome built-in AI judge reports availability or advisory verdict without executing actions');
   const input = read.elements.find(e => e.label === '消息草稿');

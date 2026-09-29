@@ -86,3 +86,11 @@ Element Plus 弹层被反向关闭，随后报 `Exact visible option not found`�
 `browser_local_judge` 会话/推理可能超过普通网页操作的 20 秒超时，导致连接被保护性
 断开。0.3.5 为 `browser_local_judge` 设置 120 秒专用超时，并在超时报错中包含工具名。
 普通网页读写仍沿用较短超时，避免未知写操作长时间悬挂。
+
+## 0.3.6：本地裁判结构化加固
+
+真实 Chrome 验收显示 Gemini Nano 可能返回非标准 JSON，例如自造 verdict。0.3.6 将
+`browser_local_judge` 输出固定为可审计结构：`schemaValid`、`parseWarning`、规范化
+`verdict` 和 `checks` 必定存在。非标准 verdict 会保守映射为 `unsure`；缺失 checks
+会自动补默认值并要求人工确认。若拟执行动作包含提交、上传、支付、删除、发布、推送、
+合并等高风险关键词，即使模型返回 `allow` 也会提升为 `warn` 并设置确认需求。

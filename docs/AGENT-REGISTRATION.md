@@ -6,9 +6,9 @@
 |---|---|---|
 | Codex | C:/Users/love/.codex/config.toml | 官方 CLI add 成功；get 显示 enabled=true、stdio |
 | Claude Code | C:/Users/love/.claude.json，user scope | 官方 CLI get 显示 Connected |
-| Cursor | C:/Users/love/.cursor/mcp.json | 写入并解析成功；0.3.5 使用该条目应发现 20 个工具 |
-| WorkBuddy | C:/Users/love/.workbuddy/mcp.json | 保留原有条目；0.3.5 使用该条目应发现 20 个工具 |
-| Hermes | F:/PythonProjects1/Hermes/config.yaml | 按实际 HERMES_HOME 注册；0.3.5 应发现 20 个工具 |
+| Cursor | C:/Users/love/.cursor/mcp.json | 写入并解析成功；0.3.6 使用该条目应发现 20 个工具 |
+| WorkBuddy | C:/Users/love/.workbuddy/mcp.json | 保留原有条目；0.3.6 使用该条目应发现 20 个工具 |
+| Hermes | F:/PythonProjects1/Hermes/config.yaml | 按实际 HERMES_HOME 注册；0.3.6 应发现 20 个工具 |
 
 浏览器连接状态：桥接和扩展均已升级为 0.3.0，connected=true。上述证明配置与协议连接；不代表所有升级前已打开的客户端会话已经热加载新增工具，Cursor/WorkBuddy 的既有桌面会话仍可能需要刷新 MCP 或重开会话。
 

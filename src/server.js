@@ -33,7 +33,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let extensionVersion = null;
   const queue = [];
   const clients = new Set();
-  const status = () => ({ service: 'ai-browser-bridge', version: '0.3.5', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, active: current?.id ?? null, taskLease: lease, uploadRoots: config.uploadRoots.length });
+  const status = () => ({ service: 'ai-browser-bridge', version: '0.3.6', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, active: current?.id ?? null, taskLease: lease, uploadRoots: config.uploadRoots.length });
   const jobTimeoutMs = name => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000) : timeoutMs;
   function finish(job, error, result) {
     clearTimeout(job.timer);
