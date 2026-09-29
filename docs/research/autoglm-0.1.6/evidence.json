@@ -1,0 +1,242 @@
+[
+  {
+    "id": "A01",
+    "file": "static/js/background.js",
+    "needle": "chrome.sidePanel",
+    "found": true,
+    "offsetUtf16": 11436,
+    "line": 2,
+    "interpretation": "Side panel open/setOptions implementation",
+    "excerpt": "tener(te);const ne={};chrome.action.onClicked.addListener((async e=>{const t=e.id;var n,o;null===(n=chrome.sidePanel)||void 0===n||n.setOptions({tabId:t,path:\"index.html\",enabled:!0}),null===(o=chrome.sidePanel)||void 0===o||o.open({tabId:t},(()=>{ne[t]=!0}))})),chrome.sidePanel.onClosed.addListener((async e=>{chrome.storage.session.get([\"taskMetaData\"],(t=>{if(null!==t&&void 0!==t&&t.taskMetaData){let n=[];t.taskMetaData.map((t=>{t.tabId!==e.tabId&&n.push(t)})),chrome.storage.session.set({taskMetaData:n},(e=>{}))}}))})),chrome.sidePanel.onOpened.addListener((async e=>{chrome.storage.session.g"
+  },
+  {
+    "id": "A02",
+    "file": "static/js/background.js",
+    "needle": "async dispatchMouseEvent",
+    "found": true,
+    "offsetUtf16": 252900,
+    "line": 2,
+    "interpretation": "CDP mouse input wrapper",
+    "excerpt": "out(l),chrome.runtime.lastError?r(new Error(chrome.runtime.lastError.message)):o(e))}))}));throw o}}async dispatchMouseEvent(e,t){const n={type:t.type,x:Math.round(t.x),y:Math.round(t.y),modifiers:t.modifiers||0};\"mousePressed\"!==t.type&&\"mouseReleased\"!==t.type&&\"mouseMoved\"!==t.type||(n.button=t.button||\"none\",\"mousePressed\"!==t.type&&\"mouseReleased\"!==t.type||(n.clickCount=t.clickCount||1)),\"mouseWheel\"!==t.type&&(n.buttons=void 0!==t.buttons?t.buttons:0),\"mouseWheel\"!==t.type||void 0===t.deltaX&&void 0===t.deltaY||Object.assign(n,{deltaX:t.deltaX||0,deltaY:t.deltaY||0}),await this.sendComm"
+  },
+  {
+    "id": "A03",
+    "file": "static/js/background.js",
+    "needle": "async dispatchKeyEvent",
+    "found": true,
+    "offsetUtf16": 253436,
+    "line": 2,
+    "interpretation": "CDP keyboard input wrapper",
+    "excerpt": "n(n,{deltaX:t.deltaX||0,deltaY:t.deltaY||0}),await this.sendCommand(e,\"Input.dispatchMouseEvent\",n)}async dispatchKeyEvent(e,t){const n={modifiers:0,...t};await this.sendCommand(e,\"Input.dispatchKeyEvent\",n)}async insertText(e,t){await this.sendCommand(e,\"Input.insertText\",{text:t})}async click(e,t,n){let o=arguments.length>3&&void 0!==arguments[3]?arguments[3]:\"left\",r=arguments.length>4&&void 0!==arguments[4]?arguments[4]:1;await new Promise((e=>setTimeout(e,50)));try{let i=0;\"left\"===o?i=1:\"right\"===o?i=2:\"middle\"===o&&(i=4),await this.dispatchMouseEvent(e,{type:\"mouseMoved\",x:t,y:n,button:"
+  },
+  {
+    "id": "A04",
+    "file": "static/js/background.js",
+    "needle": "async left_click_drag",
+    "found": true,
+    "offsetUtf16": 254307,
+    "line": 2,
+    "interpretation": "Drag implementation",
+    "excerpt": ",x:t,y:n,button:o,buttons:0,clickCount:a}),a<r&&await new Promise((e=>setTimeout(e,100)))}finally{}}async left_click_drag(e,t,n){let[o,r]=t,[i,a]=n;await new Promise((e=>setTimeout(e,50)));try{await ee.dispatchMouseEvent(e,{type:\"mouseMoved\",x:o,y:r,button:\"none\",buttons:0,modifiers:0}),await ee.dispatchMouseEvent(e,{type:\"mousePressed\",x:o,y:r,button:\"left\",buttons:1,clickCount:1,modifiers:0}),await ee.dispatchMouseEvent(e,{type:\"mouseMoved\",x:i,y:a,button:\"left\",buttons:1,modifiers:0}),await ee.dispatchMouseEvent(e,{type:\"mouseReleased\",x:i,y:a,button:\"left\",buttons:0,clickCount:1,modifiers:"
+  },
+  {
+    "id": "A05",
+    "file": "static/js/background.js",
+    "needle": "async pressKeyChord",
+    "found": true,
+    "offsetUtf16": 256360,
+    "line": 2,
+    "interpretation": "Modifier/key combination implementation",
+    "excerpt": "s[2]:0,o=arguments.length>3?arguments[3]:void 0;await this.keyDown(e,t,n,o),await this.keyUp(e,t,n)}async pressKeyChord(e,t){const n=t.toLowerCase().split(\"+\"),r=[];let i=\"\";for(const o of n)[\"ctrl\",\"control\",\"alt\",\"shift\",\"cmd\",\"meta\",\"command\",\"win\",\"windows\"].includes(o)?r.push(o):i=o;let a=0;const l={alt:1,ctrl:2,control:2,meta:4,cmd:4,command:4,win:4,windows:4,shift:8};for(const o of r)a|=l[o]||0;const s=[];if(this.isMac){const e=o[t.toLowerCase()];e&&Array.isArray(e)?s.push(...e):e&&s.push(e)}if(i){const n=this.getKeyCode(i);if(!n)throw new Error(\"Unknown key: \".concat(t));await this.pre"
+  },
+  {
+    "id": "A06",
+    "file": "static/js/background.js",
+    "needle": "async scrollWheel",
+    "found": true,
+    "offsetUtf16": 256876,
+    "line": 2,
+    "interpretation": "Coordinate-based wheel input",
+    "excerpt": "n=this.getKeyCode(i);if(!n)throw new Error(\"Unknown key: \".concat(t));await this.pressKey(e,n,a,s)}}async scrollWheel(e,t,n,o,r){await this.dispatchMouseEvent(e,{type:\"mouseWheel\",x:t,y:n,deltaX:o,deltaY:r})}getKeyCode(e){const t=e.toLowerCase(),n=r[t];if(n)return n;if(1===e.length){const t=e.toUpperCase();let n;if(t>=\"A\"&&t<=\"Z\")n=\"Key\".concat(t);else{if(!(e>=\"0\"&&e<=\"9\"))return;n=\"Digit\".concat(e)}return{key:e,code:n,keyCode:t.charCodeAt(0),text:e}}}requiresShift(e){return'~!@#$%^&*()_+{}|:\"<>?'.includes(e)||e>=\"A\"&&e<=\"Z\"}async screenshot(e,t){const n=t||this.defaultResizeParams;await new P"
+  },
+  {
+    "id": "A07",
+    "file": "static/js/background.js",
+    "needle": "e.shadowRoot.childNodes",
+    "found": true,
+    "offsetUtf16": 122129,
+    "line": 2,
+    "interpretation": "Shadow DOM traversal branch",
+    "excerpt": "=\"\";if(e.childNodes.forEach((e=>{o+=I(e)})),e.shadowRoot){if(\"autoglm-main-content\"===e.id)return\"\";e.shadowRoot.childNodes.forEach((e=>{o+=I(e)}))}return\"<\".concat(t).concat(n,\">\").concat(o,\"</\").concat(t,\">\")}return\"\"}function k(e){return(e=(e=(e=(e=(e=(e=(e=(e=(e=e.replace(/<style[^>]*>([\\s\\S]*?)<\\/style>/gi,\"\")).replace(/<meta[^>]*>([\\s\\S]*?)<\\/meta>/gi,\"\")).replace(/<br[^>]*>/gi,\"\")).replace(/<meta[^>]*>/gi,\"\")).replace(/<html\\b([^>]*)\\bdata-bbox=\"[^\"]*\"\\s*/g,\"<html$1\")).replace(/<body\\b([^>]*)\\bdata-bbox=\"[^\"]*\"\\s*/g,\"<body$1\")).replace(/>\\s+</g,\"><\")).replace(/<html\\s*>/g,\"<html>\")).rep"
+  },
+  {
+    "id": "A08",
+    "file": "static/js/background.js",
+    "needle": "chrome.webNavigation.getAllFrames",
+    "found": true,
+    "offsetUtf16": 39023,
+    "line": 2,
+    "interpretation": "Frame handling; adjacent branch is site-specific",
+    "excerpt": "==e||void 0===e?void 0:e.bid)||1;return chrome.tabs.query({active:!0,currentWindow:!0},(e=>{var r,i;chrome.webNavigation.getAllFrames({tabId:(null===e||void 0===e||null===(r=e[0])||void 0===r?void 0:r.id)||(null===(i=t.tab)||void 0===i?void 0:i.id)},(r=>{r.forEach((r=>{var i,a;r.url.includes(\"nuxtsyq\")&&chrome.scripting.executeScript({target:{tabId:(null===e||void 0===e||null===(i=e[0])||void 0===i?void 0:i.id)||(null===(a=t.tab)||void 0===a?void 0:a.id),frameIds:[r.frameId]},function:e=>((t=>{var n;n=t,Array.prototype.slice.call(n.querySelectorAll(\"*\")).forEach((t=>{(t=>{var n,o;t.setAttribut"
+  },
+  {
+    "id": "A09",
+    "file": "static/js/background.js",
+    "needle": "\"select_dropdown_option\"===N){",
+    "found": true,
+    "offsetUtf16": 442219,
+    "line": 2,
+    "interpretation": "Dropdown action handler",
+    "excerpt": "ion=\"Search\",K.kwargs.argument=R||r}if(\"hover\"===N&&(await f.D.hover(v,V[0],V[1]),K.action=\"Hover\"),\"select_dropdown_option\"===N){await(0,g.d)(v),await f.D.click(v,V[0],V[1],\"left\",1);const Ee=Math.round(1e3);await new Promise((e=>setTimeout(e,Ee)));let Ie=R||r;await f.D.type(v,Ie),await f.D.type(v,\"Enter\"),K.action=\"Select Dropdown Option\",K.kwargs.argument=Ie}return K}if(V&&await(0,m.D)(V[0],V[1],v),\"navigate\"===N){const ke=(0,h.VT)(W||D);return await(0,y.A)(v,ke)}if(\"upload_file\"===N)return new Promise(((e,t)=>{chrome.tabs.get(v,(n=>{if(chrome.runtime.lastError)return t(chrome.runtime.lastE"
+  },
+  {
+    "id": "A10",
+    "file": "static/js/background.js",
+    "needle": "\"upload_file\"===N",
+    "found": true,
+    "offsetUtf16": 442593,
+    "line": 2,
+    "interpretation": "Upload command routes to injected function",
+    "excerpt": "f(V&&await(0,m.D)(V[0],V[1],v),\"navigate\"===N){const ke=(0,h.VT)(W||D);return await(0,y.A)(v,ke)}if(\"upload_file\"===N)return new Promise(((e,t)=>{chrome.tabs.get(v,(n=>{if(chrome.runtime.lastError)return t(chrome.runtime.lastError);if(!n)return t(new Error(\"No active tabs found\"));const o=n,r=o.url,i=o.title,a=o.favIconUrl;if(!r||r.startsWith(\"devtools://\"))return t(new Error(\"Cannot access devtools URL\"));chrome.scripting.executeScript({target:{tabId:v},func:C.A,args:a?[r,i,V,D,a]:[r,i,V,D]},(n=>{n&&n[0]&&n[0].result?e(n[0].result):chrome.scripting.executeScript({target:{tabId:v},func:()=>ses"
+  },
+  {
+    "id": "A11",
+    "file": "static/js/background.js",
+    "needle": "new File([m],d",
+    "found": true,
+    "offsetUtf16": 267901,
+    "line": 2,
+    "interpretation": "DataTransfer file assignment implementation",
+    "excerpt": "nst g=atob(l),p=Uint8Array.from(g,(function(e){return e.charCodeAt(0)})),m=new Blob([p],{type:u}),h=new File([m],d,{type:u}),v=new DataTransfer;return v.items.add(h),n.files=v.files,n.dispatchEvent(new Event(\"input\",{bubbles:!0})),n.dispatchEvent(new Event(\"change\",{bubbles:!0})),{fileName:h.name,mimeType:h.type,fileSize:h.size}}(p,o),C=function(e,t,n,o){var r;const i=((null===e||void 0===e?void 0:e.accept)||\"\").toLowerCase(),a=(n||\"\").toLowerCase(),c=(t||\"\").toLowerCase();let u=(o||\"\").toLowerCase();u||(u=s(a||c).toLowerCase());for(const[s,f]of Object.entries(l))if(f.mimes.some((e=>u.startsWi"
+  },
+  {
+    "id": "A12",
+    "file": "static/js/background.js",
+    "needle": "chrome.downloads.download",
+    "found": true,
+    "offsetUtf16": 45780,
+    "line": 2,
+    "interpretation": "Download start and completion/error handling",
+    "excerpt": "adAsDataURL(e)})).catch((e=>n({success:!1,error:String(e)}))),!0;if(\"downloadUrl\"===e.action)return chrome.downloads.download({url:e.url},(e=>{if(!e)return void n({success:!1,error:chrome.runtime.lastError});let t=!1,o=null;const r=()=>{t||(t=!0,o&&clearTimeout(o),chrome.downloads.onChanged.removeListener(i),chrome.downloads.search({id:e},(t=>{const o=null===t||void 0===t?void 0:t[0];n({success:!0,downloadId:e,download_file_path:(null===o||void 0===o?void 0:o.filename)||\"\"})})))},i=t=>{var n,o;t.id===e&&(\"complete\"===(null===(n=t.state)||void 0===n?void 0:n.current)||null!==(o=t.error)&&void 0"
+  },
+  {
+    "id": "A13",
+    "file": "static/js/background.js",
+    "needle": "chrome.tabs.goBack",
+    "found": true,
+    "offsetUtf16": 321594,
+    "line": 2,
+    "interpretation": "Back and forward navigation",
+    "excerpt": "let s={operation:\"do\",kwargs:{currentTabUrl:i,currentTabTitle:a,currentTabFaviconUrl:l}};\"back\"===t?chrome.tabs.goBack(e,(()=>{if(chrome.runtime.lastError)return o(new Error(chrome.runtime.lastError.message));n({...s,action:\"Go Backward\"})})):\"forward\"===t?chrome.tabs.goForward(e,(()=>{if(chrome.runtime.lastError)return o(new Error(chrome.runtime.lastError.message));n({...s,action:\"Go Forward\"})})):chrome.tabs.update(e,{url:t},(e=>{if(chrome.runtime.lastError)return o(new Error(chrome.runtime.lastError.message));n({...s,action:\"open_url\",open_url:t})}))}))}))}},9403:(e,t,n)=>{\"use strict\";n.d("
+  },
+  {
+    "id": "A14",
+    "file": "static/js/background.js",
+    "needle": "i.createProperties={windowId:r.windowId}",
+    "found": true,
+    "offsetUtf16": 271778,
+    "line": 2,
+    "interpretation": "Task tab grouping implementation",
+    "excerpt": "eturn void o(void 0);const i={tabIds:[e]};null!==n&&void 0!==n&&n.tabGroupId?i.groupId=n.tabGroupId:i.createProperties={windowId:r.windowId},chrome.tabs.group(i,(e=>{chrome.runtime.lastError,void 0!==e?chrome.tabGroups.update(e,{color:\"green\",title:t,collapsed:!1},(t=>{t&&t.id&&n&&(n.tabGroupId=t.id),o(e)})):o(void 0)}))}))}))}},54155:(e,t,n)=>{\"use strict\";n.d(t,{A:()=>a});var o=n(47041),r=(n(44466),n(97289));const i=e=>new Promise((t=>chrome.tabs.query(e,(e=>t(e)))));const a=async function(e,t,n){let a,l;if(null!==e&&void 0!==e&&e.action&&\"navigate\"===e.action){l=null!==t&&void 0!==t&&t.mcpA"
+  },
+  {
+    "id": "A15",
+    "file": "static/js/main.js",
+    "needle": "session_id:n,request_id:r,type:a,with_screen_info",
+    "found": true,
+    "offsetUtf16": 159061,
+    "line": 2,
+    "interpretation": "Chat request includes session, page context, stream, files",
+    "excerpt": "l:A,urls:p,fileIds:h}=e;const f=o.yY.getUrl(\"webagent\",\"chat\");try{const e=await c(f,{instruction:t,session_id:n,request_id:r,type:a,with_screen_info:l,stream:!0,config:d,...u?{url:u}:{},...null!==p&&void 0!==p&&p.length?{urls:p}:{},...null!==h&&void 0!==h&&h.length?{file_ids:h}:{},...s?{html_text:s}:{}},{signal:A});return(0,i.Vu)(e)?e:null}catch(g){return g.name,null}},p=async function(e,t){var n;let r=arguments.length>2&&void 0!==arguments[2]?arguments[2]:null,o=arguments.length>3?arguments[3]:void 0;const a=new TextDecoder;let s=\"\";const l=null===e||void 0===e||null===(n=e.body)||void 0===n"
+  },
+  {
+    "id": "A16",
+    "file": "static/js/main.js",
+    "needle": "const a=new TextDecoder;let s=",
+    "found": true,
+    "offsetUtf16": 159469,
+    "line": 2,
+    "interpretation": "Stream consumption and cancellation branch",
+    "excerpt": "rguments.length>2&&void 0!==arguments[2]?arguments[2]:null,o=arguments.length>3?arguments[3]:void 0;const a=new TextDecoder;let s=\"\";const l=null===e||void 0===e||null===(n=e.body)||void 0===n?void 0:n.getReader();let c=!1;for(;!c;){const{done:e,value:n}=await l.read();if(c=e,r&&r.current){l.cancel(),o();break}s+=a.decode(n,{stream:!0});let u=s.indexOf(\"\\n\");for(;-1!==u;){const e=s.slice(5,u).trim(),n=(0,i.Fh)(e,!0);n&&t(n),s=s.slice(u+1),u=s.indexOf(\"\\n\")}}if(s.trim())try{t(JSON.parse(s.trim()))}catch(u){}};r()}catch(c){r(c)}}))},37887:(e,t,n)=>{\"use strict\";n.d(t,{C:()=>o});var r=n(35388);co"
+  },
+  {
+    "id": "A17",
+    "file": "static/js/background.js",
+    "needle": "sensitiveStatus:!0",
+    "found": true,
+    "offsetUtf16": 437279,
+    "line": 2,
+    "interpretation": "Sensitive-action handoff state, not proof of complete detection",
+    "excerpt": ",observation:r,currentTabTitle:\"\",currentTabFaviconUrl:\"\",visual_model_bbox:s,detail:\"\\u70b9\\u51fb\",sensitiveStatus:!0},K;await f.D.click(v,V[0],V[1],\"left\",1),await f.D.hover(v,V[0],V[1]),K.action=\"Click\"}if(\"left_click_drag\"===N&&(await(0,g.d)(v),await f.D.left_click_drag(v,V,H),K.action=\"Left Click Drag\"),\"double_click\"===N&&(await(0,g.d)(v),await f.D.click(v,V[0],V[1],\"left\",2),K.action=\"Double Click\"),\"triple_click\"===N&&(await(0,g.d)(v),await f.D.click(v,V[0],V[1],\"left\",3),K.action=\"Triple Click\"),\"right_click\"===N&&(await(0,g.d)(v),await f.D.click(v,V[0],V[1],\"right\",1),K.action=\"Right"
+  },
+  {
+    "id": "A18",
+    "file": "static/js/background.js",
+    "needle": "task_status:\"website_need_login\"",
+    "found": true,
+    "offsetUtf16": 25105,
+    "line": 2,
+    "interpretation": "Login-required task state",
+    "excerpt": "=(_=o.functionCall)||void 0===_?void 0:_.id,feedback_content:\"\\u7f51\\u7ad9\\u9700\\u8981\\u767b\\u5f55\",task_status:\"website_need_login\",message_type:\"website_need_login\",message:\"\\u7f51\\u7ad9\\u9700\\u8981\\u767b\\u5f55\",action:\"website_need_login\",...((null===e||void 0===e||null===(B=e.data)||void 0===B?void 0:B.url)||(null===t||void 0===t||null===(Q=t.tab)||void 0===Q?void 0:Q.url))&&{page_info:{url:(null===e||void 0===e||null===(T=e.data)||void 0===T?void 0:T.url)||(null===t||void 0===t||null===(L=t.tab)||void 0===L?void 0:L.url)}}},logic_id:null===o||void 0===o||null===(P=o.functionCall)||void 0="
+  },
+  {
+    "id": "A19",
+    "file": "static/js/background.js",
+    "needle": "chrome.tts.speak",
+    "found": true,
+    "offsetUtf16": 15933,
+    "line": 2,
+    "interpretation": "Text to speech implementation",
+    "excerpt": "e)})(),!0;if(\"playVoice\"===e.action)return e.playStatus||chrome.tts.stop(),e.content&&e.playStatus&&chrome.tts.speak(e.content,{rate:1,pitch:1,volume:1,onEvent:e=>{\"end\"===e.type&&n({status:\"success\",message:\"TTS end\"})}}),!0;if(\"getUserInfo\"===e.action)return(0,l.ug)().then((e=>{n({data:e,status:\"success\",message:\"Get user info successfully\"})})),!0;if(\"refreshUserInfo\"===e.action)return(0,l.ug)(!0).then((e=>{n({data:e,status:\"success\",message:\"Get user info successfully\"})})),!0;if(\"openOptionsPage\"===e.action){const t=e.hash?\"#\"+e.hash:\"\";chrome.tabs.create({url:chrome.runtime.getURL(\"optio"
+  },
+  {
+    "id": "A20",
+    "file": "static/js/main.js",
+    "needle": "planner:\"/planner\"",
+    "found": true,
+    "offsetUtf16": 430094,
+    "line": 2,
+    "interpretation": "Remote chat/controller/planner/ocr/translation routes",
+    "excerpt": "chat\",userInfo:\"/user_info\",userConfig:\"/user_config\",feedback:\"/feedback\",controller:\"/controller\",planner:\"/planner\",config:\"/config\",ocr:\"/ocr\",translate:\"/translate\",genReport:\"/gen_report\",searchIssues:\"/search_issues\",upload:\"/upload\",workflow:\"/workflow\",assistant_upload_file:\"/assistant_upload_file\",dr_format:\"/dr_format\",refreshToken:\"/userapi/refresh\",yieldAgent:\"/browser/yield-agent\",checkPermission:\"/browser/check-permission\"},publicPath:{chat:\"/public_chat\"}},vmWs:{host:o.Hr.host.vmWs},userApi:{host:o.Hr.host.userApi,get prefix(){return\"/userapi\"},path:{refreshToken:\"/refresh\",use"
+  },
+  {
+    "id": "A21",
+    "file": "static/js/main.js",
+    "needle": "https://autoglm-api.zhipuai.cn/agentdr/v1/assistant/upload-mix",
+    "found": true,
+    "offsetUtf16": 84476,
+    "line": 2,
+    "interpretation": "Remote upload request, not local model implementation",
+    "excerpt": "d 0!==arguments[1]?arguments[1]:{},r=arguments.length>2&&void 0!==arguments[2]?arguments[2]:null,a=\"https://autoglm-api.zhipuai.cn/agentdr/v1/assistant/upload-mix\";((null===(t=await chrome.storage.local.get(\"mcpDomain\"))||void 0===t?void 0:t.mcpDomain)||\"\").includes(\".autoglm.ai\")&&(a=\"https://autoglm-api.autoglm.ai/agentdr/v1/assistant/upload-mix\");const s={method:\"POST\",body:e,headers:{\"Access-Control-Allow-Origin\":\"*\",\"Access-Control-Allow-Headers\":\"*\",Accept:\"*/*\",\"Access-Control-Allow-Methods\":\"GET,POST,OPTIONS\",Authorization:await(0,o.gf)(),...n||{},...(0,i.nO)()}};return fetch(a,{...s,s"
+  },
+  {
+    "id": "A22",
+    "file": "static/js/background.js",
+    "needle": "document.readyState?",
+    "found": true,
+    "offsetUtf16": 63656,
+    "line": 2,
+    "interpretation": "Page ready-state wait branch",
+    "excerpt": "]*[\"']/g,\"\")}try{await new Promise(((e,t)=>{const n=setTimeout((()=>{e()}),1e4),o=()=>{\"complete\"===document.readyState?(clearTimeout(n),e()):setTimeout(o,100)};o()}));let I=[],k=window.location.href;if(k.includes(\"xiaohongshu.com\")){const n=document.querySelectorAll(\"section.note-item\");if(0===n.length)return{listResult:I,page_info:{html:t(e(document.documentElement.outerHTML)),url:window.location.href,title:document.title}};let o=0;for(;o<n.length;){if(!n[o].querySelector('a[target*=\"_self\"] img')){o+=1;continue}let e=n[o].querySelector(\"a img\")&&n[o].querySelector(\"a img\").closest(\"a\"),t=n["
+  },
+  {
+    "id": "A23",
+    "file": "static/js/background.js",
+    "needle": "mcpAgentWindowId:0,mcpAgentTabId:0,taskTabIdList",
+    "found": true,
+    "offsetUtf16": 8692,
+    "line": 2,
+    "interpretation": "Task/tab/window/session bookkeeping",
+    "excerpt": "!0;let q={};let j,U={},z=[],H={isConnecting:!1,socket:null,reconnectAttempts:0,isSocketConnected:!1,mcpAgentWindowId:0,mcpAgentTabId:0,taskTabIdList:[],mcpAgentInstruction:\"\",mcpAgentViewportSize:{viewport_width:0,viewport_height:0},mcpAgentImageSize:{width:0,height:0},mcpAgentUrl:\"\",availableTabs:[],os_name:\"\",cmd_or_ctrl:\"\",socket:null,sessionId:\"\",taskId:\"\",refTaskId:\"\",round:0,deleteTabId:0,sourceType:{NODE_ENV:\"production\",PUBLIC_URL:\"\",WDS_SOCKET_HOST:void 0,WDS_SOCKET_PATH:void 0,WDS_SOCKET_PORT:void 0,FAST_REFRESH:!0,REACT_APP_ENV:null,REACT_APP_VM:!1,REACT_APP_ACCOUNT:\"autoglm\",REACT_"
+  },
+  {
+    "id": "A24",
+    "file": "static/js/background.js",
+    "needle": "window.location.href.includes(\".feishu.cn/wiki\")",
+    "found": true,
+    "offsetUtf16": 158984,
+    "line": 2,
+    "interpretation": "Site-specific editor compatibility code",
+    "excerpt": "t('div[contenteditable=\"true\"]')),je.focus(),je.dispatchEvent(Ue);let At=ne.replace(/\\\\n/g,\"\\n\");if(window.location.href.includes(\".feishu.cn/wiki\")||window.location.href.includes(\"fanyi.baidu.com\")){const yt=new DataTransfer;yt.setData(\"text/plain\",At);const bt=new ClipboardEvent(\"paste\",{bubbles:!0,cancelable:!0,clipboardData:yt});je.dispatchEvent(bt)}else document.execCommand(\"insertText\",!1,At);if(window.location.href.includes(\".feishu.cn/\")&&je.closest(\"h1\")&&\"h1\"!==je.tagName.toLowerCase()){let wt=new KeyboardEvent(\"keydown\",{key:\"Enter\",code:\"Enter\",keyCode:13,which:13,bubbles:!0,cancel"
+  }
+]

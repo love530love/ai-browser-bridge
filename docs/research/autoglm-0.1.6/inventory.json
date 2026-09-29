@@ -1,0 +1,166 @@
+{
+  "generatedAt": "2026-09-27T10:36:36.176Z",
+  "root": "C:\\Users\\love\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Extensions\\jelniggicmclhfgnlapbkgfibmgelfnp\\0.1.6_1",
+  "extensionVersion": "0.1.6",
+  "fileCount": 241,
+  "sourceMapCount": 0,
+  "originalTypeScriptCount": 0,
+  "inspectedManifest": {
+    "permissions": [
+      "storage",
+      "activeTab",
+      "sidePanel",
+      "scripting",
+      "tabs",
+      "cookies",
+      "tts",
+      "alarms",
+      "webNavigation",
+      "downloads",
+      "debugger",
+      "webRequest",
+      "windows",
+      "tabGroups",
+      "notifications"
+    ],
+    "host_permissions": [
+      "<all_urls>"
+    ],
+    "commands": {
+      "advanced_select": {
+        "description": "多链接总结",
+        "suggested_key": {
+          "default": "Alt+Q"
+        }
+      },
+      "commands_modal": {
+        "description": "快捷弹窗",
+        "suggested_key": {
+          "default": "Alt+K"
+        }
+      },
+      "summary_page": {
+        "description": "页面总结",
+        "suggested_key": {
+          "default": "Alt+S"
+        }
+      },
+      "web_translate": {
+        "description": "网页翻译",
+        "suggested_key": {
+          "default": "Alt+T"
+        }
+      }
+    },
+    "background": {
+      "service_worker": "static/js/background.js"
+    }
+  },
+  "promptNames": [
+    "翻译",
+    "解释",
+    "段落总结",
+    "划线全文总结",
+    "call api总结",
+    "全文总结",
+    "快问快答"
+  ],
+  "method": "Static inspection of local published assets; not a runtime verification of AutoGLM capabilities.",
+  "files": [
+    {
+      "file": "asset-manifest.json",
+      "bytes": 20895,
+      "sha256": "adf7be6ef8628c45da747bf88dcd710bdb9603adcfadda94f077aa43d044b4db"
+    },
+    {
+      "file": "floatBallClick.js",
+      "bytes": 1404,
+      "sha256": "f46146f22ae47b9dda36beb1a2f4d6d81a090e8667035d26bf95b7e88b2c5287"
+    },
+    {
+      "file": "index.html",
+      "bytes": 634,
+      "sha256": "902cabbe524a96c67fe801b685f9a01143a82549cbdc99dde65761db89166de9"
+    },
+    {
+      "file": "insert.js",
+      "bytes": 1112,
+      "sha256": "e45a471a03028318baf432ea8141523a5ac7bab2ed8d794d565e058735f74f57"
+    },
+    {
+      "file": "manifest.json",
+      "bytes": 2785,
+      "sha256": "ef6a72f42591b503b5ad780f0abe764f84f18b09cb3c19bd076c5274bbc4ef98"
+    },
+    {
+      "file": "options.html",
+      "bytes": 865,
+      "sha256": "34b1634adf15991a0a2635569baded250e82de8f1f3895cd18866c27e29b0871"
+    },
+    {
+      "file": "params.html",
+      "bytes": 672,
+      "sha256": "902a3d6a561df4b8ba43ca6120c6e3defd3ecd6949eb5c28a378d82b9422a9d3"
+    },
+    {
+      "file": "popup.html",
+      "bytes": 792,
+      "sha256": "450f68863fb86c73c6da69bf9be2d460fdf91ecdd98d4d409c9f7969baea1219"
+    },
+    {
+      "file": "prompts.json",
+      "bytes": 11842,
+      "sha256": "f196b79852795b5676f29c494a6e9b85d90a181cacbec26dee687b3bf3bfb6ab"
+    },
+    {
+      "file": "static/js/background.js",
+      "bytes": 1083305,
+      "sha256": "169775dc00439482206e322ea0fbe7e17cc3956c2b359594746dc32fb46f50a8"
+    },
+    {
+      "file": "static/js/content.js",
+      "bytes": 465648,
+      "sha256": "1e34e5a50ffa205c08ed42a558cc519f37813ba4a33404736deaa4621805e9c7"
+    },
+    {
+      "file": "static/js/main.js",
+      "bytes": 4418951,
+      "sha256": "52493267d455c4bb58114d8846590dd33bc835b13d7507fb0c20c93627dd7454"
+    },
+    {
+      "file": "static/js/options.js",
+      "bytes": 990598,
+      "sha256": "0dd96a776ab305fc168612690ccb4691067af50cc982339dce3fb8ee22575315"
+    },
+    {
+      "file": "static/js/params.js",
+      "bytes": 354886,
+      "sha256": "b398366f35e80d1ae10b31fd14f50e705c11b5470d6babfa81bbfe53d91e6be9"
+    },
+    {
+      "file": "static/js/workflow.js",
+      "bytes": 724831,
+      "sha256": "76259c251270522ad63a475e15a15349113d7f9e28b00e38bc7699c9eb9f25f8"
+    },
+    {
+      "file": "wanfangDataWindowOpen.js",
+      "bytes": 797,
+      "sha256": "483eaac4f139ebc59ad9c0d55e88c54bd5eadf8e4a2fdb93d1d4e720f6a716dd"
+    },
+    {
+      "file": "windowOpen.js",
+      "bytes": 759,
+      "sha256": "1b7ba79b1c028b46ba5035597af8d63cfb3fa124bbd4e5d960dd7a0bbfebaf83"
+    },
+    {
+      "file": "_locales/en/messages.json",
+      "bytes": 250,
+      "sha256": "bc712b7dcf49834f10bf28140c42cd2323111af8a97c81cb8cefe0f8dfddfe91"
+    },
+    {
+      "file": "_locales/zh_CN/messages.json",
+      "bytes": 250,
+      "sha256": "bc712b7dcf49834f10bf28140c42cd2323111af8a97c81cb8cefe0f8dfddfe91"
+    }
+  ]
+}

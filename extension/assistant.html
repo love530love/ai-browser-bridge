@@ -1,0 +1,10 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>自主浏览器 · AI 任务</title><link rel="stylesheet" href="panel.css"><style>body{min-width:300px}main{padding:20px}h1{font-size:28px}.event{border-left:2px solid #608e7a;padding:8px 12px;margin:10px 0;white-space:pre-wrap;font-size:12px;overflow-wrap:anywhere}#task-status{color:#9fe3c5}.hint{margin-bottom:12px}</style></head><body><main>
+<header><span class="brand">A / B</span><span class="eyebrow">YOUR MODEL · YOUR BROWSER</span></header>
+<h1>让 AI 完成这一步。</h1><p class="intro">选择页面，描述任务。由你配置的模型执行，最多 30 步。</p>
+<p id="connection" class="hint"></p><label for="target">目标标签页</label><select id="target"></select><button id="refresh-tabs" type="button">刷新标签</button>
+<label for="task">任务</label><textarea id="task" rows="4" placeholder="例如：读取这个页面，说明它的主要内容。"></textarea>
+<label for="max-steps">最多执行步数</label><input id="max-steps" type="number" min="1" max="30" value="12">
+<button id="run" class="primary">开始任务</button><div class="actions"><button id="cancel" class="danger">停止后续动作</button><button id="settings">连接设置</button></div>
+<p id="task-status" role="status" aria-live="polite">等待任务</p><div id="events"></div>
+<footer>先按照说明配置本机 .local/model.json。未配置模型时，仍可让外部 AI 通过 MCP / HTTP 使用浏览器工具。任务运行时，本机接口由此任务独占；停止不会撤销已执行动作。</footer>
+</main><script type="module" src="assistant.js"></script></body></html>

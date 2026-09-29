@@ -1,0 +1,19 @@
+#Requires -Version 7.0
+param(
+    [ValidateSet('status','tools','call','allow-upload-root')][string]$Action = 'status',
+    [string]$Tool,
+    [string]$Json = '{}'
+)
+$ErrorActionPreference = 'Stop'
+$nodePath = (Get-Command node.exe -ErrorAction Stop).Source
+$entry = Join-Path $PSScriptRoot 'src/cli.js'
+if ($Action -eq 'call') {
+    if (!$Tool) { throw 'Tool name required' }
+    $Json | & $nodePath $entry call $Tool --stdin
+} elseif ($Action -eq 'allow-upload-root') {
+    if (!$Tool) { throw 'Absolute upload root required in -Tool' }
+    & $nodePath $entry allow-upload-root $Tool
+} else {
+    & $nodePath $entry $Action
+}
+exit $LASTEXITCODE

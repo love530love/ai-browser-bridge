@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>自主浏览器 · 连接与授权</title><link rel="stylesheet" href="panel.css"></head>
+<body>
+  <main>
+    <header><span class="brand">A / B</span><span class="eyebrow">LOCAL · MODEL INDEPENDENT</span></header>
+    <h1>让 AI 接入，<br>由你掌控。</h1>
+    <p class="intro">网页留在你的浏览器。通过本机桥接，让你选择的 AI 操作网页。</p>
+    <section class="status-card"><span class="dot"></span><strong id="status">读取状态…</strong><button id="refresh" class="quiet">刷新</button><small id="activity">尚无操作</small></section>
+    <form id="settings">
+      <label for="token">01 · 本机配对密钥</label>
+      <input id="token" type="password" autocomplete="off" placeholder="运行 pair.ps1，然后粘贴密钥">
+      <p class="hint" id="paired">密钥只保存在此浏览器的扩展中。</p>
+      <label for="port">02 · 本机服务端口</label><input id="port" type="number" min="1024" max="65535" value="19387" required>
+      <label for="all-sites" class="site-mode"><input id="all-sites" type="checkbox" checked>03 · 允许所有网站（默认）</label>
+      <p class="hint">开启后可操作所有 HTTP / HTTPS 网站，无需逐个填写。Chrome 内部页面和受浏览器保护的页面除外。</p>
+      <div id="site-list" hidden>
+        <label for="origins">仅允许以下网站</label>
+        <textarea id="origins" rows="4" placeholder="https://example.com&#10;每行一个网站源地址，包含协议与端口"></textarea>
+        <p class="hint">关闭所有网站模式后，仅允许此列表中的网站；原有列表会保留。</p>
+      </div>
+      <button id="save" type="submit" class="primary">保存并连接</button>
+    </form>
+    <div class="actions"><button id="reconnect">重新连接</button><button id="pause" class="danger">暂停控制</button></div>
+    <button id="assistant" class="primary" type="button">Agent 直接接入（无需配置模型）</button>
+    <p id="message" role="status" aria-live="polite"></p>
+    <footer>无内置云模型 · 不上传到开发者服务器<br>连接的 AI 可读取授权页面；点击可能提交表单或发送消息。暂停阻止后续命令，已执行的操作不会撤销。</footer>
+  </main><script src="panel.js" type="module"></script>
+</body></html>

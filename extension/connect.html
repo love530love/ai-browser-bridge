@@ -1,0 +1,15 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>自主浏览器 · Agent 直接接入</title><link rel="stylesheet" href="panel.css"><style>body{min-width:300px}main{padding:20px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;padding:12px;background:#182d27}a{color:#a7efd6}</style></head><body><main>
+<header><span class="brand">A / B</span><span class="eyebrow">ANY AGENT · YOUR BROWSER</span></header>
+<h1>你的 Agent，直接操作。</h1>
+<p class="intro">不需要在插件中配置模型或模型密钥。将下方入口告诉已有的 AI Agent，它就可以通过本机工具读取和操作网页。</p>
+<h2>有终端能力的 Agent</h2>
+<p>让 Agent 用 PowerShell 7 运行以下命令，获得可用动作：</p>
+<pre>&amp; 'K:\PythonProjects5\AI-Browser-Bridge\agent.ps1' tools</pre>
+<p>完整接入说明：</p><pre>K:\PythonProjects5\AI-Browser-Bridge\AGENT-QUICKSTART.md</pre>
+<h2>支持 MCP 的 Agent</h2>
+<p>在客户端添加本机生成的 MCP 配置，即可调用浏览器工具：</p>
+<pre>K:\PythonProjects5\AI-Browser-Bridge\.local\mcp-config.json</pre>
+<p class="hint">上述是当前电脑的安装路径。迁移后使用实际项目路径。无本机工具通道的纯聊天窗口，需要其宿主先提供连接能力。</p>
+<p><a href="panel.html">连接状态与暂停控制</a></p>
+<details><summary>可选：插件自己运行模型</summary><p>仅在希望插件独立执行任务时使用；外部 Agent 接入完全不需要。</p><a href="assistant.html">打开可选模型任务页</a></details>
+</main></body></html>
