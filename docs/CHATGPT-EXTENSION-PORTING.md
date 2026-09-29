@@ -5,7 +5,7 @@ AI-Browser-Bridge is intentionally model-neutral. It should expose browser capab
 ## What Can Be Ported
 
 - Tool naming and schemas can be mirrored into ChatGPT-style tool adapters.
-- `browser_read`, `browser_debug`, `browser_choose`, and `browser_upload` can become a reusable browser-control capability set.
+- `browser_read`, `browser_debug`, `browser_ai_status`, `browser_local_judge`, `browser_choose`, and `browser_upload` can become a reusable browser-control capability set.
 - The extension pairing model can be reused: local-only service, explicit token, user-loaded Chrome extension, and origin policy.
 - Native upload safety can be reused: allowlisted root, realpath confinement, exact SHA256, and no path leakage to the page.
 - Event-driven wakeup can be layered above the same HTTP/CLI bridge.
@@ -25,13 +25,13 @@ A ChatGPT-side adapter should:
 2. Check `/status` and require matching service and extension versions.
 3. Use `browser_read` for normal state.
 4. Use `browser_debug` for ambiguous page state.
-5. Use `browser_choose` for custom dropdowns.
-6. Use `browser_upload` for file inputs.
-7. Treat write timeouts as unknown outcome and stop.
+5. Use `browser_ai_status` and `browser_local_judge` only as optional local advisory signals.
+6. Use `browser_choose` for custom dropdowns.
+7. Use `browser_upload` for file inputs.
+8. Treat write timeouts as unknown outcome and stop.
 
 ## Open Work
 
 - Build a thin adapter package that maps these schemas into the target ChatGPT extension format.
 - Add a disposable acceptance page that verifies read, debug, choose, upload, and submit-disabled behavior.
 - Add a signed manifest or checksum bundle so agents can verify which extension build is actually loaded.
-

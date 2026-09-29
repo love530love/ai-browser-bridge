@@ -76,12 +76,19 @@ try {
   mark('real extension UI pairing and WebSocket handshake');
   client = new Client({ name: 'e2e-ai-client', version: '1' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
-  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.3.3'); mark('MCP tool discovery and extension version handshake');
+  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.3.4'); mark('MCP tool discovery and extension version handshake');
   async function call(name, args = {}) {
     const result = await client.callTool({ name, arguments: args });
     if (result.isError) throw new Error(result.content[0].text);
     if (result.content[0].type === 'image') return result.content[0];
     return JSON.parse(result.content[0].text);
+  }
+  async function waitBridgeConnected() {
+    for (let i = 0; i < 50; i++) {
+      if (bridge.status().connected) return;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error(`Bridge did not reconnect: ${JSON.stringify(bridge.status())}`);
   }
   const opened = await call('browser_open', { url: `${origin}/fixture` }); const tabId = opened.tabId;
   const page = await context.waitForEvent('page', { timeout: 500 }).catch(() => context.pages().find(p => p.url().startsWith(origin)));
@@ -95,6 +102,14 @@ try {
   assert.ok(debug.roleCounts.combobox >= 1);
   assert.equal(debug.fileInputs[0].accept, '.zip');
   mark('browser_debug reports page diagnostics without exposing private fields');
+  const aiStatus = await call('browser_ai_status');
+  assert.equal(typeof aiStatus.apiPresent, 'boolean');
+  assert.equal(typeof aiStatus.status, 'string');
+  const judge = await call('browser_local_judge', { goal: 'Send a harmless local test message.', observation: JSON.stringify({ title: read.title, url: read.url, text: read.text.slice(0, 500) }), proposedAction: 'Click the local test page send button after filling a non-sensitive draft field.', riskLevel: 'low' });
+  assert.ok(['allow', 'warn', 'block', 'unsure', 'unavailable'].includes(judge.verdict));
+  assert.equal(judge.model, 'chrome-built-in-ai');
+  assert.equal(typeof judge.checks.needsHumanConfirm === 'boolean' || judge.checks.needsHumanConfirm === null, true);
+  mark('optional Chrome built-in AI judge reports availability or advisory verdict without executing actions');
   const input = read.elements.find(e => e.label === '消息草稿');
   assert.equal(input.value, '');
   const button = read.elements.find(e => e.label === '发送到本地测试页');
@@ -190,6 +205,7 @@ try {
   await panel.locator('#all-sites').check();
   await panel.locator('#save').click();
   await panel.waitForFunction(() => document.getElementById('status').textContent === '已连接');
+  await waitBridgeConnected();
   assert.equal(await worker.evaluate(async () => (await chrome.storage.local.get('allSites')).allSites), true);
   assert.deepEqual(await worker.evaluate(async () => (await chrome.storage.local.get('allowedOrigins')).allowedOrigins), [origin]);
   const second = await call('browser_open', { url: `${otherOrigin}/unlisted` });
@@ -218,11 +234,13 @@ try {
   mark('cross-origin link and navigation work; internal and local-file URLs remain excluded');
   await panel.locator('#all-sites').uncheck(); await panel.locator('#save').click();
   await panel.waitForFunction(() => document.getElementById('status').textContent === '已连接');
+  await waitBridgeConnected();
   await assert.rejects(call('browser_read', { tabId: second.tabId }), /not allowed/);
   assert.ok(!(await call('browser_tabs')).some(t => t.id === second.tabId));
   mark('switching back to saved whitelist immediately limits reads and tab listing');
   await panel.locator('#all-sites').check(); await panel.locator('#save').click();
   await panel.waitForFunction(() => document.getElementById('status').textContent === '已连接');
+  await waitBridgeConnected();
   await call('browser_close', { tabId: second.tabId });
   await panel.locator('#pause').click();
   await panel.waitForFunction(async () => !(await chrome.storage.local.get('enabled')).enabled);

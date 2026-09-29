@@ -69,3 +69,13 @@ Element Plus 弹层被反向关闭，随后报 `Exact visible option not found`�
 上传区、SPA 空读、遮挡或扩展状态不明时，应先用它定位现场，再决定是否读取、等待、
 选择或要求人工确认；不得用轮询脚本长期空转，也不得把坐标和键盘 fallback 当作
 确定性流程。
+
+## 0.3.4：Chrome 内置 AI 本地裁判
+
+新增只读 `browser_ai_status` 与 `browser_local_judge`。前者检查扩展上下文中是否
+暴露 Chrome Built-in AI / Prompt API；后者在模型可用时将用户目标、页面观察和拟执行
+动作交给本地模型，要求返回 `allow`、`warn`、`block` 或 `unsure` 的 JSON 建议。
+
+该能力是 advisory guardrail，不是执行器、不是用户授权、也不是最终事实裁判。若 API
+不可用、模型未下载、会话创建失败或返回非 JSON，工具会返回 `verdict: "unavailable"`，
+调用方必须进入普通确认或保守路径。

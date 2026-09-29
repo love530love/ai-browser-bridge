@@ -12,7 +12,7 @@
 & 'K:\PythonProjects5\AI-Browser-Bridge\agent.ps1' call browser_tabs
 ```
 
-`tools` 返回所有 18 个动作的实时 JSON schema。使用实际返回的 tabId 和 ref；例如将实际 ID 填入：
+`tools` 返回所有 20 个动作的实时 JSON schema。使用实际返回的 tabId 和 ref；例如将实际 ID 填入：
 
 ```powershell
 & 'K:\PythonProjects5\AI-Browser-Bridge\agent.ps1' call browser_read '{"tabId":123}'
@@ -46,6 +46,10 @@
 遇到下拉框、上传区、SPA 空读或遮挡不确定时，先调用只读 `browser_debug`。它返回
 readyState、焦点、滚动位置、可见 option、combobox、file input、dialog 和 iframe
 计数，用来定位问题；不要把 `browser_debug` 当作写操作成功证明。
+
+需要高风险动作前的本地轻量裁判时，可先调用 `browser_ai_status`，再调用
+`browser_local_judge`。裁判只返回建议，不执行动作；返回 `unavailable` 时不得把它
+当作同意，应回到普通确认流程。
 
 ## 有 MCP 能力
 
