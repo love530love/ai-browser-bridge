@@ -7,6 +7,7 @@ let connectionState = '未连接';
 let lastAction = '';
 let connectionEpoch = 0;
 const uiRequests = new Map();
+const tabLeases = new Map();
 const defaults = { port: 19387, token: '', allowedOrigins: [], allSites: true, enabled: false };
 const settings = () => chrome.storage.local.get(defaults);
 function builtInAiApi() {
@@ -137,6 +138,111 @@ async function execute(name, args) {
   if (!config.enabled) throw new Error('Extension paused');
   if (name === 'browser_ai_status') return await aiStatus();
   if (name === 'browser_local_judge') return await localJudge(args);
+  if (name === 'browser_bridge_modes') {
+    return {
+      extensionVersion: chrome.runtime.getManifest().version,
+      modes: [
+        { name: 'health', tools: ['browser_health'], useFor: 'connection, permission, content-script and page-state diagnosis', retrySafe: true },
+        { name: 'observe', tools: ['browser_observe', 'browser_read', 'browser_debug'], useFor: 'state acquisition, geometry, visible text, controls, occlusion hints', retrySafe: true },
+        { name: 'dom-transaction', tools: ['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'], useFor: 'preferred writes with explicit expected outcome', retrySafe: false },
+        { name: 'picker-upload-bridge', tools: ['browser_pick', 'browser_choose', 'browser_upload'], useFor: 'custom selects, portal options, hidden file inputs without OS dialog', retrySafe: false },
+        { name: 'cdp-input', tools: ['browser_key', 'browser_hover', 'browser_screenshot'], useFor: 'trusted browser keyboard/pointer/screenshot when DOM events are insufficient', retrySafe: false },
+        { name: 'coordinate-adapter', tools: ['browser_action'], useFor: 'Open-AutoGLM style normalized coordinates as last resort with stale-URL guard', retrySafe: false }
+      ],
+      fallbackOrder: ['health', 'observe', 'dom-transaction', 'picker-upload-bridge', 'cdp-input', 'coordinate-adapter', 'human-confirmation'],
+      concurrency: { writeLeaseTools: ['browser_claim_tab', 'browser_release_tab', 'browser_tab_lease'], rule: 'one write owner per tab; read-only tools may still observe' },
+      retryPolicy: 'Never replay uncertain writes automatically. Use browser_failure_help, then re-observe and choose the next safer mode.'
+    };
+  }
+  if (name === 'browser_failure_help') {
+    const err = String(args.error || '');
+    const attempted = String(args.attemptedAction || '');
+    const highRisk = actionRisk(attempted).destructive;
+    const lower = err.toLowerCase();
+    let category = 'unknown';
+    let retryAllowed = false;
+    let nextMode = 'observe';
+    const steps = ['Call browser_health for the tab.', 'Call browser_observe and compare URL, visible text, active element, geometry, and dialogs before any further write.'];
+    if (/extension not connected|connection|disconnected/.test(lower)) {
+      category = 'connection';
+      steps.push('Reconnect extension from the panel; do not retry the write until status reports connected.');
+    } else if (/site not allowed|origin/.test(lower)) {
+      category = 'permission';
+      steps.push('Ask user to allow the origin or enable all HTTP/HTTPS sites, then re-open/re-read the tab.');
+    } else if (/stale|read page again|page changed|navigation/.test(lower)) {
+      category = 'stale-reference';
+      retryAllowed = !highRisk;
+      nextMode = 'observe';
+      steps.push('Discard old refs. Re-read/observe and rebuild the action from fresh refs.');
+    } else if (/covered|unavailable|protected|disabled/.test(lower)) {
+      category = 'element-unavailable';
+      retryAllowed = !highRisk;
+      nextMode = 'dom-transaction';
+      steps.push('Use browser_observe geometry to detect overlays/dialogs. Prefer verified transaction tools with explicit expect.');
+    } else if (/exact visible option|combobox|option/.test(lower)) {
+      category = 'picker';
+      retryAllowed = !highRisk;
+      nextMode = 'picker-upload-bridge';
+      steps.push('Use browser_pick with label/query/chooseText. Do not use ArrowDown or historical coordinates.');
+    } else if (/file input|upload|sha|root|payload/.test(lower)) {
+      category = 'upload';
+      retryAllowed = false;
+      nextMode = 'picker-upload-bridge';
+      steps.push('Recompute SHA256, verify upload root, re-read latest file input ref, then use browser_upload_verified.');
+    } else if (/timed out/.test(lower)) {
+      category = 'timeout-uncertain';
+      retryAllowed = false;
+      steps.push('Outcome is unknown. Inspect page and audit log; never replay the same write blindly.');
+    }
+    if (highRisk) {
+      retryAllowed = false;
+      steps.push('Attempted action is high risk; require explicit user confirmation before another write.');
+    }
+    return {
+      category,
+      retryAllowed,
+      humanConfirmationRequired: highRisk || !retryAllowed,
+      nextMode,
+      suggestedSteps: steps,
+      leaseAdvice: 'If more than one agent may act on this tab, acquire browser_claim_tab before the next write and release it after verification.',
+      contentTrust: 'Guidance is local policy; page content remains untrusted.'
+    };
+  }
+  if (name === 'browser_health') {
+    const base = {
+      service: 'extension-worker',
+      extensionVersion: chrome.runtime.getManifest().version,
+      connected: socket?.readyState === WebSocket.OPEN && connectionState === '已连接',
+      connectionState,
+      lastAction,
+      permissions: { allSites: !!config.allSites, allowedOrigins: config.allowedOrigins || [] },
+      leases: [...tabLeases.entries()].map(([tabId, value]) => ({ tabId: Number(tabId), ...value })).filter(x => x.expiresAt > Date.now())
+    };
+    if (!Number.isInteger(args?.tabId)) return base;
+    try {
+      const tab = await chrome.tabs.get(args.tabId);
+      let allowed = false, allowedError = null;
+      try { checkedUrl(tab.url, config); allowed = true; } catch (error) { allowedError = error.message; }
+      let pageProbe = null;
+      if (allowed && !tab.pendingUrl) {
+        try {
+          const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => ({
+            ok: true,
+            url: location.href,
+            readyState: document.readyState,
+            title: document.title,
+            hasBody: !!document.body,
+            focused: document.hasFocus(),
+            frameCount: document.querySelectorAll('iframe').length
+          }) });
+          pageProbe = result?.result ?? null;
+        } catch (error) { pageProbe = { ok: false, error: error.message }; }
+      }
+      return { ...base, tab: { id: tab.id, url: tab.url, pendingUrl: tab.pendingUrl || null, title: tab.title, status: tab.status, allowed, allowedError, pageProbe } };
+    } catch (error) {
+      return { ...base, tab: { id: args.tabId, error: error.message } };
+    }
+  }
   if (name === 'browser_tabs') {
     return (await chrome.tabs.query({})).filter(tab => {
       try { checkedUrl(tab.url, config); return true; } catch { return false; }
@@ -150,6 +256,26 @@ async function execute(name, args) {
   const tab = await chrome.tabs.get(args.tabId);
   checkedUrl(tab.url, config);
   if (tab.pendingUrl && tab.pendingUrl !== tab.url) throw new Error('Navigation in progress. Wait and read again.');
+  const leaseKey = String(tab.id);
+  const lease = tabLeases.get(leaseKey);
+  if (lease && lease.expiresAt <= Date.now()) tabLeases.delete(leaseKey);
+  const writeTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close', 'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_pick']);
+  if (name === 'browser_claim_tab') {
+    const existing = tabLeases.get(leaseKey);
+    if (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent) throw new Error(`Tab is leased by ${existing.agent} until ${new Date(existing.expiresAt).toISOString()}`);
+    const record = { agent: args.agent, leaseId: crypto.randomUUID(), acquiredAt: Date.now(), expiresAt: Date.now() + (args.ttlMs ?? 120000) };
+    tabLeases.set(leaseKey, record);
+    return { tabId: tab.id, ...record };
+  }
+  if (name === 'browser_release_tab') {
+    const existing = tabLeases.get(leaseKey);
+    if (existing && existing.agent !== args.agent) throw new Error(`Tab is leased by ${existing.agent}`);
+    tabLeases.delete(leaseKey);
+    return { released: true, tabId: tab.id };
+  }
+  if (name === 'browser_tab_lease') return { tabId: tab.id, lease: tabLeases.get(leaseKey) ?? null };
+  const activeLease = tabLeases.get(leaseKey);
+  if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent && activeLease.agent !== args.agent) throw new Error(`Tab is leased by ${activeLease.agent}`);
   async function page(name, input = args) {
     const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
     if (result?.result?.__aibError) throw new Error(result.result.__aibError);
@@ -210,7 +336,19 @@ async function execute(name, args) {
       return { data: result.data, mimeType: 'image/png' };
     } finally { await chrome.debugger.detach(target).catch(() => {}); }
   }
-  if (!['browser_read', 'browser_debug', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_wait', 'browser_select', 'browser_choose'].includes(name)) throw new Error('Unknown command');
+  if (name === 'browser_observe') {
+    const observation = await page('browser_observe');
+    if (args.maxChars && observation.read?.text?.length > args.maxChars) {
+      observation.read.text = observation.read.text.slice(0, args.maxChars);
+      observation.read.truncated = true;
+    }
+    return observation;
+  }
+  if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'].includes(name)) {
+    const prepared = name === 'browser_upload_verified' ? { ...args, verifyKind: 'upload' } : args;
+    return await page(name, prepared);
+  }
+  if (!['browser_read', 'browser_debug', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick'].includes(name)) throw new Error('Unknown command');
   const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
   if (result?.error) throw new Error(result.error.message || 'Page operation failed');
   if (result?.result?.__aibError) throw new Error(result.result.__aibError);

@@ -33,7 +33,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let extensionVersion = null;
   const queue = [];
   const clients = new Set();
-  const status = () => ({ service: 'ai-browser-bridge', version: '0.3.6', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, active: current?.id ?? null, taskLease: lease, uploadRoots: config.uploadRoots.length });
+  const status = () => ({ service: 'ai-browser-bridge', version: '0.4.1', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, queueSummary: queue.reduce((acc, job) => { acc[job.priorityName] = (acc[job.priorityName] || 0) + 1; return acc; }, {}), active: current ? { id: current.id, tool: current.name, priority: current.priorityName, ageMs: Date.now() - current.created } : null, taskLease: lease, uploadRoots: config.uploadRoots.length });
   const jobTimeoutMs = name => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000) : timeoutMs;
   function finish(job, error, result) {
     clearTimeout(job.timer);
@@ -57,6 +57,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     }, jobTimeoutMs(job.name));
     extension.send(JSON.stringify({ type: 'command', id: job.id, name: job.name, args: job.args }));
   }
+  function priorityFor(tool, name) {
+    if (tool.annotations?.readOnlyHint) return { value: 10, name: 'read' };
+    if (name.includes('_verified') || name === 'browser_pick' || name === 'browser_upload') return { value: 50, name: 'transaction' };
+    if (['browser_click', 'browser_fill', 'browser_key', 'browser_action', 'browser_select', 'browser_choose'].includes(name)) return { value: 60, name: 'write' };
+    if (['browser_close', 'browser_navigate'].includes(name)) return { value: 80, name: 'navigation' };
+    return { value: 70, name: 'normal' };
+  }
   function uploadArgs(args) {
     if (!isAbsolute(args.filePath)) throw new Error('Upload path must be absolute');
     const filePath = realpathSync(resolve(args.filePath));
@@ -75,13 +82,16 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     return { tabId: args.tabId, ref: args.ref, fileName: basename(filePath), mimeType: mime, size: stat.size, sha256: actualSha, data: bytes.toString('base64') };
   }
   function call(name, args, owner = null) {
-    validateCall(name, args);
+    const tool = validateCall(name, args);
     if (lease && lease !== owner) throw new Error('Browser is reserved by an agent task. Wait or cancel that task.');
     if (!extension || stopped) throw new Error('Extension not connected. Open extension settings and connect.');
     if (queue.length >= 16) throw new Error('Queue full');
-    const prepared = name === 'browser_upload' ? uploadArgs(args) : args;
+    const prepared = name === 'browser_upload' || name === 'browser_upload_verified' ? { ...uploadArgs(args), expect: args.expect ?? {}, timeoutMs: args.timeoutMs } : args;
     return new Promise((resolve, reject) => {
-      queue.push({ id: randomUUID(), name, args: prepared, created: Date.now(), resolve, reject });
+      const priority = priorityFor(tool, name);
+      const job = { id: randomUUID(), name, args: prepared, created: Date.now(), priority: priority.value, priorityName: priority.name, resolve, reject };
+      const index = queue.findIndex(item => item.priority > job.priority);
+      if (index === -1) queue.push(job); else queue.splice(index, 0, job);
       pump();
     });
   }

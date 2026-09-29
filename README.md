@@ -2,11 +2,11 @@
 
 **默认用途：让已有 AI Agent 直接操作浏览器，无需配置模型。** 终端 Agent 可立即使用 [接入说明](AGENT-QUICKSTART.md) 和 agent.ps1；MCP 客户端使用本机生成的工具配置。插件内模型任务页只是可选功能。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。扩展版本 **0.3.6 / 本地原型**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。扩展版本 **0.4.1 / 本地原型**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 ### 当前版本升级指南
 
-0.3.6 加固 Chrome 本地裁判 JSON 结构、解析告警和高风险动作兜底；0.3.5 为本地裁判设置较长专用超时；0.3.4 新增可选 Chrome 内置 AI 状态检查与本地裁判 `browser_local_judge`。请阅读 [0.3.0 使用与升级说明](docs/UPDATE-0.3.0.md)。
+0.4.1 新增多桥接模式说明 `browser_bridge_modes`、失败后恢复引导 `browser_failure_help` 和服务端优先级队列；0.4.0 新增分层健康诊断 `browser_health`、统一观察 `browser_observe`、智能选择器 `browser_pick`、验证型点击/填写/上传和 tab 写租约；0.3.6 加固 Chrome 本地裁判 JSON 结构、解析告警和高风险动作兜底。请阅读 [0.3.0 使用与升级说明](docs/UPDATE-0.3.0.md)。
 
 ### 历史：从 0.1.0 更新到 0.1.1
 

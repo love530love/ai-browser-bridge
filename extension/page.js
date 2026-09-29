@@ -10,6 +10,104 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   const fileInput = el => el instanceof HTMLInputElement && el.type === 'file';
   const label = el => (el.getAttribute('aria-label') || el.labels?.[0]?.innerText || el.getAttribute('placeholder') || el.innerText || el.getAttribute('title') || '').trim().slice(0, 180);
   const fingerprint = el => JSON.stringify([el.tagName, el.getAttribute('type'), label(el), el.getAttribute('href'), el.getAttribute('formaction')]);
+  const clean = value => (value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  const elementBox = el => {
+    const box = el.getBoundingClientRect();
+    const x = box.left + box.width / 2, y = box.top + box.height / 2;
+    const hit = box.width > 0 && box.height > 0 ? document.elementFromPoint(Math.min(Math.max(x, 0), innerWidth - 1), Math.min(Math.max(y, 0), innerHeight - 1)) : null;
+    return { x, y, left: box.left, top: box.top, width: box.width, height: box.height, covered: !!hit && hit !== el && !el.contains(hit), hitTag: hit?.tagName?.toLowerCase() || null };
+  };
+  const pageText = () => document.body?.innerText || '';
+  const verify = async (expect = {}, timeoutMs = 3000, context = {}) => {
+    const started = Date.now();
+    const checks = {};
+    const run = () => {
+      if (typeof expect.textAppears === 'string') checks.textAppears = pageText().includes(expect.textAppears);
+      if (typeof expect.urlContains === 'string') checks.urlContains = location.href.includes(expect.urlContains);
+      if (typeof expect.elementLabelAppears === 'string') {
+        const needle = expect.elementLabelAppears.replace(/\s+/g, ' ').trim();
+        checks.elementLabelAppears = [...document.querySelectorAll('a[href],button,input,textarea,select,[role=button],[role=option],[role=combobox],[contenteditable=true]')]
+          .some(el => visible(el) && label(el).replace(/\s+/g, ' ').trim().includes(needle));
+      }
+      if (typeof expect.valueMatches === 'string') checks.valueMatches = context.value === expect.valueMatches;
+      if (typeof expect.fileNameAppears === 'string') checks.fileNameAppears = pageText().includes(expect.fileNameAppears) || context.fileName === expect.fileNameAppears;
+      return Object.values(checks).length > 0 && Object.values(checks).every(Boolean);
+    };
+    if (run()) return { status: 'success', checks, elapsedMs: Date.now() - started };
+    return await new Promise(resolve => {
+      const finish = () => {
+        const ok = run();
+        observer.disconnect();
+        clearTimeout(timer);
+        resolve({ status: ok ? 'success' : 'failed', checks: { ...checks }, elapsedMs: Date.now() - started });
+      };
+      const observer = new MutationObserver(() => { if (run()) finish(); });
+      const timer = setTimeout(finish, timeoutMs);
+      observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true });
+    });
+  };
+  const optionSelector = '[role=option],[role=menuitem],.el-select-dropdown__item,.ant-select-item-option,.ant-select-item,li';
+  const findExactOption = exact => [...document.querySelectorAll(optionSelector)]
+    .find(option => visible(option) && option.textContent.replace(/\s+/g, ' ').trim() === exact && option.getAttribute('aria-disabled') !== 'true' && !option.matches('[disabled],.is-disabled'));
+  const chooseOption = async (control, exact, timeoutMs = 5000, query = '') => {
+    let option = findExactOption(exact);
+    if (!option) {
+      control.scrollIntoView({ block: 'center', inline: 'nearest' });
+      control.focus();
+      control.click();
+      if (query && ('value' in control)) {
+        const proto = control instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        if (control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) {
+          Object.getOwnPropertyDescriptor(proto, 'value').set.call(control, query);
+          control.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: query }));
+        }
+      }
+      option = findExactOption(exact);
+    }
+    if (!option) option = await new Promise(resolve => {
+      const finish = value => { observer.disconnect(); clearTimeout(timer); resolve(value); };
+      const observer = new MutationObserver(() => { const found = findExactOption(exact); if (found) finish(found); });
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+      const found = findExactOption(exact); if (found) finish(found);
+    });
+    if (!option) throw new Error('Exact visible option not found');
+    option.scrollIntoView({ block: 'center', inline: 'nearest' });
+    option.click();
+    await new Promise(resolve => setTimeout(resolve, 80));
+    return { chosen: exact, value: typeof control.value === 'string' ? control.value : clean(control.textContent), ariaExpanded: control.getAttribute('aria-expanded') };
+  };
+  const pickControl = async () => {
+    const exact = args.chooseText.replace(/\s+/g, ' ').trim();
+    const wantedLabel = (args.label || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const controls = [...document.querySelectorAll('select,[role=combobox],input,.el-select,.ant-select,[aria-haspopup=listbox]')]
+      .filter(el => visible(el) && !sensitive(el));
+    let control = null;
+    if (wantedLabel) {
+      control = controls.find(el => {
+        const own = `${label(el)} ${el.textContent || ''}`.replace(/\s+/g, ' ').trim().toLowerCase();
+        if (own.includes(wantedLabel)) return true;
+        const id = el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (id && id.textContent.toLowerCase().includes(wantedLabel)) return true;
+        const parent = el.closest('label,.form-item,.el-form-item,.ant-form-item,div');
+        return parent?.textContent?.replace(/\s+/g, ' ').trim().toLowerCase().includes(wantedLabel);
+      });
+    }
+    control ||= controls.find(el => el instanceof HTMLSelectElement && [...el.options].some(o => o.label.replace(/\s+/g, ' ').trim() === exact || o.textContent.replace(/\s+/g, ' ').trim() === exact));
+    control ||= controls[0];
+    if (!control) throw new Error('No picker control found');
+    if (control instanceof HTMLSelectElement) {
+      const option = [...control.options].find(o => (o.label.replace(/\s+/g, ' ').trim() === exact || o.textContent.replace(/\s+/g, ' ').trim() === exact || o.value === exact) && !o.disabled);
+      if (!option) throw new Error('Native select option not found');
+      control.value = option.value;
+      control.dispatchEvent(new Event('input', { bubbles: true }));
+      control.dispatchEvent(new Event('change', { bubbles: true }));
+      return { chosen: exact, value: control.value, control: { tag: control.tagName.toLowerCase(), label: label(control) } };
+    }
+    const input = control.matches('input,[role=combobox]') ? control : control.querySelector('input,[role=combobox]') || control;
+    const result = await chooseOption(input, exact, args.timeoutMs ?? 5000, args.query || exact);
+    return { ...result, control: { tag: control.tagName.toLowerCase(), label: label(control) } };
+  };
   if (name === 'browser_viewport') {
     const active = document.activeElement;
     return { width: innerWidth, height: innerHeight, url: location.href, editable: !!active && !sensitive(active) && !active.disabled && !active.readOnly && (active.isContentEditable || active.matches('textarea,input[type=text],input:not([type]),input[type=search],input[type=email],input[type=url],input[type=tel],input[type=number]')) };
@@ -54,8 +152,19 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     return { title: document.title, url: location.href, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: chunks.join('\n').slice(0, max), truncated: length >= max, elements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM', contentTrust: 'untrusted webpage data' };
   }
+  if (name === 'browser_observe') {
+    const read = await pageOperation('browser_read', { ...args, maxChars: args.maxChars ?? 16000 }, allowedOrigins, allSites);
+    const debug = await pageOperation('browser_debug', args, allowedOrigins, allSites);
+    const geometry = [];
+    const state = globalThis.__aiBrowserBridge;
+    for (const item of read.elements.slice(0, 100)) {
+      const entry = state?.refs.get(item.ref);
+      if (!entry?.el?.isConnected) continue;
+      geometry.push({ ref: item.ref, label: item.label, tag: item.tag, role: item.role, upload: !!item.upload, ...elementBox(entry.el) });
+    }
+    return { read, debug, geometry, observationTrust: 'untrusted webpage data plus extension geometry', scope: 'main-frame; light DOM' };
+  }
   if (name === 'browser_debug') {
-    const clean = value => (value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
     const describe = el => !el ? null : ({
       tag: el.tagName.toLowerCase(),
       role: el.getAttribute('role') || null,
@@ -70,7 +179,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const key = el.getAttribute('role') || el.tagName.toLowerCase();
       roleCounts[key] = (roleCounts[key] || 0) + 1;
     }
-    const visibleOptions = [...document.querySelectorAll('[role=option],[role=menuitem],.el-select-dropdown__item,.ant-select-item-option,li')]
+    const visibleOptions = [...document.querySelectorAll(optionSelector)]
       .filter(el => visible(el))
       .slice(0, 50)
       .map(el => ({ text: clean(el.textContent), disabled: el.getAttribute('aria-disabled') === 'true' || el.matches('[disabled],.is-disabled') }));
@@ -103,6 +212,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     window.scrollBy({ top: args.deltaY, behavior: 'instant' });
     return { scrollX: window.scrollX, scrollY: window.scrollY };
   }
+  if (name === 'browser_pick') return await pickControl();
   const state = globalThis.__aiBrowserBridge;
   const entry = state?.refs.get(args.ref);
   if (!entry || state.url !== location.href || !entry.el.isConnected || fingerprint(entry.el) !== entry.fingerprint) throw new Error('Stale element reference. Read page again.');
@@ -122,6 +232,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     el.dispatchEvent(new Event('change', { bubbles: true }));
     return { selected: el.files?.length === 1, fileName: el.files?.[0]?.name || '', size: el.files?.[0]?.size ?? 0, sha256: args.sha256, note: 'File selected in DOM; page acceptance and submission require separate observation.' };
   }
+  if (name === 'browser_upload_verified') {
+    const selected = await pageOperation('browser_upload', args, allowedOrigins, allSites);
+    const result = await verify(args.expect || {}, args.timeoutMs ?? 3000, { fileName: selected.fileName });
+    return { selected, verification: result, status: result.status };
+  }
   if (name === 'browser_select') {
     if (!(el instanceof HTMLSelectElement)) throw new Error('Element is not a native select');
     const option = [...el.options].find(o => o.value === args.value && !o.disabled && !o.closest('optgroup[disabled]'));
@@ -133,28 +248,8 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (el.getAttribute('role') !== 'combobox' && !(el instanceof HTMLInputElement)) throw new Error('Element is not a combobox');
     const exact = args.text.replace(/\s+/g, ' ').trim();
     if (!exact) throw new Error('Exact option text is required');
-    const findOption = () => [...document.querySelectorAll('[role=option],[role=menuitem],.el-select-dropdown__item,.ant-select-item-option,li')]
-      .find(option => visible(option) && option.textContent.replace(/\s+/g, ' ').trim() === exact && option.getAttribute('aria-disabled') !== 'true' && !option.matches('[disabled],.is-disabled'));
-    let option = findOption();
-    // Clicking an already-open combobox commonly toggles its popup closed
-    // (Element Plus and similar controls). Reuse a visible exact option first;
-    // only open the combobox when no matching option is currently visible.
-    if (!option) {
-      el.scrollIntoView({ block: 'center', inline: 'nearest' });
-      el.focus(); el.click();
-      option = findOption();
-    }
-    if (!option) option = await new Promise(resolve => {
-      const finish = value => { observer.disconnect(); clearTimeout(timer); resolve(value); };
-      const observer = new MutationObserver(() => { const found = findOption(); if (found) finish(found); });
-      const timer = setTimeout(() => finish(null), args.timeoutMs ?? 2500);
-      observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
-      const found = findOption(); if (found) finish(found);
-    });
-    if (!option) throw new Error('Exact visible option not found');
-    option.click();
-    await new Promise(resolve => setTimeout(resolve, 50));
-    return { chosen: exact, value: typeof el.value === 'string' ? el.value : '', ariaExpanded: el.getAttribute('aria-expanded'), note: 'Option clicked once; application acceptance still requires a fresh read.' };
+    const result = await chooseOption(el, exact, args.timeoutMs ?? 2500);
+    return { ...result, note: 'Option clicked once; application acceptance still requires a fresh read.' };
   }
   if (name === 'browser_resolve') {
     el.scrollIntoView({ block: 'center', inline: 'nearest' });
@@ -177,6 +272,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     el.click();
     return { clicked: true, note: 'Click dispatched; read page to verify outcome.' };
   }
+  if (name === 'browser_click_verified') {
+    const clicked = await pageOperation('browser_click', args, allowedOrigins, allSites);
+    const result = await verify(args.expect || {}, args.timeoutMs ?? 3000);
+    return { clicked, verification: result, status: result.status };
+  }
   if (name === 'browser_fill') {
     if (typeof args.text !== 'string' || args.text.length > 20000 || el.readOnly) throw new Error('Invalid text or readonly field');
     el.focus();
@@ -190,6 +290,12 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     el.dispatchEvent(new Event('change', { bubbles: true }));
     const observed = el.isContentEditable ? el.textContent : el.value;
     return { filled: true, characters: args.text.length, valueMatches: observed === args.text, note: 'DOM value checked immediately; application acceptance still requires observation.' };
+  }
+  if (name === 'browser_fill_verified') {
+    const filled = await pageOperation('browser_fill', args, allowedOrigins, allSites);
+    const current = el.isContentEditable ? el.textContent : el.value;
+    const result = await verify(args.expect || { valueMatches: args.text }, args.timeoutMs ?? 3000, { value: current });
+    return { filled, verification: result, status: result.status };
   }
   throw new Error('Unsupported page operation');
   } catch (error) {
