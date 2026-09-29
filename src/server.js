@@ -33,7 +33,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let extensionVersion = null;
   const queue = [];
   const clients = new Set();
-  const status = () => ({ service: 'ai-browser-bridge', version: '0.3.4', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, active: current?.id ?? null, taskLease: lease, uploadRoots: config.uploadRoots.length });
+  const status = () => ({ service: 'ai-browser-bridge', version: '0.3.5', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, active: current?.id ?? null, taskLease: lease, uploadRoots: config.uploadRoots.length });
+  const jobTimeoutMs = name => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000) : timeoutMs;
   function finish(job, error, result) {
     clearTimeout(job.timer);
     audit({ time: new Date().toISOString(), id: job.id, tool: job.name, tabId: job.args.tabId ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : 'ok', errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
@@ -51,9 +52,9 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     const job = current;
     job.timer = setTimeout(() => {
       const socket = extension;
-      drop('Execution timed out; outcome may be unknown. Inspect page before retrying.');
+      drop(`${job.name} timed out after ${jobTimeoutMs(job.name)}ms; outcome may be unknown. Inspect page before retrying.`);
       socket?.close(4000, 'Task timeout');
-    }, timeoutMs);
+    }, jobTimeoutMs(job.name));
     extension.send(JSON.stringify({ type: 'command', id: job.id, name: job.name, args: job.args }));
   }
   function uploadArgs(args) {

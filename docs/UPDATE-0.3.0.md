@@ -79,3 +79,10 @@ Element Plus 弹层被反向关闭，随后报 `Exact visible option not found`�
 该能力是 advisory guardrail，不是执行器、不是用户授权、也不是最终事实裁判。若 API
 不可用、模型未下载、会话创建失败或返回非 JSON，工具会返回 `verdict: "unavailable"`，
 调用方必须进入普通确认或保守路径。
+
+## 0.3.5：本地裁判冷启动超时修复
+
+真实日常 Chrome 验收显示 `LanguageModel.availability()` 可返回 `available`，但首次
+`browser_local_judge` 会话/推理可能超过普通网页操作的 20 秒超时，导致连接被保护性
+断开。0.3.5 为 `browser_local_judge` 设置 120 秒专用超时，并在超时报错中包含工具名。
+普通网页读写仍沿用较短超时，避免未知写操作长时间悬挂。
