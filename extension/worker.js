@@ -3,12 +3,14 @@ import { withDebugger, pointer, key } from './cdp.js';
 let socket = null;
 let keepalive = null;
 let connectDeadline = null;
+let reconnectTimer = null;
 let connectionState = '未连接';
 let lastAction = '';
 let connectionEpoch = 0;
 const uiRequests = new Map();
 const tabLeases = new Map();
 const defaults = { port: 19387, token: '', allowedOrigins: [], allSites: true, enabled: false };
+const reconnectAlarm = 'ai-browser-bridge-reconnect';
 const settings = () => chrome.storage.local.get(defaults);
 function builtInAiApi() {
   const lm = globalThis.LanguageModel;
@@ -116,10 +118,25 @@ function notifyStatus() {
   chrome.runtime.sendMessage({ type: 'connection-status', connectionState, lastAction }).catch(() => {});
 }
 chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
-function disconnect(message = '已暂停') {
+function validConnectionConfig(config) {
+  return config.enabled && /^[a-f0-9]{64}$/.test(config.token) && Number.isInteger(config.port) && config.port >= 1024 && config.port <= 65535;
+}
+function clearReconnect() {
+  clearTimeout(reconnectTimer); reconnectTimer = null;
+  chrome.alarms.clear(reconnectAlarm).catch(() => {});
+}
+async function scheduleReconnect() {
+  const config = await settings();
+  if (!validConnectionConfig(config)) return;
+  clearReconnect();
+  reconnectTimer = setTimeout(() => connect({ automatic: true }), 5000);
+  chrome.alarms.create(reconnectAlarm, { delayInMinutes: 0.1 });
+}
+function disconnect(message = '已暂停', { automaticReconnect = false } = {}) {
   connectionEpoch++;
   clearInterval(keepalive); keepalive = null;
   clearTimeout(connectDeadline); connectDeadline = null;
+  clearReconnect();
   const previous = socket; socket = null;
   if (previous) previous.close();
   for (const request of uiRequests.values()) { clearTimeout(request.timer); request.reject(new Error('连接已断开')); }
@@ -127,6 +144,7 @@ function disconnect(message = '已暂停') {
   connectionState = message;
   notifyStatus();
   chrome.action.setBadgeText({ text: '' });
+  if (automaticReconnect) scheduleReconnect();
 }
 function checkedUrl(url, config) {
   const u = new URL(url);
@@ -150,7 +168,7 @@ async function execute(name, args) {
         { name: 'coordinate-adapter', tools: ['browser_action'], useFor: 'Open-AutoGLM style normalized coordinates as last resort with stale-URL guard', retrySafe: false }
       ],
       fallbackOrder: ['health', 'observe', 'dom-transaction', 'picker-upload-bridge', 'cdp-input', 'coordinate-adapter', 'human-confirmation'],
-      concurrency: { writeLeaseTools: ['browser_claim_tab', 'browser_release_tab', 'browser_tab_lease'], rule: 'one write owner per tab; read-only tools may still observe' },
+      concurrency: { writeLeaseTools: ['browser_claim_tab', 'browser_release_tab', 'browser_tab_lease'], rule: 'one write owner per tab; read-only tools may still observe; writes must pass the matching agent while a lease is active' },
       retryPolicy: 'Never replay uncertain writes automatically. Use browser_failure_help, then re-observe and choose the next safer mode.'
     };
   }
@@ -204,7 +222,7 @@ async function execute(name, args) {
       humanConfirmationRequired: highRisk || !retryAllowed,
       nextMode,
       suggestedSteps: steps,
-      leaseAdvice: 'If more than one agent may act on this tab, acquire browser_claim_tab before the next write and release it after verification.',
+      leaseAdvice: 'If more than one agent may act on this tab, acquire browser_claim_tab before the next write. While leased, every write must pass the matching agent; release it after verification.',
       contentTrust: 'Guidance is local policy; page content remains untrusted.'
     };
   }
@@ -259,7 +277,7 @@ async function execute(name, args) {
   const leaseKey = String(tab.id);
   const lease = tabLeases.get(leaseKey);
   if (lease && lease.expiresAt <= Date.now()) tabLeases.delete(leaseKey);
-  const writeTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close', 'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_pick']);
+  const writeTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close', 'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_pick', 'browser_history']);
   if (name === 'browser_claim_tab') {
     const existing = tabLeases.get(leaseKey);
     if (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent) throw new Error(`Tab is leased by ${existing.agent} until ${new Date(existing.expiresAt).toISOString()}`);
@@ -275,7 +293,7 @@ async function execute(name, args) {
   }
   if (name === 'browser_tab_lease') return { tabId: tab.id, lease: tabLeases.get(leaseKey) ?? null };
   const activeLease = tabLeases.get(leaseKey);
-  if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent && activeLease.agent !== args.agent) throw new Error(`Tab is leased by ${activeLease.agent}`);
+  if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent !== activeLease.agent) throw new Error(`Tab is leased by ${activeLease.agent}; pass the matching agent or release the lease before writing.`);
   async function page(name, input = args) {
     const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
     if (result?.result?.__aibError) throw new Error(result.result.__aibError);
@@ -356,6 +374,7 @@ async function execute(name, args) {
   return result.result;
 }
 async function connect() {
+  clearReconnect();
   disconnect('连接中');
   const epoch = connectionEpoch;
   const config = await settings();
@@ -364,7 +383,7 @@ async function connect() {
   if (!/^[a-f0-9]{64}$/.test(config.token) || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535) { connectionState = '请先配对'; notifyStatus(); return; }
   const ws = new WebSocket(`ws://127.0.0.1:${config.port}/extension`);
   socket = ws;
-  connectDeadline = setTimeout(() => { if (socket === ws) disconnect('连接超时，请检查本机服务后重新连接'); }, 10000);
+  connectDeadline = setTimeout(() => { if (socket === ws) disconnect('连接超时，后台自动重连中', { automaticReconnect: true }); }, 10000);
   ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token: config.token, version: chrome.runtime.getManifest().version }));
   ws.onmessage = async event => {
     if (ws !== socket) return;
@@ -394,11 +413,14 @@ async function connect() {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, error: e.message }));
         }
       }
-    } catch { disconnect('协议错误，请重新连接'); }
+    } catch { disconnect('协议错误，后台自动重连中', { automaticReconnect: true }); }
   };
   ws.onerror = () => { if (socket === ws) { connectionState = '本机服务不可用'; notifyStatus(); } };
-  ws.onclose = () => { if (socket === ws) disconnect('连接已断开，请重新连接'); };
+  ws.onclose = () => { if (socket === ws) disconnect('连接已断开，后台自动重连中', { automaticReconnect: true }); };
 }
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === reconnectAlarm) connect({ automatic: true });
+});
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // Only our own extension UI may configure or reconnect. No content-script API.
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(''))) return;
@@ -421,5 +443,6 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   return true;
 });
 chrome.runtime.onStartup.addListener(() => connect());
-// A restarted worker reconnects once. A failed connection requires a user click.
+chrome.runtime.onInstalled.addListener(() => connect());
+// With a saved pairing key, the extension reconnects in the background.
 connect();

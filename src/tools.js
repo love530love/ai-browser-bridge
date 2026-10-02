@@ -2,6 +2,7 @@ const tabId = { type: 'integer', minimum: 1 };
 const text = (maxLength = 20000) => ({ type: 'string', minLength: 1, maxLength });
 const ref = text(100);
 const expect = { type: 'object' };
+const agent = text(120);
 const schema = (properties, required = Object.keys(properties)) => ({
   type: 'object', properties, required, additionalProperties: false
 });
@@ -31,39 +32,39 @@ export const TOOLS = [
     proposedAction: text(4000),
     riskLevel: { type: 'string', enum: ['low', 'medium', 'high'] }
   }, ['goal', 'observation', 'proposedAction'], true),
-  tool('browser_click', 'Click a current element ref from browser_read. May submit or publish; caller must have user authorization. Never retry an uncertain result automatically.', { tabId, ref }),
-  tool('browser_fill', 'Replace text in a current input, textarea or contenteditable ref. Does not press Enter. Password/file/hidden inputs are refused.', { tabId, ref, text: { type: 'string', maxLength: 20000 } }),
+  tool('browser_click', 'Click a current element ref from browser_read. May submit or publish; caller must have user authorization. Never retry an uncertain result automatically. If the tab is leased, pass the matching agent.', { tabId, ref, agent }, ['tabId', 'ref']),
+  tool('browser_fill', 'Replace text in a current input, textarea or contenteditable ref. Does not press Enter. Password/file/hidden inputs are refused. If the tab is leased, pass the matching agent.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, agent }, ['tabId', 'ref', 'text']),
   tool('browser_upload', 'Attach one local file to a current file-input ref without opening the OS dialog. The file must be under a locally allowlisted upload root and match the caller-provided SHA256. This selects the file only; it never clicks submit.', {
-    tabId, ref, filePath: text(32767), sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }
-  }),
-  tool('browser_click_verified', 'Click a current element ref once, then verify a bounded expected outcome such as textAppears, urlContains, or elementLabelAppears. Returns success/uncertain/failed; never retries.', { tabId, ref, expect, timeoutMs: { type: 'integer', minimum: 100, maximum: 10000 } }, ['tabId', 'ref', 'expect']),
-  tool('browser_fill_verified', 'Fill a current text ref, then verify valueMatches and optional textAppears. Returns success/uncertain/failed; never presses Enter.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, expect, timeoutMs: { type: 'integer', minimum: 100, maximum: 10000 } }, ['tabId', 'ref', 'text', 'expect']),
+    tabId, ref, filePath: text(32767), sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, agent
+  }, ['tabId', 'ref', 'filePath', 'sha256']),
+  tool('browser_click_verified', 'Click a current element ref once, then verify a bounded expected outcome such as textAppears, urlContains, or elementLabelAppears. Returns success/uncertain/failed; never retries. If the tab is leased, pass the matching agent.', { tabId, ref, expect, timeoutMs: { type: 'integer', minimum: 100, maximum: 10000 }, agent }, ['tabId', 'ref', 'expect']),
+  tool('browser_fill_verified', 'Fill a current text ref, then verify valueMatches and optional textAppears. Returns success/uncertain/failed; never presses Enter. If the tab is leased, pass the matching agent.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, expect, timeoutMs: { type: 'integer', minimum: 100, maximum: 10000 }, agent }, ['tabId', 'ref', 'text', 'expect']),
   tool('browser_upload_verified', 'Attach one allowlisted local file to a current file-input ref, then verify selected filename and optional page text. Never clicks submit.', {
-    tabId, ref, filePath: text(32767), sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, expect, timeoutMs: { type: 'integer', minimum: 100, maximum: 10000 }
+    tabId, ref, filePath: text(32767), sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, expect, timeoutMs: { type: 'integer', minimum: 100, maximum: 10000 }, agent
   }, ['tabId', 'ref', 'filePath', 'sha256', 'expect']),
-  tool('browser_scroll', 'Scroll main frame by a bounded pixel offset.', { tabId, deltaY: { type: 'integer', minimum: -5000, maximum: 5000 } }),
-  tool('browser_navigate', 'Navigate an allowed tab to another user-allowed HTTP(S) URL.', { tabId, url: text(8000) }),
-  tool('browser_close', 'Close an allowed tab. Unsaved edits may be lost.', { tabId }),
+  tool('browser_scroll', 'Scroll main frame by a bounded pixel offset. If the tab is leased, pass the matching agent.', { tabId, deltaY: { type: 'integer', minimum: -5000, maximum: 5000 }, agent }, ['tabId', 'deltaY']),
+  tool('browser_navigate', 'Navigate an allowed tab to another user-allowed HTTP(S) URL. If the tab is leased, pass the matching agent.', { tabId, url: text(8000), agent }, ['tabId', 'url']),
+  tool('browser_close', 'Close an allowed tab. Unsaved edits may be lost. If the tab is leased, pass the matching agent.', { tabId, agent }, ['tabId']),
   tool('browser_screenshot', 'Capture an allowed tab using a temporary debugger attachment. Fails if another debugger owns it. Pixels may contain sensitive page content and embedded frames.', { tabId }, ['tabId'], true),
-  tool('browser_key', 'Send a browser-level key or chord, e.g. Enter, Tab, Ctrl+A, Shift+Enter. Optional ref focuses a current element first.', { tabId, key: text(80), ref }, ['tabId', 'key']),
-  tool('browser_hover', 'Move the mouse to a current element reference.', { tabId, ref }),
-  tool('browser_select', 'Select an option by exact value in a native HTML select element.', { tabId, ref, value: { type: 'string', maxLength: 1000 } }),
-  tool('browser_choose', 'Choose a custom combobox/listbox option by exact visible text. Uses a current combobox ref, waits for a matching visible option via DOM events, clicks it once, and returns the observed input value. Never guesses with coordinates or ArrowDown.', { tabId, ref, text: text(1000), timeoutMs: { type: 'integer', minimum: 100, maximum: 5000 } }, ['tabId', 'ref', 'text']),
+  tool('browser_key', 'Send a browser-level key or chord, e.g. Enter, Tab, Ctrl+A, Shift+Enter. Optional ref focuses a current element first. If the tab is leased, pass the matching agent.', { tabId, key: text(80), ref, agent }, ['tabId', 'key']),
+  tool('browser_hover', 'Move the mouse to a current element reference. If the tab is leased, pass the matching agent.', { tabId, ref, agent }, ['tabId', 'ref']),
+  tool('browser_select', 'Select an option by exact value in a native HTML select element. If the tab is leased, pass the matching agent.', { tabId, ref, value: { type: 'string', maxLength: 1000 }, agent }, ['tabId', 'ref', 'value']),
+  tool('browser_choose', 'Choose a custom combobox/listbox option by exact visible text. Uses a current combobox ref, waits for a matching visible option via DOM events, clicks it once, and returns the observed input value. Never guesses with coordinates or ArrowDown. If the tab is leased, pass the matching agent.', { tabId, ref, text: text(1000), timeoutMs: { type: 'integer', minimum: 100, maximum: 5000 }, agent }, ['tabId', 'ref', 'text']),
   tool('browser_pick', 'Find a native select, ARIA combobox, Element Plus/Ant/react-style picker by label/query and choose exact visible text. Handles portal popups and validates the selected text/value by observation.', {
-    tabId, label: text(1000), query: { type: 'string', maxLength: 1000 }, chooseText: text(1000), timeoutMs: { type: 'integer', minimum: 100, maximum: 10000 }
+    tabId, label: text(1000), query: { type: 'string', maxLength: 1000 }, chooseText: text(1000), timeoutMs: { type: 'integer', minimum: 100, maximum: 10000 }, agent
   }, ['tabId', 'chooseText']),
-  tool('browser_claim_tab', 'Advisory multi-agent write lease for a tab. Use before coordinated write actions. Read/debug/observe remain allowed.', {
+  tool('browser_claim_tab', 'Enforced multi-agent write lease for a tab. Use before coordinated write actions. Reads remain allowed, but writes require the matching agent until release or expiry.', {
     tabId, agent: text(120), ttlMs: { type: 'integer', minimum: 1000, maximum: 600000 }
   }, ['tabId', 'agent']),
-  tool('browser_release_tab', 'Release an advisory tab lease held by an agent.', { tabId, agent: text(120) }, ['tabId', 'agent']),
-  tool('browser_tab_lease', 'Read advisory tab lease state.', { tabId }, ['tabId'], true),
-  tool('browser_history', 'Back, forward, reload or activate a tab.', { tabId, action: { type: 'string', enum: ['back', 'forward', 'reload', 'activate'] } }),
+  tool('browser_release_tab', 'Release an enforced tab write lease held by an agent.', { tabId, agent: text(120) }, ['tabId', 'agent']),
+  tool('browser_tab_lease', 'Read enforced tab write lease state.', { tabId }, ['tabId'], true),
+  tool('browser_history', 'Back, forward, reload or activate a tab. If the tab is leased, pass the matching agent.', { tabId, action: { type: 'string', enum: ['back', 'forward', 'reload', 'activate'] }, agent }, ['tabId', 'action']),
   tool('browser_wait', 'Wait for visible main-frame text using DOM events, up to 10 seconds. No model polling.', { tabId, text: text(1000), timeoutMs: { type: 'integer', minimum: 100, maximum: 10000 } }, ['tabId', 'text'], true),
   tool('browser_action', 'Open-AutoGLM-style browser actions. Coordinates are normalized 0..1000 in current viewport. Supply expectedUrl from latest observation. Supported subset only; no phone app launch or OS commands. Observe after every action.', {
     tabId, action: { type: 'string', enum: ['Tap', 'Double Tap', 'Long Press', 'Hover', 'Swipe', 'Type', 'Key', 'Back', 'Wait'] },
     expectedUrl: text(8000), x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 },
     endX: { type: 'number', minimum: 0, maximum: 1000 }, endY: { type: 'number', minimum: 0, maximum: 1000 },
-    text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }
+    text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }, agent
   }, ['tabId', 'action', 'expectedUrl'])
 ];
 

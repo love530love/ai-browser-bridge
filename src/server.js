@@ -33,7 +33,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let extensionVersion = null;
   const queue = [];
   const clients = new Set();
-  const status = () => ({ service: 'ai-browser-bridge', version: '0.4.1', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, queueSummary: queue.reduce((acc, job) => { acc[job.priorityName] = (acc[job.priorityName] || 0) + 1; return acc; }, {}), active: current ? { id: current.id, tool: current.name, priority: current.priorityName, ageMs: Date.now() - current.created } : null, taskLease: lease, uploadRoots: config.uploadRoots.length });
+  const status = () => ({ service: 'ai-browser-bridge', version: '0.4.2', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, queueSummary: queue.reduce((acc, job) => { acc[job.priorityName] = (acc[job.priorityName] || 0) + 1; return acc; }, {}), active: current ? { id: current.id, tool: current.name, priority: current.priorityName, ageMs: Date.now() - current.created } : null, taskLease: lease, uploadRoots: config.uploadRoots.length });
   const jobTimeoutMs = name => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000) : timeoutMs;
   function finish(job, error, result) {
     clearTimeout(job.timer);
@@ -84,7 +84,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   function call(name, args, owner = null) {
     const tool = validateCall(name, args);
     if (lease && lease !== owner) throw new Error('Browser is reserved by an agent task. Wait or cancel that task.');
-    if (!extension || stopped) throw new Error('Extension not connected. Open extension settings and connect.');
+    if (!extension || stopped) throw new Error('Extension not connected. Ask the user to reconnect once; do not open extension settings automatically.');
     if (queue.length >= 16) throw new Error('Queue full');
     const prepared = name === 'browser_upload' || name === 'browser_upload_verified' ? { ...uploadArgs(args), expect: args.expect ?? {}, timeoutMs: args.timeoutMs } : args;
     return new Promise((resolve, reject) => {

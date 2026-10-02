@@ -76,7 +76,7 @@ try {
   mark('real extension UI pairing and WebSocket handshake');
   client = new Client({ name: 'e2e-ai-client', version: '1' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
-  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.1'); mark('MCP tool discovery and extension version handshake');
+  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.2'); mark('MCP tool discovery and extension version handshake');
   async function call(name, args = {}) {
     const result = await client.callTool({ name, arguments: args });
     if (result.isError) throw new Error(result.content[0].text);
@@ -84,11 +84,34 @@ try {
     return JSON.parse(result.content[0].text);
   }
   async function waitBridgeConnected() {
-    for (let i = 0; i < 50; i++) {
-      if (bridge.status().connected) return;
+    let stable = 0;
+    for (let i = 0; i < 80; i++) {
+      const state = bridge.status();
+      if (state.connected && !state.active && state.queued === 0) {
+        stable++;
+        if (stable >= 3) return;
+      } else {
+        stable = 0;
+      }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     throw new Error(`Bridge did not reconnect: ${JSON.stringify(bridge.status())}`);
+  }
+  async function waitExtensionConnected() {
+    let stable = 0;
+    let lastState = null;
+    for (let i = 0; i < 100; i++) {
+      lastState = await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'status' }));
+      const bridgeState = bridge.status();
+      if (lastState.connectionState === '已连接' && bridgeState.connected && !bridgeState.active && bridgeState.queued === 0) {
+        stable++;
+        if (stable >= 3) return;
+      } else {
+        stable = 0;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error(`Extension did not reconnect: ${JSON.stringify({ extension: lastState, bridge: bridge.status() })}`);
   }
   const opened = await call('browser_open', { url: `${origin}/fixture` }); const tabId = opened.tabId;
   const page = await context.waitForEvent('page', { timeout: 500 }).catch(() => context.pages().find(p => p.url().startsWith(origin)));
@@ -170,13 +193,18 @@ try {
   const lease = await call('browser_claim_tab', { tabId, agent: 'e2e-agent', ttlMs: 30000 });
   assert.equal(lease.agent, 'e2e-agent');
   assert.equal((await call('browser_tab_lease', { tabId })).lease.agent, 'e2e-agent');
+  assert.ok((await call('browser_read', { tabId })).text.includes('本地浏览器验收'));
+  await assert.rejects(call('browser_scroll', { tabId, deltaY: 10 }), /leased by e2e-agent/);
+  await assert.rejects(call('browser_scroll', { tabId, deltaY: 10, agent: 'other-agent' }), /leased by e2e-agent/);
+  await call('browser_scroll', { tabId, deltaY: 10, agent: 'e2e-agent' });
   await call('browser_release_tab', { tabId, agent: 'e2e-agent' });
   assert.equal((await call('browser_tab_lease', { tabId })).lease, null);
-  mark('browser tab advisory lease can be claimed, inspected, and released');
+  mark('browser tab enforced lease blocks unowned writes and allows owner writes');
   await assert.rejects(call('browser_click', { tabId, ref: button.ref }), /Stale/); mark('stale snapshot refs rejected');
   const replace = read.elements.find(e => e.label === '替换按钮');
   await page.locator('#replace').evaluate(el => el.textContent = '已改变的操作');
   await assert.rejects(call('browser_click', { tabId, ref: replace.ref }), /Stale/); mark('changed element semantics rejected');
+  read = await call('browser_read', { tabId });
   const link = read.elements.find(e => e.label === '未授权链接');
   await assert.rejects(call('browser_click', { tabId, ref: link.ref }), /not allowed/);
   await assert.rejects(call('browser_open', { url: 'https://not-allowed.example/' }), /not allowed/); mark('unapproved origins blocked for open and direct links');
@@ -235,8 +263,7 @@ try {
   await assistant.close();
   await panel.locator('#all-sites').check();
   await panel.locator('#save').click();
-  await panel.waitForFunction(() => document.getElementById('status').textContent === '已连接');
-  await waitBridgeConnected();
+  await waitExtensionConnected();
   assert.equal(await worker.evaluate(async () => (await chrome.storage.local.get('allSites')).allSites), true);
   assert.deepEqual(await worker.evaluate(async () => (await chrome.storage.local.get('allowedOrigins')).allowedOrigins), [origin]);
   const second = await call('browser_open', { url: `${otherOrigin}/unlisted` });
@@ -264,20 +291,18 @@ try {
   await assert.rejects(call('browser_open', { url: 'file:///C:/example.txt' }), /HTTP/);
   mark('cross-origin link and navigation work; internal and local-file URLs remain excluded');
   await panel.locator('#all-sites').uncheck(); await panel.locator('#save').click();
-  await panel.waitForFunction(() => document.getElementById('status').textContent === '已连接');
-  await waitBridgeConnected();
+  await waitExtensionConnected();
   await assert.rejects(call('browser_read', { tabId: second.tabId }), /not allowed/);
   assert.ok(!(await call('browser_tabs')).some(t => t.id === second.tabId));
   mark('switching back to saved whitelist immediately limits reads and tab listing');
   await panel.locator('#all-sites').check(); await panel.locator('#save').click();
-  await panel.waitForFunction(() => document.getElementById('status').textContent === '已连接');
-  await waitBridgeConnected();
+  await waitExtensionConnected();
   await call('browser_close', { tabId: second.tabId });
   await panel.locator('#pause').click();
   await panel.waitForFunction(async () => !(await chrome.storage.local.get('enabled')).enabled);
   await assert.rejects(call('browser_tabs'), /not connected|paused|lost/); mark('user pause stops subsequent commands');
   await panel.locator('#reconnect').click();
-  await panel.waitForFunction(async () => (await chrome.runtime.sendMessage({ type: 'status' })).connectionState === '已连接');
+  await waitExtensionConnected();
   await call('browser_close', { tabId }); assert.ok(!(await call('browser_tabs')).some(t => t.id === tabId)); mark('explicit reconnect and close verified');
   await panel.locator('#refresh').click(); await panel.screenshot({ path: join(out, 'extension-panel.png'), fullPage: true });
   writeFileSync(join(out, 'e2e-report.json'), JSON.stringify({ date: new Date().toISOString(), browser: context.browser()?.version() ?? 'persistent Chromium', extensionId, checks, status: 'passed', fixtureOnly: true, normalChromeProfileConnected: false }, null, 2));

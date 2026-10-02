@@ -51,6 +51,8 @@ test('strict validation denies unsupported actions and unsafe URL schemes', () =
   assert.throws(() => validateCall('browser_fill', { tabId: 1, ref: 'a', text: 'ok', execute: true }));
   for (const url of ['javascript:alert(1)', 'file:///C:/secret', 'https://user:pass@example.com']) assert.throws(() => validateCall('browser_open', { url }));
   validateCall('browser_fill', { tabId: 1, ref: 'a', text: '' });
+  validateCall('browser_scroll', { tabId: 1, deltaY: 10, agent: 'lease-owner' });
+  assert.throws(() => validateCall('browser_scroll', { tabId: 1, deltaY: 10, agent: '' }));
   assert.throws(() => validateCall('browser_upload', { tabId: 1, ref: 'a', filePath: 'C:/a.zip', sha256: 'bad' }));
 });
 
