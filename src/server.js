@@ -36,7 +36,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const agentGuide = () => ({
     service: 'ai-browser-bridge',
-    version: '0.4.10',
+    version: '0.4.11',
     defaults: {
       unattended: true,
       allHttpSitesAllowedByDefault: true,
@@ -48,6 +48,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     },
     firstSteps: [
       'Call browser_queue_status to inspect connected/active/queued state.',
+      'On large pages, call browser_find_text for task names, buttons, or error text before requesting a full browser_read.',
       'For shared-tab multi-step writes, call browser_claim_tab with a stable agent name.',
       'Pass the same agent on write tools until browser_release_tab.',
       'If any tool returns status=waiting and retryable=true, call browser_wait_until_ready or nextPollTool/nextPollArgs when present, then resume.',
@@ -69,7 +70,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   });
   const queueSnapshot = () => ({
     service: 'ai-browser-bridge',
-    version: '0.4.10',
+    version: '0.4.11',
     extensionVersion,
     connected: extension?.readyState === WebSocket.OPEN,
     queued: queue.length,

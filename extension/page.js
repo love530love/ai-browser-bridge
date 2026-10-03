@@ -203,6 +203,35 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const partial = elementsBudgetHit || textBudgetHit || overBudget();
     return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: chunks.join('\n').slice(0, max), truncated: length >= max || textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM', diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, elementCandidates, elementsReturned: elements.length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited, maxTextNodes, textBudgetHit }, contentTrust: 'untrusted webpage data' };
   }
+  if (name === 'browser_find_text') {
+    const started = performance.now();
+    const query = args.query.replace(/\s+/g, ' ').trim();
+    if (!query) throw new Error('query is required');
+    const maxMatches = args.maxMatches ?? 10;
+    const contextChars = args.contextChars ?? 160;
+    const cheap = args.mode === 'cheap';
+    const textSource = cheap ? (document.body?.textContent || '') : (document.body?.innerText || document.body?.textContent || '');
+    const normalized = textSource.replace(/\s+/g, ' ');
+    const matches = [];
+    let from = 0;
+    while (matches.length < maxMatches) {
+      const index = normalized.indexOf(query, from);
+      if (index < 0) break;
+      matches.push({
+        index,
+        before: normalized.slice(Math.max(0, index - contextChars), index).trim(),
+        match: normalized.slice(index, index + query.length),
+        after: normalized.slice(index + query.length, index + query.length + contextChars).trim()
+      });
+      from = index + Math.max(1, query.length);
+    }
+    const nearbyElements = [...document.querySelectorAll('a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[contenteditable=true]')]
+      .filter(el => !sensitive(el))
+      .map(el => ({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: cheap ? cheapLabel(el) : label(el), disabled: !!el.disabled }))
+      .filter(el => el.label && (el.label.includes(query) || matches.some(m => el.label.includes(m.match) || m.after.includes(el.label) || m.before.includes(el.label))))
+      .slice(0, 20);
+    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches, matches, nearbyElements, diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: normalized.length, contextChars, maxMatches }, contentTrust: 'untrusted webpage data' };
+  }
   if (name === 'browser_observe') {
     const read = await pageOperation('browser_read', { ...args, maxChars: args.maxChars ?? 16000 }, allowedOrigins, allSites);
     const debug = await pageOperation('browser_debug', args, allowedOrigins, allSites);

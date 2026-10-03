@@ -29,6 +29,13 @@ export const TOOLS = [
     budgetMs: { type: 'integer', minimum: 100, maximum: 15000 },
     mode: { type: 'string', enum: ['normal', 'cheap'] }
   }, ['tabId'], true),
+  tool('browser_find_text', 'Find visible or lightweight page text by exact substring and return bounded nearby context plus nearby actionable elements. Use this before full-page reads on large SPA pages.', {
+    tabId,
+    query: text(1000),
+    maxMatches: { type: 'integer', minimum: 1, maximum: 50 },
+    contextChars: { type: 'integer', minimum: 20, maximum: 1000 },
+    mode: { type: 'string', enum: ['normal', 'cheap'] }
+  }, ['tabId', 'query'], true),
   tool('browser_debug', 'Read-only developer diagnostics for the current page: readiness, focus, scroll, visible combobox options, file inputs, dialogs, iframe count, and element role counts. Use this before guessing coordinates when a page automation step is unclear.', { tabId }, ['tabId'], true),
   tool('browser_health', 'Layered health check for service, extension, tab permission, content-script injection, debugger availability hints, page readiness, and tool version. Use before diagnosing blank reads or failed automation.', { tabId }, [], true),
   tool('browser_bridge_modes', 'Read available browser-control modes and their fallback order: DOM, verified transactions, picker/upload bridges, CDP keyboard/pointer, screenshot, and coordinate adapter. Use to choose the least fragile mode.', { tabId }, [], true),

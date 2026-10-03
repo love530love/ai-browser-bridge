@@ -172,7 +172,7 @@ async function execute(name, args) {
       extensionVersion: chrome.runtime.getManifest().version,
       modes: [
         { name: 'health', tools: ['browser_health'], useFor: 'connection, permission, content-script and page-state diagnosis', retrySafe: true },
-        { name: 'observe', tools: ['browser_observe', 'browser_read', 'browser_debug'], useFor: 'state acquisition, geometry, visible text, controls, occlusion hints', retrySafe: true },
+        { name: 'observe', tools: ['browser_observe', 'browser_read', 'browser_find_text', 'browser_debug'], useFor: 'state acquisition, geometry, visible text search, controls, occlusion hints', retrySafe: true },
         { name: 'dom-transaction', tools: ['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'], useFor: 'preferred writes with explicit expected outcome', retrySafe: false },
         { name: 'picker-upload-bridge', tools: ['browser_pick', 'browser_choose', 'browser_upload'], useFor: 'custom selects, portal options, hidden file inputs without OS dialog', retrySafe: false },
         { name: 'cdp-input', tools: ['browser_key', 'browser_hover', 'browser_screenshot'], useFor: 'trusted browser keyboard/pointer/screenshot when DOM events are insufficient', retrySafe: false },
@@ -408,7 +408,7 @@ async function execute(name, args) {
     const prepared = name === 'browser_upload_verified' ? { ...args, verifyKind: 'upload' } : args;
     return await page(name, prepared);
   }
-  if (!['browser_read', 'browser_debug', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick'].includes(name)) throw new Error('Unknown command');
+  if (!['browser_read', 'browser_find_text', 'browser_debug', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick'].includes(name)) throw new Error('Unknown command');
   const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
   if (result?.error) throw new Error(result.error.message || 'Page operation failed');
   if (result?.result?.__aibError) throw new Error(result.result.__aibError);
