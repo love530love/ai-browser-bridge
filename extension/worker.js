@@ -13,6 +13,16 @@ const defaults = { port: 19387, token: '', allowedOrigins: [], allSites: true, e
 const reconnectAlarm = 'ai-browser-bridge-reconnect';
 const settings = () => chrome.storage.local.get(defaults);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function normalizeLease(tabId, lease) {
+  if (!lease || lease.expiresAt <= Date.now()) return null;
+  return {
+    tabId,
+    ...lease,
+    remainingMs: Math.max(0, lease.expiresAt - Date.now()),
+    idleMs: Math.max(0, Date.now() - (lease.lastActiveAt ?? lease.acquiredAt)),
+    autoRenewOnOwnerWrite: true
+  };
+}
 function builtInAiApi() {
   const lm = globalThis.LanguageModel;
   if (lm?.availability && lm?.create) return { name: 'LanguageModel', api: lm };
@@ -235,7 +245,7 @@ async function execute(name, args) {
       connectionState,
       lastAction,
       permissions: { allSites: !!config.allSites, allowedOrigins: config.allowedOrigins || [] },
-      leases: [...tabLeases.entries()].map(([tabId, value]) => ({ tabId: Number(tabId), ...value })).filter(x => x.expiresAt > Date.now())
+      leases: [...tabLeases.entries()].map(([tabId, value]) => normalizeLease(Number(tabId), value)).filter(Boolean)
     };
     if (!Number.isInteger(args?.tabId)) return base;
     try {
@@ -288,9 +298,27 @@ async function execute(name, args) {
       existing = tabLeases.get(leaseKey);
     }
     if (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tabId: tab.id, requestedAgent: args.agent, holder: existing.agent, holderLeaseId: existing.leaseId, expiresAt: existing.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, existing.expiresAt - Date.now())), nextPollTool: 'browser_claim_tab', nextPollArgs: { tabId: tab.id, agent: args.agent, ttlMs: args.ttlMs, wait: true }, recommendedNextAction: 'Keep the task alive; retry browser_claim_tab with wait:true, then write with the same agent after acquisition.' };
-    const record = { agent: args.agent, leaseId: crypto.randomUUID(), acquiredAt: Date.now(), expiresAt: Date.now() + (args.ttlMs ?? 120000) };
+    const now = Date.now();
+    const current = tabLeases.get(leaseKey);
+    if (current?.agent === args.agent) {
+      const renewed = { ...current, ttlMs: args.ttlMs ?? current.ttlMs ?? 120000, lastActiveAt: now, lastTool: 'browser_claim_tab', renewCount: (current.renewCount ?? 0) + 1 };
+      renewed.expiresAt = now + renewed.ttlMs;
+      tabLeases.set(leaseKey, renewed);
+      return normalizeLease(tab.id, renewed);
+    }
+    const record = { agent: args.agent, leaseId: crypto.randomUUID(), acquiredAt: now, lastActiveAt: now, lastTool: 'browser_claim_tab', renewCount: 0, ttlMs: args.ttlMs ?? 120000, expiresAt: now + (args.ttlMs ?? 120000) };
     tabLeases.set(leaseKey, record);
-    return { tabId: tab.id, ...record };
+    return normalizeLease(tab.id, record);
+  }
+  if (name === 'browser_renew_tab') {
+    const existing = tabLeases.get(leaseKey);
+    if (!existing || existing.expiresAt <= Date.now()) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_missing', tabId: tab.id, requestedAgent: args.agent, suggestedDelayMs: 1000, nextPollTool: 'browser_claim_tab', nextPollArgs: { tabId: tab.id, agent: args.agent, ttlMs: args.ttlMs, wait: true }, recommendedNextAction: 'Re-acquire the tab lease with browser_claim_tab before continuing writes.' };
+    if (existing.agent !== args.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tabId: tab.id, requestedAgent: args.agent, holder: existing.agent, holderLeaseId: existing.leaseId, expiresAt: existing.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, existing.expiresAt - Date.now())), nextPollTool: 'browser_claim_tab', nextPollArgs: { tabId: tab.id, agent: args.agent, ttlMs: args.ttlMs, wait: true }, recommendedNextAction: 'Keep the task alive; wait for the current lease to clear, then claim the tab before continuing writes.' };
+    const now = Date.now();
+    const renewed = { ...existing, ttlMs: args.ttlMs ?? existing.ttlMs ?? 120000, lastActiveAt: now, lastTool: 'browser_renew_tab', renewCount: (existing.renewCount ?? 0) + 1 };
+    renewed.expiresAt = now + renewed.ttlMs;
+    tabLeases.set(leaseKey, renewed);
+    return normalizeLease(tab.id, renewed);
   }
   if (name === 'browser_release_tab') {
     const existing = tabLeases.get(leaseKey);
@@ -298,9 +326,16 @@ async function execute(name, args) {
     tabLeases.delete(leaseKey);
     return { released: true, tabId: tab.id };
   }
-  if (name === 'browser_tab_lease') return { tabId: tab.id, lease: tabLeases.get(leaseKey) ?? null };
+  if (name === 'browser_tab_lease') return { tabId: tab.id, lease: normalizeLease(tab.id, tabLeases.get(leaseKey)) };
   const activeLease = tabLeases.get(leaseKey);
   if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent !== activeLease.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tool: name, tabId: tab.id, requestedAgent: args.agent ?? null, holder: activeLease.agent, holderLeaseId: activeLease.leaseId, expiresAt: activeLease.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, activeLease.expiresAt - Date.now())), nextPollTool: 'browser_tab_lease', nextPollArgs: { tabId: tab.id }, recommendedNextAction: 'Keep the task alive, wait suggestedDelayMs, poll browser_tab_lease, then retry the write with the same agent after release.' };
+  if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent === activeLease.agent) {
+    activeLease.lastActiveAt = Date.now();
+    activeLease.lastTool = name;
+    activeLease.renewCount = (activeLease.renewCount ?? 0) + 1;
+    activeLease.expiresAt = Date.now() + (activeLease.ttlMs ?? 120000);
+    tabLeases.set(leaseKey, activeLease);
+  }
   async function page(name, input = args) {
     const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
     if (result?.result?.__aibError) throw new Error(result.result.__aibError);

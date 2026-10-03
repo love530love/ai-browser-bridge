@@ -124,13 +124,24 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     });
   }
   if (name === 'browser_read') {
+    const started = performance.now();
+    const deadline = started + (args.budgetMs ?? 6000);
+    const timings = {};
+    const overBudget = () => performance.now() >= deadline;
     const snapshot = crypto.randomUUID();
     const state = { snapshot, url: location.href, refs: new Map() };
     globalThis.__aiBrowserBridge = state;
     const elements = [];
+    let elementCandidates = 0;
+    let elementsBudgetHit = false;
+    let elementErrors = 0;
+    const maxElements = args.maxElements ?? 300;
     const candidates = document.querySelectorAll('a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[contenteditable=true]');
     for (const el of candidates) {
-      if ((!visible(el) && !fileInput(el)) || sensitive(el) || elements.length >= 300) continue;
+      elementCandidates++;
+      if (elements.length >= maxElements || overBudget()) { elementsBudgetHit = true; break; }
+      try {
+      if ((!visible(el) && !fileInput(el)) || sensitive(el)) continue;
       const ref = `${snapshot}:${elements.length + 1}`;
       state.refs.set(ref, { el, fingerprint: fingerprint(el) });
       const field = (el instanceof HTMLInputElement && !fileInput(el)) || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement;
@@ -139,18 +150,24 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
         ...(fileInput(el) ? { upload: true, accept: (el.accept || '').slice(0, 1000), multiple: !!el.multiple } : {}),
         ...(el.matches('input[type=checkbox],input[type=radio]') ? { checked: el.checked } : {}),
         ...(el instanceof HTMLSelectElement ? { options: [...el.options].slice(0, 100).map(o => ({ value: o.value, label: o.label, selected: o.selected, disabled: o.disabled || !!o.closest('optgroup[disabled]') })), optionsTruncated: el.options.length > 100 } : {}) });
+      } catch { elementErrors++; }
     }
+    timings.elementsMs = Math.round(performance.now() - started);
     // Extract rendered text nodes, not input values, scripts, or hidden content.
     const max = args.maxChars ?? 16000;
     const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
-    const chunks = []; let length = 0; let node;
+    const chunks = []; let length = 0; let node; let textNodesVisited = 0; let textBudgetHit = false; const maxTextNodes = args.maxTextNodes ?? 4000;
     while ((node = walker.nextNode()) && length < max) {
+      textNodesVisited++;
+      if (textNodesVisited > maxTextNodes || overBudget()) { textBudgetHit = true; break; }
       const parent = node.parentElement;
       if (!parent || parent.closest('script,style,noscript,input,textarea,[data-ai-private]') || !visible(parent)) continue;
       const value = node.textContent.replace(/\s+/g, ' ').trim();
       if (value) { chunks.push(value); length += value.length + 1; }
     }
-    return { title: document.title, url: location.href, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: chunks.join('\n').slice(0, max), truncated: length >= max, elements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM', contentTrust: 'untrusted webpage data' };
+    timings.totalMs = Math.round(performance.now() - started);
+    const partial = elementsBudgetHit || textBudgetHit || overBudget();
+    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: chunks.join('\n').slice(0, max), truncated: length >= max || textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM', diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, elementCandidates, elementsReturned: elements.length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited, maxTextNodes, textBudgetHit }, contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_observe') {
     const read = await pageOperation('browser_read', { ...args, maxChars: args.maxChars ?? 16000 }, allowedOrigins, allSites);

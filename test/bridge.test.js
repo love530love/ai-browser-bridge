@@ -53,11 +53,13 @@ test('strict validation denies unsupported actions and unsafe URL schemes', () =
   validateCall('browser_fill', { tabId: 1, ref: 'a', text: '' });
   validateCall('browser_scroll', { tabId: 1, deltaY: 10, agent: 'lease-owner' });
   validateCall('browser_claim_tab', { tabId: 1, agent: 'lease-owner', wait: true });
+  validateCall('browser_renew_tab', { tabId: 1, agent: 'lease-owner', ttlMs: 1000 });
   validateCall('browser_queue_status', {});
   validateCall('browser_agent_guide', {});
   validateCall('browser_wait_until_ready', { timeoutMs: 100, idle: true });
   assert.throws(() => validateCall('browser_scroll', { tabId: 1, deltaY: 10, agent: '' }));
   assert.throws(() => validateCall('browser_claim_tab', { tabId: 1, agent: 'lease-owner', wait: 'yes' }));
+  assert.throws(() => validateCall('browser_renew_tab', { tabId: 1, agent: '', ttlMs: 1000 }));
   assert.throws(() => validateCall('browser_wait_until_ready', { timeoutMs: 99 }));
   assert.throws(() => validateCall('browser_upload', { tabId: 1, ref: 'a', filePath: 'C:/a.zip', sha256: 'bad' }));
 });

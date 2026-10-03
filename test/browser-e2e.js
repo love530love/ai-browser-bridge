@@ -76,7 +76,7 @@ try {
   mark('real extension UI pairing and WebSocket handshake');
   client = new Client({ name: 'e2e-ai-client', version: '1' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
-  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.6'); mark('MCP tool discovery and extension version handshake');
+  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.7'); mark('MCP tool discovery and extension version handshake');
   async function call(name, args = {}) {
     const result = await client.callTool({ name, arguments: args });
     if (result.isError) throw new Error(result.content[0].text);
@@ -118,12 +118,24 @@ try {
   assert.equal(guide.waitingContract.nextPollTool, 'browser_wait_until_ready');
   assert.equal((await call('browser_wait_until_ready', { timeoutMs: 1000 })).status, 'ready');
   const opened = await call('browser_open', { url: `${origin}/fixture` }); const tabId = opened.tabId;
-  const page = await context.waitForEvent('page', { timeout: 500 }).catch(() => context.pages().find(p => p.url().startsWith(origin)));
+  const page = await context.waitForEvent('page', { timeout: 1000 }).catch(() => null) ?? await (async () => {
+    for (let i = 0; i < 50; i++) {
+      const found = context.pages().find(p => p.url().startsWith(origin));
+      if (found) return found;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error('Opened browser tab was not visible to the e2e context');
+  })();
   await page.waitForLoadState('load');
   let read = await call('browser_read', { tabId });
   assert.ok(read.text.includes('本地浏览器验收'));
+  assert.equal(typeof read.diagnostics.timings.totalMs, 'number');
+  assert.equal(read.readyState, 'complete');
+  const budgetedRead = await call('browser_read', { tabId, budgetMs: 100, maxElements: 10, maxTextNodes: 50 });
+  assert.ok(budgetedRead.elements.length <= 10);
+  assert.equal(typeof budgetedRead.diagnostics.textNodesVisited, 'number');
   for (const secret of ['PASSWORD_SECRET', 'HIDDEN_SECRET', 'PRIVATE_SECRET']) assert.ok(!JSON.stringify(read).includes(secret));
-  mark('MCP opens and reads real page; hidden/password/private text excluded');
+  mark('MCP opens and reads real page with bounded diagnostics; hidden/password/private text excluded');
   const debug = await call('browser_debug', { tabId });
   assert.equal(debug.readyState, 'complete');
   assert.ok(debug.roleCounts.combobox >= 1);
@@ -196,7 +208,12 @@ try {
   assert.ok(read.text.includes('本地回显：来自独立 AI 接口的消息')); mark('MCP fills, clicks, and reads local chat-style response');
   const lease = await call('browser_claim_tab', { tabId, agent: 'e2e-agent', ttlMs: 30000 });
   assert.equal(lease.agent, 'e2e-agent');
-  assert.equal((await call('browser_tab_lease', { tabId })).lease.agent, 'e2e-agent');
+  let leaseState = (await call('browser_tab_lease', { tabId })).lease;
+  assert.equal(leaseState.agent, 'e2e-agent');
+  assert.equal(typeof leaseState.remainingMs, 'number');
+  const renewed = await call('browser_renew_tab', { tabId, agent: 'e2e-agent', ttlMs: 30000 });
+  assert.equal(renewed.agent, 'e2e-agent');
+  assert.ok(renewed.renewCount > lease.renewCount);
   assert.ok((await call('browser_read', { tabId })).text.includes('本地浏览器验收'));
   const waitingWithoutAgent = await call('browser_scroll', { tabId, deltaY: 10 });
   assert.equal(waitingWithoutAgent.status, 'waiting');
@@ -209,6 +226,9 @@ try {
   assert.equal(waitingOtherAgent.status, 'waiting');
   assert.equal(waitingOtherAgent.holder, 'e2e-agent');
   await call('browser_scroll', { tabId, deltaY: 10, agent: 'e2e-agent' });
+  leaseState = (await call('browser_tab_lease', { tabId })).lease;
+  assert.equal(leaseState.lastTool, 'browser_scroll');
+  assert.ok(leaseState.renewCount >= renewed.renewCount + 1);
   await call('browser_release_tab', { tabId, agent: 'e2e-agent' });
   assert.equal((await call('browser_tab_lease', { tabId })).lease, null);
   const shortLease = await call('browser_claim_tab', { tabId, agent: 'short-owner', ttlMs: 1000 });
