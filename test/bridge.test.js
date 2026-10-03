@@ -131,7 +131,7 @@ test('timeout stops queue and reports uncertain outcome instead of retrying a wr
   await Promise.all([first, second]); assert.equal(b.status().connected, false);
 });
 
-test('read-only timeout fails only that request and keeps the bridge connected', async t => {
+test('read-only timeout returns waiting and keeps the bridge connected', async t => {
   const { b, wsUrl } = await setup(t, { timeoutMs: 60 });
   const ws = await extension(wsUrl);
   ws.on('message', raw => {
@@ -140,10 +140,10 @@ test('read-only timeout fails only that request and keeps the bridge connected',
     if (msg.name === 'browser_read') return;
     if (msg.name === 'browser_tabs') ws.send(JSON.stringify({ type: 'result', id: msg.id, result: [{ id: 1, title: 'still alive' }] }));
   });
-  const first = assert.rejects(b.call('browser_read', { tabId: 1 }), /bridge remains connected/);
+  const first = b.call('browser_read', { tabId: 1 });
   const second = b.call('browser_tabs', {});
   assert.deepEqual(await second, [{ id: 1, title: 'still alive' }]);
-  await first;
+  assert.equal((await first).reason, 'read_timeout');
   assert.equal(b.status().connected, true);
   assert.equal(b.status().queued, 0);
 });
@@ -156,7 +156,7 @@ test('queue status and ready waits are served locally while a command is active'
     if (msg.type === 'command' && msg.name === 'browser_read') return;
     if (msg.type === 'command') ws.send(JSON.stringify({ type: 'result', id: msg.id, result: { ok: true } }));
   });
-  const slow = b.call('browser_read', { tabId: 1 }).catch(error => error.message);
+  const slow = b.call('browser_read', { tabId: 1 });
   await new Promise(resolve => setTimeout(resolve, 20));
   const guide = await b.call('browser_agent_guide', {});
   assert.equal(guide.defaults.waitingIsNotFailure, true);
@@ -169,5 +169,25 @@ test('queue status and ready waits are served locally while a command is active'
   const ready = await b.call('browser_wait_until_ready', { timeoutMs: 100, idle: true });
   assert.equal(ready.status, 'waiting');
   assert.equal(ready.reason, 'service_busy');
-  assert.match(await slow, /bridge remains connected/);
+  assert.equal((await slow).reason, 'read_timeout');
+});
+
+test('high concurrency returns waiting guidance when the service queue is full', async t => {
+  const { b, wsUrl } = await setup(t, { timeoutMs: 5000 });
+  await extension(wsUrl);
+  const pending = Array.from({ length: 17 }, (_, index) =>
+    b.call('browser_read', { tabId: 1, maxChars: 1000 + index }).catch(error => error.message)
+  );
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const status = await b.call('browser_queue_status', {});
+  assert.equal(status.active.tool, 'browser_read');
+  assert.equal(status.queued, 16);
+  const overflow = await b.call('browser_find_text', { tabId: 1, query: 'Task 114', mode: 'cheap' });
+  assert.equal(overflow.status, 'waiting');
+  assert.equal(overflow.reason, 'queue_full');
+  assert.equal(overflow.retryable, true);
+  assert.equal(overflow.nextPollTool, 'browser_wait_until_ready');
+  assert.equal(overflow.queue.queued, 16);
+  await b.close();
+  await Promise.all(pending);
 });

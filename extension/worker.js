@@ -23,6 +23,50 @@ function normalizeLease(tabId, lease) {
     autoRenewOnOwnerWrite: true
   };
 }
+function findTextOperation(args, allowedOrigins, allSites) {
+  if (!['http:', 'https:'].includes(location.protocol) || (!allSites && !allowedOrigins.includes(location.origin))) throw new Error('Origin changed or not allowed.');
+  const started = performance.now();
+  const query = String(args.query || '').replace(/\s+/g, ' ').trim();
+  if (!query) throw new Error('query is required');
+  const maxMatches = args.maxMatches ?? 10;
+  const contextChars = args.contextChars ?? 160;
+  const budgetMs = args.budgetMs ?? (args.mode === 'cheap' ? 1500 : 5000);
+  const deadline = started + budgetMs;
+  const chunks = [];
+  let visited = 0;
+  const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode()) && visited < 50000 && performance.now() < deadline) {
+    visited++;
+    const parent = node.parentElement;
+    if (!parent || parent.closest('script,style,noscript,input,textarea,select,[data-ai-private],[hidden],[aria-hidden=true],.hidden,#hidden,[style*=\"display:none\"],[style*=\"display: none\"]')) continue;
+    const value = node.textContent.replace(/\s+/g, ' ').trim();
+    if (value) chunks.push(value);
+  }
+  const text = chunks.join(' ').replace(/\s+/g, ' ');
+  const matches = [];
+  let from = 0;
+  while (matches.length < maxMatches && performance.now() < deadline) {
+    const index = text.indexOf(query, from);
+    if (index < 0) break;
+    matches.push({ index, before: text.slice(Math.max(0, index - contextChars), index).trim(), match: text.slice(index, index + query.length), after: text.slice(index + query.length, index + query.length + contextChars).trim() });
+    from = index + Math.max(1, query.length);
+  }
+  const nearbyElements = [];
+  let elementCandidates = 0, elementBudgetHit = false;
+  if (args.includeElements) {
+    const maxElements = args.maxElements ?? 200;
+    for (const el of document.querySelectorAll('a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[contenteditable=true]')) {
+      elementCandidates++;
+      if (nearbyElements.length >= 20 || elementCandidates > maxElements || performance.now() >= deadline) { elementBudgetHit = true; break; }
+      if (el.matches('input[type=password],input[type=hidden]') || el.closest('[data-ai-private]')) continue;
+      const label = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || el.getAttribute('id') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+      const item = { tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label, disabled: !!el.disabled };
+      if (label && (label.includes(query) || matches.some(m => label.includes(m.match) || m.after.includes(label) || m.before.includes(label)))) nearbyElements.push(item);
+    }
+  }
+  return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || elementBudgetHit || visited >= 50000, matches, nearbyElements, diagnostics: { mode: args.mode === 'cheap' ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: text.length, contextChars, maxMatches, budgetMs, textNodesVisited: visited, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
+}
 function builtInAiApi() {
   const lm = globalThis.LanguageModel;
   if (lm?.availability && lm?.create) return { name: 'LanguageModel', api: lm };
@@ -338,6 +382,12 @@ async function execute(name, args) {
   }
   async function page(name, input = args) {
     const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
+    if (result?.result?.__aibError) throw new Error(result.result.__aibError);
+    if (result?.result == null) throw new Error('No page result. Inspect page before retrying.');
+    return result.result;
+  }
+  if (name === 'browser_find_text') {
+    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: findTextOperation, args: [args, config.allowedOrigins, config.allSites] });
     if (result?.result?.__aibError) throw new Error(result.result.__aibError);
     if (result?.result == null) throw new Error('No page result. Inspect page before retrying.');
     return result.result;

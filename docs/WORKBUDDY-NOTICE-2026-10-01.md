@@ -19,7 +19,7 @@
 - 扩展保存配对密钥后支持后台自动重连。
 - 服务端断线错误文案已明确要求 AI 不要自动打开扩展设置页。
 - Tab 写租约从“建议遵守”升级为“强制执行”：无 `agent` 或非持有人 `agent` 的写操作会被拒绝，读操作仍允许。
-- MCP 版本号同步到 0.4.11，README 已同步 34 工具和新规则。
+- MCP 版本号同步到 0.4.13，README 已同步 34 工具和新规则。
 - 新增 `browser_wait_until_ready`，用于扩展断线、队列忙或全局任务租约占用后的本地等待。
 - 新请求在扩展断线或队列满时返回 waiting 指引，不再直接让无人值守 agent 以错误结束。
 - `browser_claim_tab wait:true` 会在扩展端等待冲突 tab 租约释放，再尝试获取租约。
@@ -27,11 +27,12 @@
 - `browser_read` 改为 DOM/时间预算读取，返回 `readyState`、阶段耗时、候选控件数、文本节点计数和预算命中标志；重页面可返回 partial，避免卡到外层 20 秒超时。
 - `browser_read mode:"cheap"` 跳过昂贵 layout/可见性判断，用属性和轻量文本快速返回；normal 模式遇到元素可见性阶段过慢时会自动 fallback 到 cheap。
 - 0.4.10 将 cheap 模式采样预算改为从候选查询之后开始，并先返回轻量文本摘要，避免首次查询耗尽预算后返回空 partial。
-- 0.4.11 新增 `browser_find_text`，支持轻量关键词定位、上下文摘录和附近可操作元素摘要。
+- 0.4.13 新增 `browser_find_text`，支持轻量关键词定位、上下文摘录和附近可操作元素摘要。
 
 验证结果：
 
 - `node --check src/tools.js src/server.js src/mcp.js extension/worker.js extension/page.js`：通过。
-- `npm test`：17/17 通过。
+- `npm test`：18/18 通过。
 - `npm run test:e2e`：33/33 浏览器检查通过。
-- `npm run status`：0.4.11 代码验证后记录；常用 Chrome 运行态需重新加载 unpacked extension 后再确认 `extensionVersion:"0.4.11"`。
+- `node test/multi-agent-stress.js`：通过。
+- `npm run status`：0.4.13 代码验证后记录；常用 Chrome 运行态需重新加载 unpacked extension 后再确认 `extensionVersion:"0.4.13"`。

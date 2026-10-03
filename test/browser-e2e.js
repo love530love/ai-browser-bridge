@@ -76,7 +76,7 @@ try {
   mark('real extension UI pairing and WebSocket handshake');
   client = new Client({ name: 'e2e-ai-client', version: '1' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
-  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.11'); mark('MCP tool discovery and extension version handshake');
+  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.13'); mark('MCP tool discovery and extension version handshake');
   async function call(name, args = {}) {
     const result = await client.callTool({ name, arguments: args });
     if (result.isError) throw new Error(result.content[0].text);
@@ -138,10 +138,14 @@ try {
   assert.equal(cheapRead.diagnostics.mode, 'cheap');
   assert.equal(cheapRead.diagnostics.cheapReason, 'requested');
   assert.ok(cheapRead.text.includes('本地浏览器验收'));
+  for (const secret of ['PASSWORD_SECRET', 'HIDDEN_SECRET', 'PRIVATE_SECRET']) assert.ok(!JSON.stringify(cheapRead).includes(secret));
   const foundText = await call('browser_find_text', { tabId, query: '本地浏览器验收', mode: 'cheap', maxMatches: 3, contextChars: 80 });
   assert.equal(foundText.found, true);
   assert.ok(foundText.matches[0].match.includes('本地浏览器验收'));
-  for (const secret of ['PASSWORD_SECRET', 'HIDDEN_SECRET', 'PRIVATE_SECRET']) assert.ok(!JSON.stringify(read).includes(secret));
+  for (const secret of ['PASSWORD_SECRET', 'HIDDEN_SECRET', 'PRIVATE_SECRET']) {
+    assert.ok(!JSON.stringify(read).includes(secret));
+    assert.equal((await call('browser_find_text', { tabId, query: secret, mode: 'cheap', maxMatches: 1 })).found, false);
+  }
   mark('MCP opens and reads real page with bounded diagnostics; hidden/password/private text excluded');
   const debug = await call('browser_debug', { tabId });
   assert.equal(debug.readyState, 'complete');

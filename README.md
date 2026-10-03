@@ -2,11 +2,11 @@
 
 **默认用途：让已有 AI Agent 直接操作浏览器，无需配置模型。** 终端 Agent 可立即使用 [接入说明](AGENT-QUICKSTART.md) 和 agent.ps1；MCP 客户端使用本机生成的工具配置。插件内模型任务页只是可选功能。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。扩展版本 **0.4.11 / 本地原型**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。扩展版本 **0.4.13 / 本地原型**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 ### 当前版本升级指南
 
-0.4.11 新增 `browser_find_text`，可按关键词快速定位长页面中的赛题、按钮、错误信息和附近上下文；0.4.10 让 `browser_read mode:"cheap"` 先返回 `body.textContent` 轻量摘要，再采样元素，避免重页面 cheap 只有空 partial；0.4.9 修复 cheap 首次候选查询吃掉采样预算的问题；0.4.8 新增 cheap read 和重页面自动 cheap fallback，避免 SPA/竞赛页因昂贵可见性判断卡到外层超时；0.4.7 新增 `browser_renew_tab`、tab 租约自动续租、租约剩余/空闲诊断，以及 `browser_read` DOM/时间预算与 partial 诊断返回；0.4.6 新增 `browser_wait_until_ready`、断线 waiting 返回、`browser_claim_tab wait:true` 真等待和无人值守恢复指引；0.4.5 新增 agent 接入指南、waiting 下一步轮询建议和无人值守默认协议；0.4.4 新增多 agent 队列状态、租约冲突 waiting 结果和 claim wait 语义；0.4.3 新增读类工具超时不掉线、后台自动重连、扩展端强制 tab 写租约和 WorkBuddy 调用规则；0.4.1 新增多桥接模式说明 `browser_bridge_modes`、失败后恢复引导 `browser_failure_help` 和服务端优先级队列；0.4.0 新增分层健康诊断 `browser_health`、统一观察 `browser_observe`、智能选择器 `browser_pick`、验证型点击/填写/上传和 tab 写租约；0.3.6 加固 Chrome 本地裁判 JSON 结构、解析告警和高风险动作兜底。请阅读 [0.3.0 使用与升级说明](docs/UPDATE-0.3.0.md)。
+0.4.13 为重网页和多用户代表新增 `npm run test:stress`，并让 `browser_read mode:"cheap"` 与 `browser_find_text` 跳过隐藏、密码和 `data-ai-private` 文本；0.4.11 新增 `browser_find_text`，可按关键词快速定位长页面中的赛题、按钮、错误信息和附近上下文；0.4.10 让 `browser_read mode:"cheap"` 先返回轻量摘要，再采样元素，避免重页面 cheap 只有空 partial；0.4.9 修复 cheap 首次候选查询吃掉采样预算的问题；0.4.8 新增 cheap read 和重页面自动 cheap fallback，避免 SPA/竞赛页因昂贵可见性判断卡到外层超时；0.4.7 新增 `browser_renew_tab`、tab 租约自动续租、租约剩余/空闲诊断，以及 `browser_read` DOM/时间预算与 partial 诊断返回；0.4.6 新增 `browser_wait_until_ready`、断线 waiting 返回、`browser_claim_tab wait:true` 真等待和无人值守恢复指引；0.4.5 新增 agent 接入指南、waiting 下一步轮询建议和无人值守默认协议；0.4.4 新增多 agent 队列状态、租约冲突 waiting 结果和 claim wait 语义；0.4.3 新增读类工具超时不掉线、后台自动重连、扩展端强制 tab 写租约和 WorkBuddy 调用规则；0.4.1 新增多桥接模式说明 `browser_bridge_modes`、失败后恢复引导 `browser_failure_help` 和服务端优先级队列；0.4.0 新增分层健康诊断 `browser_health`、统一观察 `browser_observe`、智能选择器 `browser_pick`、验证型点击/填写/上传和 tab 写租约；0.3.6 加固 Chrome 本地裁判 JSON 结构、解析告警和高风险动作兜底。请阅读 [0.3.0 使用与升级说明](docs/UPDATE-0.3.0.md)。
 
 ### 历史：从 0.1.0 更新到 0.1.1
 

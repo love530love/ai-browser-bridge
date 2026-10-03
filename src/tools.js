@@ -34,6 +34,9 @@ export const TOOLS = [
     query: text(1000),
     maxMatches: { type: 'integer', minimum: 1, maximum: 50 },
     contextChars: { type: 'integer', minimum: 20, maximum: 1000 },
+    maxElements: { type: 'integer', minimum: 10, maximum: 1000 },
+    budgetMs: { type: 'integer', minimum: 100, maximum: 15000 },
+    includeElements: { type: 'boolean' },
     mode: { type: 'string', enum: ['normal', 'cheap'] }
   }, ['tabId', 'query'], true),
   tool('browser_debug', 'Read-only developer diagnostics for the current page: readiness, focus, scroll, visible combobox options, file inputs, dialogs, iframe count, and element role counts. Use this before guessing coordinates when a page automation step is unclear.', { tabId }, ['tabId'], true),

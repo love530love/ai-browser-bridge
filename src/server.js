@@ -36,7 +36,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const agentGuide = () => ({
     service: 'ai-browser-bridge',
-    version: '0.4.11',
+    version: '0.4.13',
     defaults: {
       unattended: true,
       allHttpSitesAllowedByDefault: true,
@@ -70,7 +70,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   });
   const queueSnapshot = () => ({
     service: 'ai-browser-bridge',
-    version: '0.4.11',
+    version: '0.4.13',
     extensionVersion,
     connected: extension?.readyState === WebSocket.OPEN,
     queued: queue.length,
@@ -140,7 +140,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       const readOnly = !!job.tool.annotations?.readOnlyHint;
       if (readOnly) {
         current = null;
-        finish(job, `${job.name} timed out after ${jobTimeoutMs(job.name)}ms. The bridge remains connected; inspect page state before retrying.`);
+        finish(job, null, { status: 'waiting', retryable: true, reason: 'read_timeout', tool: job.name, suggestedDelayMs: 1000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 5000, idle: true }, recommendedNextAction: 'Keep the task alive. Retry the read with mode:"cheap" or smaller budgets; do not treat this as bridge failure.' });
         pump();
         return;
       }
