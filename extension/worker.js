@@ -280,7 +280,7 @@ async function execute(name, args) {
   const writeTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close', 'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_pick', 'browser_history']);
   if (name === 'browser_claim_tab') {
     const existing = tabLeases.get(leaseKey);
-    if (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tabId: tab.id, requestedAgent: args.agent, holder: existing.agent, holderLeaseId: existing.leaseId, expiresAt: existing.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, existing.expiresAt - Date.now())) };
+    if (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tabId: tab.id, requestedAgent: args.agent, holder: existing.agent, holderLeaseId: existing.leaseId, expiresAt: existing.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, existing.expiresAt - Date.now())), nextPollTool: 'browser_tab_lease', nextPollArgs: { tabId: tab.id }, recommendedNextAction: 'Keep the task alive, wait suggestedDelayMs, poll browser_tab_lease, then retry the write with the same agent after release.' };
     const record = { agent: args.agent, leaseId: crypto.randomUUID(), acquiredAt: Date.now(), expiresAt: Date.now() + (args.ttlMs ?? 120000) };
     tabLeases.set(leaseKey, record);
     return { tabId: tab.id, ...record };
@@ -293,7 +293,7 @@ async function execute(name, args) {
   }
   if (name === 'browser_tab_lease') return { tabId: tab.id, lease: tabLeases.get(leaseKey) ?? null };
   const activeLease = tabLeases.get(leaseKey);
-  if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent !== activeLease.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tool: name, tabId: tab.id, requestedAgent: args.agent ?? null, holder: activeLease.agent, holderLeaseId: activeLease.leaseId, expiresAt: activeLease.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, activeLease.expiresAt - Date.now())) };
+  if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent !== activeLease.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tool: name, tabId: tab.id, requestedAgent: args.agent ?? null, holder: activeLease.agent, holderLeaseId: activeLease.leaseId, expiresAt: activeLease.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, activeLease.expiresAt - Date.now())), nextPollTool: 'browser_tab_lease', nextPollArgs: { tabId: tab.id }, recommendedNextAction: 'Keep the task alive, wait suggestedDelayMs, poll browser_tab_lease, then retry the write with the same agent after release.' };
   async function page(name, input = args) {
     const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
     if (result?.result?.__aibError) throw new Error(result.result.__aibError);

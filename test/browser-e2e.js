@@ -76,7 +76,7 @@ try {
   mark('real extension UI pairing and WebSocket handshake');
   client = new Client({ name: 'e2e-ai-client', version: '1' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
-  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.4'); mark('MCP tool discovery and extension version handshake');
+  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.5'); mark('MCP tool discovery and extension version handshake');
   async function call(name, args = {}) {
     const result = await client.callTool({ name, arguments: args });
     if (result.isError) throw new Error(result.content[0].text);
@@ -113,6 +113,9 @@ try {
     }
     throw new Error(`Extension did not reconnect: ${JSON.stringify({ extension: lastState, bridge: bridge.status() })}`);
   }
+  const guide = await call('browser_agent_guide');
+  assert.equal(guide.defaults.waitingIsNotFailure, true);
+  assert.equal(guide.waitingContract.nextPollTool, 'browser_queue_status');
   const opened = await call('browser_open', { url: `${origin}/fixture` }); const tabId = opened.tabId;
   const page = await context.waitForEvent('page', { timeout: 500 }).catch(() => context.pages().find(p => p.url().startsWith(origin)));
   await page.waitForLoadState('load');
@@ -198,6 +201,9 @@ try {
   assert.equal(waitingWithoutAgent.status, 'waiting');
   assert.equal(waitingWithoutAgent.reason, 'tab_write_lease_conflict');
   assert.equal(waitingWithoutAgent.holder, 'e2e-agent');
+  assert.equal(waitingWithoutAgent.nextPollTool, 'browser_tab_lease');
+  assert.deepEqual(waitingWithoutAgent.nextPollArgs, { tabId });
+  assert.ok(waitingWithoutAgent.recommendedNextAction.includes('Keep the task alive'));
   const waitingOtherAgent = await call('browser_scroll', { tabId, deltaY: 10, agent: 'other-agent' });
   assert.equal(waitingOtherAgent.status, 'waiting');
   assert.equal(waitingOtherAgent.holder, 'e2e-agent');
@@ -264,6 +270,8 @@ try {
   const taskWaiting = await call('browser_read', { tabId });
   assert.equal(taskWaiting.status, 'waiting');
   assert.equal(taskWaiting.reason, 'global_agent_task_lease');
+  assert.equal(taskWaiting.nextPollTool, 'browser_queue_status');
+  assert.ok(taskWaiting.recommendedNextAction.includes('Keep the agent task alive'));
   mark('agent task lease returns waiting for other clients without ending their tasks');
   await assistant.locator('#cancel').click();
   await assistant.waitForFunction(() => document.getElementById('task-status').textContent === '已停止');

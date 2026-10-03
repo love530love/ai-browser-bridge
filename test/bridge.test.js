@@ -54,6 +54,7 @@ test('strict validation denies unsupported actions and unsafe URL schemes', () =
   validateCall('browser_scroll', { tabId: 1, deltaY: 10, agent: 'lease-owner' });
   validateCall('browser_claim_tab', { tabId: 1, agent: 'lease-owner', wait: true });
   validateCall('browser_queue_status', {});
+  validateCall('browser_agent_guide', {});
   assert.throws(() => validateCall('browser_scroll', { tabId: 1, deltaY: 10, agent: '' }));
   assert.throws(() => validateCall('browser_claim_tab', { tabId: 1, agent: 'lease-owner', wait: 'yes' }));
   assert.throws(() => validateCall('browser_upload', { tabId: 1, ref: 'a', filePath: 'C:/a.zip', sha256: 'bad' }));
@@ -138,9 +139,13 @@ test('queue status is served locally while a command is active', async t => {
   });
   const slow = b.call('browser_read', { tabId: 1 }).catch(error => error.message);
   await new Promise(resolve => setTimeout(resolve, 20));
+  const guide = await b.call('browser_agent_guide', {});
+  assert.equal(guide.defaults.waitingIsNotFailure, true);
+  assert.equal(guide.waitingContract.nextPollTool, 'browser_queue_status');
   const status = await b.call('browser_queue_status', {});
   assert.equal(status.connected, true);
   assert.equal(status.active.tool, 'browser_read');
   assert.ok(Array.isArray(status.queuedJobs));
+  assert.ok(status.policy.recommendedNextAction.includes('Wait'));
   assert.match(await slow, /bridge remains connected/);
 });
