@@ -33,7 +33,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let extensionVersion = null;
   const queue = [];
   const clients = new Set();
-  const status = () => ({ service: 'ai-browser-bridge', version: '0.4.2', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, queueSummary: queue.reduce((acc, job) => { acc[job.priorityName] = (acc[job.priorityName] || 0) + 1; return acc; }, {}), active: current ? { id: current.id, tool: current.name, priority: current.priorityName, ageMs: Date.now() - current.created } : null, taskLease: lease, uploadRoots: config.uploadRoots.length });
+  const status = () => ({ service: 'ai-browser-bridge', version: '0.4.3', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, queueSummary: queue.reduce((acc, job) => { acc[job.priorityName] = (acc[job.priorityName] || 0) + 1; return acc; }, {}), active: current ? { id: current.id, tool: current.name, priority: current.priorityName, ageMs: Date.now() - current.created } : null, taskLease: lease, uploadRoots: config.uploadRoots.length });
   const jobTimeoutMs = name => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000) : timeoutMs;
   function finish(job, error, result) {
     clearTimeout(job.timer);
@@ -51,6 +51,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     current = queue.shift();
     const job = current;
     job.timer = setTimeout(() => {
+      const readOnly = !!job.tool.annotations?.readOnlyHint;
+      if (readOnly) {
+        current = null;
+        finish(job, `${job.name} timed out after ${jobTimeoutMs(job.name)}ms. The bridge remains connected; inspect page state before retrying.`);
+        pump();
+        return;
+      }
       const socket = extension;
       drop(`${job.name} timed out after ${jobTimeoutMs(job.name)}ms; outcome may be unknown. Inspect page before retrying.`);
       socket?.close(4000, 'Task timeout');
@@ -89,7 +96,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     const prepared = name === 'browser_upload' || name === 'browser_upload_verified' ? { ...uploadArgs(args), expect: args.expect ?? {}, timeoutMs: args.timeoutMs } : args;
     return new Promise((resolve, reject) => {
       const priority = priorityFor(tool, name);
-      const job = { id: randomUUID(), name, args: prepared, created: Date.now(), priority: priority.value, priorityName: priority.name, resolve, reject };
+      const job = { id: randomUUID(), name, tool, args: prepared, created: Date.now(), priority: priority.value, priorityName: priority.name, resolve, reject };
       const index = queue.findIndex(item => item.priority > job.priority);
       if (index === -1) queue.push(job); else queue.splice(index, 0, job);
       pump();

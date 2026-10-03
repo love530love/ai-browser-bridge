@@ -107,3 +107,20 @@ test('timeout stops queue and reports uncertain outcome instead of retrying a wr
   const second = assert.rejects(b.call('browser_click', { tabId: 1, ref: 'two' }), /Not executed/);
   await Promise.all([first, second]); assert.equal(b.status().connected, false);
 });
+
+test('read-only timeout fails only that request and keeps the bridge connected', async t => {
+  const { b, wsUrl } = await setup(t, { timeoutMs: 60 });
+  const ws = await extension(wsUrl);
+  ws.on('message', raw => {
+    const msg = JSON.parse(raw);
+    if (msg.type !== 'command') return;
+    if (msg.name === 'browser_read') return;
+    if (msg.name === 'browser_tabs') ws.send(JSON.stringify({ type: 'result', id: msg.id, result: [{ id: 1, title: 'still alive' }] }));
+  });
+  const first = assert.rejects(b.call('browser_read', { tabId: 1 }), /bridge remains connected/);
+  const second = b.call('browser_tabs', {});
+  assert.deepEqual(await second, [{ id: 1, title: 'still alive' }]);
+  await first;
+  assert.equal(b.status().connected, true);
+  assert.equal(b.status().queued, 0);
+});
