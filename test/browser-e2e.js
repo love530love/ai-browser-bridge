@@ -76,7 +76,7 @@ try {
   mark('real extension UI pairing and WebSocket handshake');
   client = new Client({ name: 'e2e-ai-client', version: '1' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
-  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.3'); mark('MCP tool discovery and extension version handshake');
+  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.4'); mark('MCP tool discovery and extension version handshake');
   async function call(name, args = {}) {
     const result = await client.callTool({ name, arguments: args });
     if (result.isError) throw new Error(result.content[0].text);
@@ -194,12 +194,17 @@ try {
   assert.equal(lease.agent, 'e2e-agent');
   assert.equal((await call('browser_tab_lease', { tabId })).lease.agent, 'e2e-agent');
   assert.ok((await call('browser_read', { tabId })).text.includes('本地浏览器验收'));
-  await assert.rejects(call('browser_scroll', { tabId, deltaY: 10 }), /leased by e2e-agent/);
-  await assert.rejects(call('browser_scroll', { tabId, deltaY: 10, agent: 'other-agent' }), /leased by e2e-agent/);
+  const waitingWithoutAgent = await call('browser_scroll', { tabId, deltaY: 10 });
+  assert.equal(waitingWithoutAgent.status, 'waiting');
+  assert.equal(waitingWithoutAgent.reason, 'tab_write_lease_conflict');
+  assert.equal(waitingWithoutAgent.holder, 'e2e-agent');
+  const waitingOtherAgent = await call('browser_scroll', { tabId, deltaY: 10, agent: 'other-agent' });
+  assert.equal(waitingOtherAgent.status, 'waiting');
+  assert.equal(waitingOtherAgent.holder, 'e2e-agent');
   await call('browser_scroll', { tabId, deltaY: 10, agent: 'e2e-agent' });
   await call('browser_release_tab', { tabId, agent: 'e2e-agent' });
   assert.equal((await call('browser_tab_lease', { tabId })).lease, null);
-  mark('browser tab enforced lease blocks unowned writes and allows owner writes');
+  mark('browser tab enforced lease returns waiting for unowned writes and allows owner writes');
   await assert.rejects(call('browser_click', { tabId, ref: button.ref }), /Stale/); mark('stale snapshot refs rejected');
   const replace = read.elements.find(e => e.label === '替换按钮');
   await page.locator('#replace').evaluate(el => el.textContent = '已改变的操作');
@@ -256,7 +261,10 @@ try {
   await assistant.locator('#run').click();
   for (let i = 0; i < 100 && modelRequests === previousRequests; i++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.ok(modelRequests > previousRequests);
-  await assert.rejects(call('browser_read', { tabId }), /reserved/); mark('agent task lease prevents other clients from interleaving commands');
+  const taskWaiting = await call('browser_read', { tabId });
+  assert.equal(taskWaiting.status, 'waiting');
+  assert.equal(taskWaiting.reason, 'global_agent_task_lease');
+  mark('agent task lease returns waiting for other clients without ending their tasks');
   await assistant.locator('#cancel').click();
   await assistant.waitForFunction(() => document.getElementById('task-status').textContent === '已停止');
   assert.ok((await call('browser_read', { tabId })).text.includes('来自模拟模型的任务')); mark('cancel aborts model request and releases task lease without extra actions');
@@ -315,3 +323,4 @@ try {
   await new Promise(resolve => otherFixture.close(resolve));
   mockModel.closeAllConnections(); await new Promise(resolve => mockModel.close(resolve));
 }
+

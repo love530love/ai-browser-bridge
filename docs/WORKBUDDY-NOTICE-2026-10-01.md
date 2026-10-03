@@ -17,11 +17,11 @@
 - 扩展保存配对密钥后支持后台自动重连。
 - 服务端断线错误文案已明确要求 AI 不要自动打开扩展设置页。
 - Tab 写租约从“建议遵守”升级为“强制执行”：无 `agent` 或非持有人 `agent` 的写操作会被拒绝，读操作仍允许。
-- MCP 版本号同步到 0.4.3，README 已同步工具数量和新规则。
+- MCP 版本号同步到 0.4.4，README 已同步工具数量和新规则。
 
 验证结果：
 
 - `node --check src/tools.js src/server.js src/mcp.js extension/worker.js`：通过。
 - `npm test`：14/14 通过。
 - `npm run test:e2e`：33/33 浏览器检查通过。
-- `npm run status`：`connected:true`，`extensionVersion:"0.4.3"`，队列为空。
+- `npm run status`：`connected:true`，`extensionVersion:"0.4.4"`，队列为空。

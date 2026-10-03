@@ -52,7 +52,10 @@ test('strict validation denies unsupported actions and unsafe URL schemes', () =
   for (const url of ['javascript:alert(1)', 'file:///C:/secret', 'https://user:pass@example.com']) assert.throws(() => validateCall('browser_open', { url }));
   validateCall('browser_fill', { tabId: 1, ref: 'a', text: '' });
   validateCall('browser_scroll', { tabId: 1, deltaY: 10, agent: 'lease-owner' });
+  validateCall('browser_claim_tab', { tabId: 1, agent: 'lease-owner', wait: true });
+  validateCall('browser_queue_status', {});
   assert.throws(() => validateCall('browser_scroll', { tabId: 1, deltaY: 10, agent: '' }));
+  assert.throws(() => validateCall('browser_claim_tab', { tabId: 1, agent: 'lease-owner', wait: 'yes' }));
   assert.throws(() => validateCall('browser_upload', { tabId: 1, ref: 'a', filePath: 'C:/a.zip', sha256: 'bad' }));
 });
 
@@ -123,4 +126,21 @@ test('read-only timeout fails only that request and keeps the bridge connected',
   await first;
   assert.equal(b.status().connected, true);
   assert.equal(b.status().queued, 0);
+});
+
+test('queue status is served locally while a command is active', async t => {
+  const { b, wsUrl } = await setup(t, { timeoutMs: 60 });
+  const ws = await extension(wsUrl);
+  ws.on('message', raw => {
+    const msg = JSON.parse(raw);
+    if (msg.type === 'command' && msg.name === 'browser_read') return;
+    if (msg.type === 'command') ws.send(JSON.stringify({ type: 'result', id: msg.id, result: { ok: true } }));
+  });
+  const slow = b.call('browser_read', { tabId: 1 }).catch(error => error.message);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const status = await b.call('browser_queue_status', {});
+  assert.equal(status.connected, true);
+  assert.equal(status.active.tool, 'browser_read');
+  assert.ok(Array.isArray(status.queuedJobs));
+  assert.match(await slow, /bridge remains connected/);
 });

@@ -168,7 +168,7 @@ async function execute(name, args) {
         { name: 'coordinate-adapter', tools: ['browser_action'], useFor: 'Open-AutoGLM style normalized coordinates as last resort with stale-URL guard', retrySafe: false }
       ],
       fallbackOrder: ['health', 'observe', 'dom-transaction', 'picker-upload-bridge', 'cdp-input', 'coordinate-adapter', 'human-confirmation'],
-      concurrency: { writeLeaseTools: ['browser_claim_tab', 'browser_release_tab', 'browser_tab_lease'], rule: 'one write owner per tab; read-only tools may still observe; writes must pass the matching agent while a lease is active' },
+      concurrency: { writeLeaseTools: ['browser_claim_tab', 'browser_release_tab', 'browser_tab_lease'], rule: 'one write owner per tab; read-only tools may still observe; conflicting writes return status=waiting instead of throwing' },
       retryPolicy: 'Never replay uncertain writes automatically. Use browser_failure_help, then re-observe and choose the next safer mode.'
     };
   }
@@ -280,7 +280,7 @@ async function execute(name, args) {
   const writeTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close', 'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_pick', 'browser_history']);
   if (name === 'browser_claim_tab') {
     const existing = tabLeases.get(leaseKey);
-    if (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent) throw new Error(`Tab is leased by ${existing.agent} until ${new Date(existing.expiresAt).toISOString()}`);
+    if (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tabId: tab.id, requestedAgent: args.agent, holder: existing.agent, holderLeaseId: existing.leaseId, expiresAt: existing.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, existing.expiresAt - Date.now())) };
     const record = { agent: args.agent, leaseId: crypto.randomUUID(), acquiredAt: Date.now(), expiresAt: Date.now() + (args.ttlMs ?? 120000) };
     tabLeases.set(leaseKey, record);
     return { tabId: tab.id, ...record };
@@ -293,7 +293,7 @@ async function execute(name, args) {
   }
   if (name === 'browser_tab_lease') return { tabId: tab.id, lease: tabLeases.get(leaseKey) ?? null };
   const activeLease = tabLeases.get(leaseKey);
-  if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent !== activeLease.agent) throw new Error(`Tab is leased by ${activeLease.agent}; pass the matching agent or release the lease before writing.`);
+  if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent !== activeLease.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tool: name, tabId: tab.id, requestedAgent: args.agent ?? null, holder: activeLease.agent, holderLeaseId: activeLease.leaseId, expiresAt: activeLease.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, activeLease.expiresAt - Date.now())) };
   async function page(name, input = args) {
     const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
     if (result?.result?.__aibError) throw new Error(result.result.__aibError);

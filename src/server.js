@@ -33,7 +33,25 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let extensionVersion = null;
   const queue = [];
   const clients = new Set();
-  const status = () => ({ service: 'ai-browser-bridge', version: '0.4.3', extensionVersion, connected: extension?.readyState === WebSocket.OPEN, queued: queue.length, queueSummary: queue.reduce((acc, job) => { acc[job.priorityName] = (acc[job.priorityName] || 0) + 1; return acc; }, {}), active: current ? { id: current.id, tool: current.name, priority: current.priorityName, ageMs: Date.now() - current.created } : null, taskLease: lease, uploadRoots: config.uploadRoots.length });
+  const queueSnapshot = () => ({
+    service: 'ai-browser-bridge',
+    version: '0.4.4',
+    extensionVersion,
+    connected: extension?.readyState === WebSocket.OPEN,
+    queued: queue.length,
+    queueSummary: queue.reduce((acc, job) => { acc[job.priorityName] = (acc[job.priorityName] || 0) + 1; return acc; }, {}),
+    active: current ? { id: current.id, tool: current.name, priority: current.priorityName, ageMs: Date.now() - current.created, readOnly: !!current.tool.annotations?.readOnlyHint } : null,
+    queuedJobs: queue.map((job, index) => ({ index, id: job.id, tool: job.name, priority: job.priorityName, ageMs: Date.now() - job.created, readOnly: !!job.tool.annotations?.readOnlyHint, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null })),
+    taskLease: lease,
+    uploadRoots: config.uploadRoots.length,
+    policy: {
+      conflictResult: 'Lease conflicts return status=waiting instead of failing the tool call.',
+      priorityOrder: ['read', 'transaction', 'write', 'normal', 'navigation'],
+      readTimeout: 'Read-only timeouts fail only that request and keep the bridge connected.',
+      writeTimeout: 'Write timeouts still disconnect because the outcome may be unknown.'
+    }
+  });
+  const status = queueSnapshot;
   const jobTimeoutMs = name => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000) : timeoutMs;
   function finish(job, error, result) {
     clearTimeout(job.timer);
@@ -90,7 +108,10 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   }
   function call(name, args, owner = null) {
     const tool = validateCall(name, args);
-    if (lease && lease !== owner) throw new Error('Browser is reserved by an agent task. Wait or cancel that task.');
+    if (name === 'browser_queue_status') return queueSnapshot();
+    if (lease && lease !== owner) {
+      return { status: 'waiting', retryable: true, reason: 'global_agent_task_lease', holder: lease, suggestedDelayMs: 3000, queue: queueSnapshot() };
+    }
     if (!extension || stopped) throw new Error('Extension not connected. Ask the user to reconnect once; do not open extension settings automatically.');
     if (queue.length >= 16) throw new Error('Queue full');
     const prepared = name === 'browser_upload' || name === 'browser_upload_verified' ? { ...uploadArgs(args), expect: args.expect ?? {}, timeoutMs: args.timeoutMs } : args;
