@@ -27,4 +27,4 @@
 - `node --check src/tools.js src/server.js src/mcp.js extension/worker.js`：通过。
 - `npm test`：17/17 通过。
 - `npm run test:e2e`：33/33 浏览器检查通过。
-- `npm run status`：待重启本机服务后验证。
+- `npm run status`：`connected:true`，`extensionVersion:"0.4.6"`，队列为空；`browser_wait_until_ready` 返回 `status:"ready"`。
