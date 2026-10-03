@@ -142,9 +142,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const maxTextNodes = args.maxTextNodes ?? 4000;
     const cheapRead = (reason = 'requested') => {
       const cheapStarted = performance.now();
-      const cheapDeadline = reason === 'requested' ? deadline : performance.now() + Math.min(1200, Math.max(300, args.budgetMs ?? 6000));
       const cheapElements = [];
       const cheapCandidates = document.querySelectorAll(selector);
+      const cheapDeadline = performance.now() + (reason === 'requested' ? Math.max(300, args.budgetMs ?? 6000) : Math.min(1200, Math.max(300, args.budgetMs ?? 6000)));
       for (const el of cheapCandidates) {
         if (cheapElements.length >= maxElements || performance.now() >= cheapDeadline) break;
         if (sensitive(el)) continue;

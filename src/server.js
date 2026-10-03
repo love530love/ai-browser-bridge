@@ -36,7 +36,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const agentGuide = () => ({
     service: 'ai-browser-bridge',
-    version: '0.4.8',
+    version: '0.4.9',
     defaults: {
       unattended: true,
       allHttpSitesAllowedByDefault: true,
@@ -69,7 +69,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   });
   const queueSnapshot = () => ({
     service: 'ai-browser-bridge',
-    version: '0.4.8',
+    version: '0.4.9',
     extensionVersion,
     connected: extension?.readyState === WebSocket.OPEN,
     queued: queue.length,
