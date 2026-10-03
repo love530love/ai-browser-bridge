@@ -76,7 +76,7 @@ try {
   mark('real extension UI pairing and WebSocket handshake');
   client = new Client({ name: 'e2e-ai-client', version: '1' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
-  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.7'); mark('MCP tool discovery and extension version handshake');
+  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.8'); mark('MCP tool discovery and extension version handshake');
   async function call(name, args = {}) {
     const result = await client.callTool({ name, arguments: args });
     if (result.isError) throw new Error(result.content[0].text);
@@ -134,6 +134,10 @@ try {
   const budgetedRead = await call('browser_read', { tabId, budgetMs: 100, maxElements: 10, maxTextNodes: 50 });
   assert.ok(budgetedRead.elements.length <= 10);
   assert.equal(typeof budgetedRead.diagnostics.textNodesVisited, 'number');
+  const cheapRead = await call('browser_read', { tabId, mode: 'cheap', maxChars: 1200, maxElements: 10, maxTextNodes: 50, budgetMs: 500 });
+  assert.equal(cheapRead.diagnostics.mode, 'cheap');
+  assert.equal(cheapRead.diagnostics.cheapReason, 'requested');
+  assert.ok(cheapRead.text.includes('本地浏览器验收'));
   for (const secret of ['PASSWORD_SECRET', 'HIDDEN_SECRET', 'PRIVATE_SECRET']) assert.ok(!JSON.stringify(read).includes(secret));
   mark('MCP opens and reads real page with bounded diagnostics; hidden/password/private text excluded');
   const debug = await call('browser_debug', { tabId });

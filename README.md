@@ -2,11 +2,11 @@
 
 **默认用途：让已有 AI Agent 直接操作浏览器，无需配置模型。** 终端 Agent 可立即使用 [接入说明](AGENT-QUICKSTART.md) 和 agent.ps1；MCP 客户端使用本机生成的工具配置。插件内模型任务页只是可选功能。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。扩展版本 **0.4.7 / 本地原型**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。扩展版本 **0.4.8 / 本地原型**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 ### 当前版本升级指南
 
-0.4.7 新增 `browser_renew_tab`、tab 租约自动续租、租约剩余/空闲诊断，以及 `browser_read` DOM/时间预算与 partial 诊断返回；0.4.6 新增 `browser_wait_until_ready`、断线 waiting 返回、`browser_claim_tab wait:true` 真等待和无人值守恢复指引；0.4.5 新增 agent 接入指南、waiting 下一步轮询建议和无人值守默认协议；0.4.4 新增多 agent 队列状态、租约冲突 waiting 结果和 claim wait 语义；0.4.3 新增读类工具超时不掉线、后台自动重连、扩展端强制 tab 写租约和 WorkBuddy 调用规则；0.4.1 新增多桥接模式说明 `browser_bridge_modes`、失败后恢复引导 `browser_failure_help` 和服务端优先级队列；0.4.0 新增分层健康诊断 `browser_health`、统一观察 `browser_observe`、智能选择器 `browser_pick`、验证型点击/填写/上传和 tab 写租约；0.3.6 加固 Chrome 本地裁判 JSON 结构、解析告警和高风险动作兜底。请阅读 [0.3.0 使用与升级说明](docs/UPDATE-0.3.0.md)。
+0.4.8 新增 `browser_read mode:"cheap"` 和重页面自动 cheap fallback，避免 SPA/竞赛页因昂贵可见性判断卡到外层超时；0.4.7 新增 `browser_renew_tab`、tab 租约自动续租、租约剩余/空闲诊断，以及 `browser_read` DOM/时间预算与 partial 诊断返回；0.4.6 新增 `browser_wait_until_ready`、断线 waiting 返回、`browser_claim_tab wait:true` 真等待和无人值守恢复指引；0.4.5 新增 agent 接入指南、waiting 下一步轮询建议和无人值守默认协议；0.4.4 新增多 agent 队列状态、租约冲突 waiting 结果和 claim wait 语义；0.4.3 新增读类工具超时不掉线、后台自动重连、扩展端强制 tab 写租约和 WorkBuddy 调用规则；0.4.1 新增多桥接模式说明 `browser_bridge_modes`、失败后恢复引导 `browser_failure_help` 和服务端优先级队列；0.4.0 新增分层健康诊断 `browser_health`、统一观察 `browser_observe`、智能选择器 `browser_pick`、验证型点击/填写/上传和 tab 写租约；0.3.6 加固 Chrome 本地裁判 JSON 结构、解析告警和高风险动作兜底。请阅读 [0.3.0 使用与升级说明](docs/UPDATE-0.3.0.md)。
 
 ### 历史：从 0.1.0 更新到 0.1.1
 
@@ -23,7 +23,7 @@
 - 首次只需要加载扩展、运行 `pair.ps1` 并保存连接；之后保存配对密钥，扩展和服务会后台重连。
 - 默认允许所有 HTTP / HTTPS 网站，减少小白用户逐站配置成本；需要收紧时再切到 origin 白名单。
 - 多 Agent 冲突、队列满和扩展临时断线默认返回 `status:"waiting"`、`retryable:true`、`suggestedDelayMs`、`nextPollTool` 和 `recommendedNextAction`，调用方应等待/轮询，不应把它当成任务失败。
-- 读类工具有 DOM/时间预算并返回 `diagnostics`；重页面可能返回 `partial:true`，调用方应使用已有部分结果或缩小 `maxElements/maxTextNodes/maxChars` 后再读。外层读超时只失败当前读请求，桥保持在线；写类工具超时仍按未知结果处理，避免自动重放误操作。
+- 读类工具有 DOM/时间预算并返回 `diagnostics`；重页面可能返回 `partial:true`，调用方应使用已有部分结果，或用 `mode:"cheap"`、更小的 `maxElements/maxTextNodes/maxChars` 后再读。外层读超时只失败当前读请求，桥保持在线；写类工具超时仍按未知结果处理，避免自动重放误操作。
 - 任意 agent 首次接入先读 `browser_agent_guide`；使用 `browser_queue_status` 查看 active/queued/connected 状态；等待恢复时调用 `browser_wait_until_ready`；共享 tab 的多步写任务用 `browser_claim_tab`，无人值守场景建议带 `wait:true`，长任务可用 `browser_renew_tab` 心跳，写工具带同一个 `agent` 会自动续租，结束后 `browser_release_tab`。
 - 上传仍要求本机 allowlisted upload root 和 SHA256，这是少数必须显式配置的安全边界。
 

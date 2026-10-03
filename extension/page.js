@@ -9,6 +9,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   const sensitive = el => el.matches('input[type=password],input[type=hidden]') || el.closest('[data-ai-private]');
   const fileInput = el => el instanceof HTMLInputElement && el.type === 'file';
   const label = el => (el.getAttribute('aria-label') || el.labels?.[0]?.innerText || el.getAttribute('placeholder') || el.innerText || el.getAttribute('title') || '').trim().slice(0, 180);
+  const cheapLabel = el => (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || el.getAttribute('id') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180);
   const fingerprint = el => JSON.stringify([el.tagName, el.getAttribute('type'), label(el), el.getAttribute('href'), el.getAttribute('formaction')]);
   const clean = value => (value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
   const elementBox = el => {
@@ -136,7 +137,38 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     let elementsBudgetHit = false;
     let elementErrors = 0;
     const maxElements = args.maxElements ?? 300;
-    const candidates = document.querySelectorAll('a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[contenteditable=true]');
+    const selector = 'a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[contenteditable=true]';
+    const max = args.maxChars ?? 16000;
+    const maxTextNodes = args.maxTextNodes ?? 4000;
+    const cheapRead = (reason = 'requested') => {
+      const cheapStarted = performance.now();
+      const cheapDeadline = reason === 'requested' ? deadline : performance.now() + Math.min(1200, Math.max(300, args.budgetMs ?? 6000));
+      const cheapElements = [];
+      const cheapCandidates = document.querySelectorAll(selector);
+      for (const el of cheapCandidates) {
+        if (cheapElements.length >= maxElements || performance.now() >= cheapDeadline) break;
+        if (sensitive(el)) continue;
+        const field = (el instanceof HTMLInputElement && !fileInput(el)) || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement;
+        cheapElements.push({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: cheapLabel(el), disabled: !!el.disabled,
+          ...(field ? { value: el.value.slice(0, 500), valueTruncated: el.value.length > 500, readOnly: !!el.readOnly } : {}),
+          ...(fileInput(el) ? { upload: true, accept: (el.accept || '').slice(0, 1000), multiple: !!el.multiple } : {}) });
+      }
+      const chunks = []; let length = 0; let node; let textNodesVisited = 0; let textBudgetHit = false;
+      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+      while ((node = walker.nextNode()) && length < max) {
+        textNodesVisited++;
+        if (textNodesVisited > maxTextNodes || performance.now() >= cheapDeadline) { textBudgetHit = true; break; }
+        const parent = node.parentElement;
+        if (!parent || parent.closest('script,style,noscript,input,textarea,[data-ai-private]')) continue;
+        const value = node.textContent.replace(/\s+/g, ' ').trim();
+        if (value) { chunks.push(value); length += value.length + 1; }
+      }
+      timings.cheapMs = Math.round(performance.now() - cheapStarted);
+      timings.totalMs = Math.round(performance.now() - started);
+      return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: chunks.join('\n').slice(0, max), truncated: length >= max || textBudgetHit, partial: true, elements: cheapElements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM; cheap', diagnostics: { mode: 'cheap', cheapReason: reason, budgetMs: args.budgetMs ?? 6000, timings, elementCandidates: cheapCandidates.length, elementsReturned: cheapElements.length, maxElements, elementsBudgetHit: cheapElements.length >= maxElements || performance.now() >= cheapDeadline, elementErrors, textNodesVisited, maxTextNodes, textBudgetHit }, contentTrust: 'untrusted webpage data' };
+    };
+    if (args.mode === 'cheap') return cheapRead('requested');
+    const candidates = document.querySelectorAll(selector);
     for (const el of candidates) {
       elementCandidates++;
       if (elements.length >= maxElements || overBudget()) { elementsBudgetHit = true; break; }
@@ -153,10 +185,10 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       } catch { elementErrors++; }
     }
     timings.elementsMs = Math.round(performance.now() - started);
+    if (elements.length === 0 && timings.elementsMs > Math.min(1000, (args.budgetMs ?? 6000) / 2)) return cheapRead('normal-elements-slow');
     // Extract rendered text nodes, not input values, scripts, or hidden content.
-    const max = args.maxChars ?? 16000;
     const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
-    const chunks = []; let length = 0; let node; let textNodesVisited = 0; let textBudgetHit = false; const maxTextNodes = args.maxTextNodes ?? 4000;
+    const chunks = []; let length = 0; let node; let textNodesVisited = 0; let textBudgetHit = false;
     while ((node = walker.nextNode()) && length < max) {
       textNodesVisited++;
       if (textNodesVisited > maxTextNodes || overBudget()) { textBudgetHit = true; break; }

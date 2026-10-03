@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "自主浏览器 · AI Browser Bridge",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "通过本机 MCP / CLI 将授权网页交给你选择的 AI，支持受限目录文件上传。无内置云模型。",
   "minimum_chrome_version": "120",
   "permissions": ["storage", "scripting", "tabs", "debugger", "sidePanel", "alarms"],
