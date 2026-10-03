@@ -142,6 +142,8 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const maxTextNodes = args.maxTextNodes ?? 4000;
     const cheapRead = (reason = 'requested') => {
       const cheapStarted = performance.now();
+      let quickText = '';
+      try { quickText = (document.body?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, max); } catch {}
       const cheapElements = [];
       const cheapCandidates = document.querySelectorAll(selector);
       const cheapDeadline = performance.now() + (reason === 'requested' ? Math.max(300, args.budgetMs ?? 6000) : Math.min(1200, Math.max(300, args.budgetMs ?? 6000)));
@@ -153,9 +155,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
           ...(field ? { value: el.value.slice(0, 500), valueTruncated: el.value.length > 500, readOnly: !!el.readOnly } : {}),
           ...(fileInput(el) ? { upload: true, accept: (el.accept || '').slice(0, 1000), multiple: !!el.multiple } : {}) });
       }
-      const chunks = []; let length = 0; let node; let textNodesVisited = 0; let textBudgetHit = false;
-      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
-      while ((node = walker.nextNode()) && length < max) {
+      const chunks = quickText ? [quickText] : []; let length = quickText.length; let node; let textNodesVisited = 0; let textBudgetHit = false;
+      const walker = quickText ? null : document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+      while (walker && (node = walker.nextNode()) && length < max) {
         textNodesVisited++;
         if (textNodesVisited > maxTextNodes || performance.now() >= cheapDeadline) { textBudgetHit = true; break; }
         const parent = node.parentElement;
