@@ -12,6 +12,7 @@ const tabLeases = new Map();
 const defaults = { port: 19387, token: '', allowedOrigins: [], allSites: true, enabled: false };
 const reconnectAlarm = 'ai-browser-bridge-reconnect';
 const settings = () => chrome.storage.local.get(defaults);
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function builtInAiApi() {
   const lm = globalThis.LanguageModel;
   if (lm?.availability && lm?.create) return { name: 'LanguageModel', api: lm };
@@ -279,8 +280,14 @@ async function execute(name, args) {
   if (lease && lease.expiresAt <= Date.now()) tabLeases.delete(leaseKey);
   const writeTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close', 'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_pick', 'browser_history']);
   if (name === 'browser_claim_tab') {
-    const existing = tabLeases.get(leaseKey);
-    if (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tabId: tab.id, requestedAgent: args.agent, holder: existing.agent, holderLeaseId: existing.leaseId, expiresAt: existing.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, existing.expiresAt - Date.now())), nextPollTool: 'browser_tab_lease', nextPollArgs: { tabId: tab.id }, recommendedNextAction: 'Keep the task alive, wait suggestedDelayMs, poll browser_tab_lease, then retry the write with the same agent after release.' };
+    const started = Date.now();
+    const waitBudgetMs = args.wait ? Math.min(args.ttlMs ?? 30000, 60000) : 0;
+    let existing = tabLeases.get(leaseKey);
+    while (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent && Date.now() - started < waitBudgetMs) {
+      await sleep(Math.min(500, Math.max(50, existing.expiresAt - Date.now())));
+      existing = tabLeases.get(leaseKey);
+    }
+    if (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tabId: tab.id, requestedAgent: args.agent, holder: existing.agent, holderLeaseId: existing.leaseId, expiresAt: existing.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, existing.expiresAt - Date.now())), nextPollTool: 'browser_claim_tab', nextPollArgs: { tabId: tab.id, agent: args.agent, ttlMs: args.ttlMs, wait: true }, recommendedNextAction: 'Keep the task alive; retry browser_claim_tab with wait:true, then write with the same agent after acquisition.' };
     const record = { agent: args.agent, leaseId: crypto.randomUUID(), acquiredAt: Date.now(), expiresAt: Date.now() + (args.ttlMs ?? 120000) };
     tabLeases.set(leaseKey, record);
     return { tabId: tab.id, ...record };

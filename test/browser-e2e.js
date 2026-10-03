@@ -76,7 +76,7 @@ try {
   mark('real extension UI pairing and WebSocket handshake');
   client = new Client({ name: 'e2e-ai-client', version: '1' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
-  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.5'); mark('MCP tool discovery and extension version handshake');
+  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.6'); mark('MCP tool discovery and extension version handshake');
   async function call(name, args = {}) {
     const result = await client.callTool({ name, arguments: args });
     if (result.isError) throw new Error(result.content[0].text);
@@ -115,7 +115,8 @@ try {
   }
   const guide = await call('browser_agent_guide');
   assert.equal(guide.defaults.waitingIsNotFailure, true);
-  assert.equal(guide.waitingContract.nextPollTool, 'browser_queue_status');
+  assert.equal(guide.waitingContract.nextPollTool, 'browser_wait_until_ready');
+  assert.equal((await call('browser_wait_until_ready', { timeoutMs: 1000 })).status, 'ready');
   const opened = await call('browser_open', { url: `${origin}/fixture` }); const tabId = opened.tabId;
   const page = await context.waitForEvent('page', { timeout: 500 }).catch(() => context.pages().find(p => p.url().startsWith(origin)));
   await page.waitForLoadState('load');
@@ -210,6 +211,11 @@ try {
   await call('browser_scroll', { tabId, deltaY: 10, agent: 'e2e-agent' });
   await call('browser_release_tab', { tabId, agent: 'e2e-agent' });
   assert.equal((await call('browser_tab_lease', { tabId })).lease, null);
+  const shortLease = await call('browser_claim_tab', { tabId, agent: 'short-owner', ttlMs: 1000 });
+  assert.equal(shortLease.agent, 'short-owner');
+  const waitedLease = await call('browser_claim_tab', { tabId, agent: 'wait-agent', ttlMs: 2000, wait: true });
+  assert.equal(waitedLease.agent, 'wait-agent');
+  await call('browser_release_tab', { tabId, agent: 'wait-agent' });
   mark('browser tab enforced lease returns waiting for unowned writes and allows owner writes');
   await assert.rejects(call('browser_click', { tabId, ref: button.ref }), /Stale/); mark('stale snapshot refs rejected');
   const replace = read.elements.find(e => e.label === '替换按钮');
@@ -270,7 +276,7 @@ try {
   const taskWaiting = await call('browser_read', { tabId });
   assert.equal(taskWaiting.status, 'waiting');
   assert.equal(taskWaiting.reason, 'global_agent_task_lease');
-  assert.equal(taskWaiting.nextPollTool, 'browser_queue_status');
+  assert.equal(taskWaiting.nextPollTool, 'browser_wait_until_ready');
   assert.ok(taskWaiting.recommendedNextAction.includes('Keep the agent task alive'));
   mark('agent task lease returns waiting for other clients without ending their tasks');
   await assistant.locator('#cancel').click();
@@ -316,7 +322,11 @@ try {
   await call('browser_close', { tabId: second.tabId });
   await panel.locator('#pause').click();
   await panel.waitForFunction(async () => !(await chrome.storage.local.get('enabled')).enabled);
-  await assert.rejects(call('browser_tabs'), /not connected|paused|lost/); mark('user pause stops subsequent commands');
+  const paused = await call('browser_tabs');
+  assert.equal(paused.status, 'waiting');
+  assert.equal(paused.reason, 'extension_disconnected');
+  assert.equal(paused.nextPollTool, 'browser_wait_until_ready');
+  mark('user pause returns waiting guidance instead of ending unattended tasks');
   await panel.locator('#reconnect').click();
   await waitExtensionConnected();
   await call('browser_close', { tabId }); assert.ok(!(await call('browser_tabs')).some(t => t.id === tabId)); mark('explicit reconnect and close verified');

@@ -55,9 +55,22 @@ test('strict validation denies unsupported actions and unsafe URL schemes', () =
   validateCall('browser_claim_tab', { tabId: 1, agent: 'lease-owner', wait: true });
   validateCall('browser_queue_status', {});
   validateCall('browser_agent_guide', {});
+  validateCall('browser_wait_until_ready', { timeoutMs: 100, idle: true });
   assert.throws(() => validateCall('browser_scroll', { tabId: 1, deltaY: 10, agent: '' }));
   assert.throws(() => validateCall('browser_claim_tab', { tabId: 1, agent: 'lease-owner', wait: 'yes' }));
+  assert.throws(() => validateCall('browser_wait_until_ready', { timeoutMs: 99 }));
   assert.throws(() => validateCall('browser_upload', { tabId: 1, ref: 'a', filePath: 'C:/a.zip', sha256: 'bad' }));
+});
+
+test('disconnected extension returns waiting guidance instead of ending unattended tasks', async t => {
+  const { b } = await setup(t);
+  const tabs = await b.call('browser_tabs', {});
+  assert.equal(tabs.status, 'waiting');
+  assert.equal(tabs.reason, 'extension_disconnected');
+  assert.equal(tabs.nextPollTool, 'browser_wait_until_ready');
+  const ready = await b.call('browser_wait_until_ready', { timeoutMs: 100 });
+  assert.equal(ready.status, 'waiting');
+  assert.equal(ready.reason, 'extension_disconnected');
 });
 
 test('upload is root-confined, hash-bound, and sends bytes without the local path', async t => {
@@ -129,8 +142,8 @@ test('read-only timeout fails only that request and keeps the bridge connected',
   assert.equal(b.status().queued, 0);
 });
 
-test('queue status is served locally while a command is active', async t => {
-  const { b, wsUrl } = await setup(t, { timeoutMs: 60 });
+test('queue status and ready waits are served locally while a command is active', async t => {
+  const { b, wsUrl } = await setup(t, { timeoutMs: 300 });
   const ws = await extension(wsUrl);
   ws.on('message', raw => {
     const msg = JSON.parse(raw);
@@ -141,11 +154,14 @@ test('queue status is served locally while a command is active', async t => {
   await new Promise(resolve => setTimeout(resolve, 20));
   const guide = await b.call('browser_agent_guide', {});
   assert.equal(guide.defaults.waitingIsNotFailure, true);
-  assert.equal(guide.waitingContract.nextPollTool, 'browser_queue_status');
+  assert.equal(guide.waitingContract.nextPollTool, 'browser_wait_until_ready');
   const status = await b.call('browser_queue_status', {});
   assert.equal(status.connected, true);
   assert.equal(status.active.tool, 'browser_read');
   assert.ok(Array.isArray(status.queuedJobs));
   assert.ok(status.policy.recommendedNextAction.includes('Wait'));
+  const ready = await b.call('browser_wait_until_ready', { timeoutMs: 100, idle: true });
+  assert.equal(ready.status, 'waiting');
+  assert.equal(ready.reason, 'service_busy');
   assert.match(await slow, /bridge remains connected/);
 });
