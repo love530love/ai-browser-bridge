@@ -323,4 +323,3 @@ try {
   await new Promise(resolve => otherFixture.close(resolve));
   mockModel.closeAllConnections(); await new Promise(resolve => mockModel.close(resolve));
 }
-
