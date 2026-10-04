@@ -36,7 +36,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const agentGuide = () => ({
     service: 'ai-browser-bridge',
-    version: '0.4.13',
+    version: '0.4.14',
     defaults: {
       unattended: true,
       allHttpSitesAllowedByDefault: true,
@@ -70,7 +70,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   });
   const queueSnapshot = () => ({
     service: 'ai-browser-bridge',
-    version: '0.4.13',
+    version: '0.4.14',
     extensionVersion,
     connected: extension?.readyState === WebSocket.OPEN,
     queued: queue.length,
@@ -274,3 +274,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   console.log(`AI Browser Bridge listening on 127.0.0.1:${config.port}`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => bridge.close().then(() => process.exit(0)));
 }
+

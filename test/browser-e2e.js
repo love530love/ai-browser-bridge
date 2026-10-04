@@ -10,6 +10,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createBridge } from '../src/server.js';
 import { ROOT } from '../src/config.js';
 import { TOOLS } from '../src/tools.js';
+import pkg from '../package.json' with { type: 'json' };
 
 const out = join(ROOT, 'output', 'playwright'); mkdirSync(out, { recursive: true });
 const checks = [];
@@ -67,22 +68,6 @@ try {
   assert.equal(await panel.locator('#all-sites').isChecked(), true);
   assert.equal(await worker.evaluate(async () => (await chrome.storage.local.get({ allSites: true })).allSites), true);
   mark('new and existing storage without allSites defaults to all sites');
-  await panel.locator('#all-sites').uncheck();
-  await panel.locator('#origins').fill(origin);
-  await panel.locator('#save').click();
-  await panel.waitForFunction(async () => (await chrome.runtime.sendMessage({ type: 'status' })).connectionState === '已连接');
-  await panel.waitForFunction(() => document.getElementById('status').textContent === '已连接');
-  if (!bridge.status().connected) throw new Error(`Bridge disconnected: ${JSON.stringify(await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'status' })))}`);
-  mark('real extension UI pairing and WebSocket handshake');
-  client = new Client({ name: 'e2e-ai-client', version: '1' });
-  await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
-  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, '0.4.13'); mark('MCP tool discovery and extension version handshake');
-  async function call(name, args = {}) {
-    const result = await client.callTool({ name, arguments: args });
-    if (result.isError) throw new Error(result.content[0].text);
-    if (result.content[0].type === 'image') return result.content[0];
-    return JSON.parse(result.content[0].text);
-  }
   async function waitBridgeConnected() {
     let stable = 0;
     for (let i = 0; i < 80; i++) {
@@ -112,6 +97,20 @@ try {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     throw new Error(`Extension did not reconnect: ${JSON.stringify({ extension: lastState, bridge: bridge.status() })}`);
+  }
+  await panel.locator('#all-sites').uncheck();
+  await panel.locator('#origins').fill(origin);
+  await panel.locator('#save').click();
+  await waitExtensionConnected();
+  mark('real extension UI pairing and WebSocket handshake');
+  client = new Client({ name: 'e2e-ai-client', version: '1' });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')], env: { ...process.env, AIB_STATE_DIR: tempState } }));
+  const tools = await client.listTools(); assert.equal(tools.tools.length, TOOLS.length); assert.equal(bridge.status().extensionVersion, pkg.version); mark('MCP tool discovery and extension version handshake');
+  async function call(name, args = {}) {
+    const result = await client.callTool({ name, arguments: args });
+    if (result.isError) throw new Error(result.content[0].text);
+    if (result.content[0].type === 'image') return result.content[0];
+    return JSON.parse(result.content[0].text);
   }
   const guide = await call('browser_agent_guide');
   assert.equal(guide.defaults.waitingIsNotFailure, true);
@@ -248,7 +247,7 @@ try {
   assert.equal(waitedLease.agent, 'wait-agent');
   await call('browser_release_tab', { tabId, agent: 'wait-agent' });
   mark('browser tab enforced lease returns waiting for unowned writes and allows owner writes');
-  await assert.rejects(call('browser_click', { tabId, ref: button.ref }), /Stale/); mark('stale snapshot refs rejected');
+  assert.equal((await call('browser_click', { tabId, ref: button.ref })).clicked, true); mark('recent snapshot refs survive intervening reads');
   const replace = read.elements.find(e => e.label === '替换按钮');
   await page.locator('#replace').evaluate(el => el.textContent = '已改变的操作');
   await assert.rejects(call('browser_click', { tabId, ref: replace.ref }), /Stale/); mark('changed element semantics rejected');
@@ -372,3 +371,4 @@ try {
   await new Promise(resolve => otherFixture.close(resolve));
   mockModel.closeAllConnections(); await new Promise(resolve => mockModel.close(resolve));
 }
+

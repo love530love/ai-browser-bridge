@@ -11,6 +11,23 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   const label = el => (el.getAttribute('aria-label') || el.labels?.[0]?.innerText || el.getAttribute('placeholder') || el.innerText || el.getAttribute('title') || '').trim().slice(0, 180);
   const cheapLabel = el => (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || el.getAttribute('id') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180);
   const fingerprint = el => JSON.stringify([el.tagName, el.getAttribute('type'), label(el), el.getAttribute('href'), el.getAttribute('formaction')]);
+  const rememberState = state => {
+    state.createdAt = Date.now();
+    const snapshots = globalThis.__aiBrowserBridgeSnapshots instanceof Map ? globalThis.__aiBrowserBridgeSnapshots : new Map();
+    snapshots.set(state.snapshot, state);
+    const now = Date.now();
+    for (const [key, value] of snapshots) {
+      if (snapshots.size <= 12 && now - (value.createdAt || 0) <= 120000) break;
+      if (now - (value.createdAt || 0) > 120000 || snapshots.size > 12) snapshots.delete(key);
+    }
+    globalThis.__aiBrowserBridgeSnapshots = snapshots;
+    globalThis.__aiBrowserBridge = state;
+    return state;
+  };
+  const stateForRef = ref => {
+    const snapshot = typeof ref === 'string' ? ref.split(':', 1)[0] : '';
+    return globalThis.__aiBrowserBridgeSnapshots?.get(snapshot) || (globalThis.__aiBrowserBridge?.snapshot === snapshot ? globalThis.__aiBrowserBridge : null);
+  };
   const clean = value => (value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
   const collectReadableText = ({ max = 16000, maxTextNodes = 4000, deadline = Infinity, requireVisible = true } = {}) => {
     const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
@@ -28,6 +45,36 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       if (value) { chunks.push(value); length += value.length + 1; }
     }
     return { text: chunks.join('\n').slice(0, max), length, textNodesVisited, textBudgetHit };
+  };
+  const findReadableTextMatches = ({ query, maxMatches = 10, contextChars = 160, deadline = Infinity, maxTextNodes = 50000, requireVisible = true } = {}) => {
+    const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+    const matches = [];
+    let node;
+    let textNodesVisited = 0;
+    let textBudgetHit = false;
+    let indexBase = 0;
+    while ((node = walker.nextNode()) && matches.length < maxMatches) {
+      textNodesVisited++;
+      if (textNodesVisited > maxTextNodes || performance.now() >= deadline) { textBudgetHit = true; break; }
+      const parent = node.parentElement;
+      if (!parent || parent.closest('script,style,noscript,input,textarea,select,[data-ai-private],[hidden],[aria-hidden=true],.hidden,#hidden,[style*=\"display:none\"],[style*=\"display: none\"]') || sensitive(parent) || (requireVisible && !visible(parent))) continue;
+      const value = node.textContent.replace(/\s+/g, ' ').trim();
+      if (!value) continue;
+      let from = 0;
+      while (matches.length < maxMatches) {
+        const index = value.indexOf(query, from);
+        if (index < 0) break;
+        matches.push({
+          index: indexBase + index,
+          before: value.slice(Math.max(0, index - contextChars), index).trim(),
+          match: value.slice(index, index + query.length),
+          after: value.slice(index + query.length, index + query.length + contextChars).trim()
+        });
+        from = index + Math.max(1, query.length);
+      }
+      indexBase += value.length + 1;
+    }
+    return { matches, textNodesVisited, textBudgetHit };
   };
   const elementBox = el => {
     const box = el.getBoundingClientRect();
@@ -147,8 +194,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const timings = {};
     const overBudget = () => performance.now() >= deadline;
     const snapshot = crypto.randomUUID();
-    const state = { snapshot, url: location.href, refs: new Map() };
-    globalThis.__aiBrowserBridge = state;
+    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
     const elements = [];
     let elementCandidates = 0;
     let elementsBudgetHit = false;
@@ -227,6 +273,8 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       });
       from = index + Math.max(1, query.length);
     }
+    const direct = matches.length > 0 ? null : findReadableTextMatches({ query, maxMatches, contextChars, deadline, maxTextNodes: cheap ? 50000 : 50000, requireVisible: !cheap });
+    if (direct?.matches?.length) matches.push(...direct.matches.slice(0, maxMatches - matches.length));
     const nearbyElements = [];
     let elementCandidates = 0;
     let elementBudgetHit = false;
@@ -239,7 +287,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
         if (item.label && (item.label.includes(query) || matches.some(m => item.label.includes(m.match) || m.after.includes(item.label) || m.before.includes(item.label)))) nearbyElements.push(item);
       }
     }
-    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || elementBudgetHit, matches, nearbyElements, diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: normalized.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, maxTextNodes: cheap ? 8000 : 50000, textBudgetHit: collected.textBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
+    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || !!direct?.textBudgetHit || elementBudgetHit, matches, nearbyElements, diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: normalized.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, directTextNodesVisited: direct?.textNodesVisited ?? 0, maxTextNodes: cheap ? 50000 : 50000, textBudgetHit: collected.textBudgetHit || !!direct?.textBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_observe') {
     const read = await pageOperation('browser_read', { ...args, maxChars: args.maxChars ?? 16000 }, allowedOrigins, allSites);
@@ -302,7 +350,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { scrollX: window.scrollX, scrollY: window.scrollY };
   }
   if (name === 'browser_pick') return await pickControl();
-  const state = globalThis.__aiBrowserBridge;
+  const state = stateForRef(args.ref);
   const entry = state?.refs.get(args.ref);
   if (!entry || state.url !== location.href || !entry.el.isConnected || fingerprint(entry.el) !== entry.fingerprint) throw new Error('Stale element reference. Read page again.');
   const el = entry.el;
