@@ -16,8 +16,3 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
   } catch (e) { return { isError: true, content: [{ type: 'text', text: e.message }] }; }
 });
 await server.connect(new StdioServerTransport());
-
-
-
-
-
