@@ -256,25 +256,27 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const budgetMs = args.budgetMs ?? (cheap ? 1500 : 5000);
     const maxElements = args.maxElements ?? 200;
     const deadline = started + budgetMs;
-    const collected = cheap
-      ? collectReadableText({ max: 500000, maxTextNodes: 50000, deadline, requireVisible: false })
-      : collectReadableText({ max: 500000, maxTextNodes: 50000, deadline });
-    const normalized = collected.text.replace(/\s+/g, ' ');
-    const matches = [];
-    let from = 0;
-    while (matches.length < maxMatches) {
-      const index = normalized.indexOf(query, from);
-      if (index < 0) break;
-      matches.push({
-        index,
-        before: normalized.slice(Math.max(0, index - contextChars), index).trim(),
-        match: normalized.slice(index, index + query.length),
-        after: normalized.slice(index + query.length, index + query.length + contextChars).trim()
-      });
-      from = index + Math.max(1, query.length);
+    const direct = findReadableTextMatches({ query, maxMatches, contextChars, deadline, maxTextNodes: 50000, requireVisible: false });
+    const matches = [...direct.matches];
+    let collected = { text: '', textNodesVisited: 0, textBudgetHit: false };
+    if (matches.length < maxMatches && performance.now() < deadline) {
+      collected = cheap
+        ? collectReadableText({ max: 500000, maxTextNodes: 50000, deadline, requireVisible: false })
+        : collectReadableText({ max: 500000, maxTextNodes: 50000, deadline });
+      const normalized = collected.text.replace(/\s+/g, ' ');
+      let from = 0;
+      while (matches.length < maxMatches) {
+        const index = normalized.indexOf(query, from);
+        if (index < 0) break;
+        matches.push({
+          index,
+          before: normalized.slice(Math.max(0, index - contextChars), index).trim(),
+          match: normalized.slice(index, index + query.length),
+          after: normalized.slice(index + query.length, index + query.length + contextChars).trim()
+        });
+        from = index + Math.max(1, query.length);
+      }
     }
-    const direct = matches.length > 0 ? null : findReadableTextMatches({ query, maxMatches, contextChars, deadline, maxTextNodes: cheap ? 50000 : 50000, requireVisible: !cheap });
-    if (direct?.matches?.length) matches.push(...direct.matches.slice(0, maxMatches - matches.length));
     const nearbyElements = [];
     let elementCandidates = 0;
     let elementBudgetHit = false;
@@ -440,3 +442,4 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { __aibError: error.message };
   }
 }
+

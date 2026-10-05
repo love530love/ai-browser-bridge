@@ -32,25 +32,33 @@ function findTextOperation(args, allowedOrigins, allSites) {
   const contextChars = args.contextChars ?? 160;
   const budgetMs = args.budgetMs ?? (args.mode === 'cheap' ? 1500 : 5000);
   const deadline = started + budgetMs;
-  const chunks = [];
+  const matches = [];
   let visited = 0;
+  let textLength = 0;
+  let textBudgetHit = false;
   const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
   let node;
-  while ((node = walker.nextNode()) && visited < 50000 && performance.now() < deadline) {
+  while ((node = walker.nextNode()) && visited < 50000) {
     visited++;
+    if (performance.now() >= deadline) { textBudgetHit = true; break; }
     const parent = node.parentElement;
-    if (!parent || parent.closest('script,style,noscript,input,textarea,select,[data-ai-private],[hidden],[aria-hidden=true],.hidden,#hidden,[style*=\"display:none\"],[style*=\"display: none\"]')) continue;
+    if (!parent || parent.closest('script,style,noscript,input,textarea,select,[data-ai-private],[hidden],[aria-hidden=true],.hidden,#hidden,[style*="display:none"],[style*="display: none"]')) continue;
     const value = node.textContent.replace(/\s+/g, ' ').trim();
-    if (value) chunks.push(value);
-  }
-  const text = chunks.join(' ').replace(/\s+/g, ' ');
-  const matches = [];
-  let from = 0;
-  while (matches.length < maxMatches && performance.now() < deadline) {
-    const index = text.indexOf(query, from);
-    if (index < 0) break;
-    matches.push({ index, before: text.slice(Math.max(0, index - contextChars), index).trim(), match: text.slice(index, index + query.length), after: text.slice(index + query.length, index + query.length + contextChars).trim() });
-    from = index + Math.max(1, query.length);
+    if (!value) continue;
+    let from = 0;
+    while (matches.length < maxMatches) {
+      const index = value.indexOf(query, from);
+      if (index < 0) break;
+      matches.push({
+        index: textLength + index,
+        before: value.slice(Math.max(0, index - contextChars), index).trim(),
+        match: value.slice(index, index + query.length),
+        after: value.slice(index + query.length, index + query.length + contextChars).trim()
+      });
+      from = index + Math.max(1, query.length);
+    }
+    textLength += value.length + 1;
+    if (matches.length >= maxMatches) break;
   }
   const nearbyElements = [];
   let elementCandidates = 0, elementBudgetHit = false;
@@ -65,7 +73,7 @@ function findTextOperation(args, allowedOrigins, allSites) {
       if (label && (label.includes(query) || matches.some(m => label.includes(m.match) || m.after.includes(label) || m.before.includes(label)))) nearbyElements.push(item);
     }
   }
-  return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || elementBudgetHit || visited >= 50000, matches, nearbyElements, diagnostics: { mode: args.mode === 'cheap' ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: text.length, contextChars, maxMatches, budgetMs, textNodesVisited: visited, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
+  return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || elementBudgetHit || textBudgetHit || visited >= 50000, matches, nearbyElements, diagnostics: { mode: args.mode === 'cheap' ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength, contextChars, maxMatches, budgetMs, textNodesVisited: visited, textBudgetHit, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
 }
 function builtInAiApi() {
   const lm = globalThis.LanguageModel;

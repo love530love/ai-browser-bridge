@@ -63,6 +63,7 @@ try {
   worker.on('console', msg => { if (msg.type() === 'error') console.error('WORKER:', msg.text()); });
   const panel = await context.newPage(); await panel.goto(`chrome-extension://${extensionId}/panel.html`);
   panel.on('pageerror', error => console.error('PANEL ERROR:', error.message));
+  await panel.waitForFunction(() => document.getElementById('status').textContent !== '读取状态…' && document.getElementById('port').value);
   await panel.locator('#token').fill(config.extensionToken);
   await panel.locator('#port').fill(String(config.port));
   assert.equal(await panel.locator('#all-sites').isChecked(), true);

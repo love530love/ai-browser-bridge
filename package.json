@@ -1,6 +1,6 @@
 {
   "name": "ai-browser-bridge",
-  "version": "0.4.14",
+  "version": "0.4.16",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -14,7 +14,8 @@
     "mcp": "node src/mcp.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "test:e2e": "node test/browser-e2e.js",
-    "test:stress": "node test/browser-stress.js"
+    "test:stress": "node test/browser-stress.js",
+    "doctor": "node src/cli.js doctor"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",
