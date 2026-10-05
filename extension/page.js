@@ -82,6 +82,29 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const hit = box.width > 0 && box.height > 0 ? document.elementFromPoint(Math.min(Math.max(x, 0), innerWidth - 1), Math.min(Math.max(y, 0), innerHeight - 1)) : null;
     return { x, y, left: box.left, top: box.top, width: box.width, height: box.height, covered: !!hit && hit !== el && !el.contains(hit), hitTag: hit?.tagName?.toLowerCase() || null };
   };
+  const shortSelector = el => clean([el.tagName?.toLowerCase(), el.id ? `#${el.id}` : '', el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 3).join('.') : ''].join(''));
+  const overlayHint = el => {
+    const s = `${el.id || ''} ${el.className || ''} ${el.getAttribute('role') || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
+    if (el.matches('dialog,[role=dialog],[aria-modal=true]')) return 'dialog';
+    if (/cookie|consent|gdpr|privacy|ad-|advert|ads|popup|pop-up|modal|overlay|mask|drawer|tour|guide|onboard|intercom|chat|客服|广告|弹窗|浮层|遮罩|引导/.test(s)) return 'semantic-overlay';
+    const style = getComputedStyle(el);
+    if ((style.position === 'fixed' || style.position === 'sticky') && Number(style.zIndex) >= 10) return `${style.position}-high-z`;
+    return '';
+  };
+  const closeHint = el => /^(×|x)$/i.test(clean(el.textContent)) || /(close|dismiss|skip|got it|later|no thanks|not now|accept|agree|关闭|取消|跳过|我知道|知道了|稍后|不再|同意|接受)/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.textContent || ''}`);
+  const elementSummary = (el, extra = {}) => ({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: clean(label(el) || el.textContent), selector: shortSelector(el), ...elementBox(el), ...extra });
+  const waitGone = async (ref, timeoutMs = 3000) => {
+    if (!ref) return null;
+    const targetState = stateForRef(ref);
+    const target = targetState?.refs.get(ref)?.el;
+    if (!target) return { status: 'gone' };
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (!target.isConnected || !visible(target)) return { status: 'gone', elapsedMs: Date.now() - started };
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return { status: (!target.isConnected || !visible(target)) ? 'gone' : 'still-present', elapsedMs: Date.now() - started };
+  };
   const pageText = () => document.body?.innerText || '';
   const verify = async (expect = {}, timeoutMs = 3000, context = {}) => {
     const started = Date.now();
@@ -289,7 +312,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
         if (item.label && (item.label.includes(query) || matches.some(m => item.label.includes(m.match) || m.after.includes(item.label) || m.before.includes(item.label)))) nearbyElements.push(item);
       }
     }
-    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || !!direct?.textBudgetHit || elementBudgetHit, matches, nearbyElements, diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: normalized.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, directTextNodesVisited: direct?.textNodesVisited ?? 0, maxTextNodes: cheap ? 50000 : 50000, textBudgetHit: collected.textBudgetHit || !!direct?.textBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
+    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || !!direct?.textBudgetHit || elementBudgetHit, matches, nearbyElements, diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: collected.text.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, directTextNodesVisited: direct?.textNodesVisited ?? 0, maxTextNodes: cheap ? 50000 : 50000, textBudgetHit: collected.textBudgetHit || !!direct?.textBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_observe') {
     const read = await pageOperation('browser_read', { ...args, maxChars: args.maxChars ?? 16000 }, allowedOrigins, allSites);
@@ -302,6 +325,61 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       geometry.push({ ref: item.ref, label: item.label, tag: item.tag, role: item.role, upload: !!item.upload, ...elementBox(entry.el) });
     }
     return { read, debug, geometry, observationTrust: 'untrusted webpage data plus extension geometry', scope: 'main-frame; light DOM' };
+  }
+  if (name === 'browser_scan_overlays') {
+    const snapshot = crypto.randomUUID();
+    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
+    const makeRef = el => {
+      for (const [existingRef, entry] of state.refs) if (entry.el === el) return existingRef;
+      const ref = `${snapshot}:${state.refs.size + 1}`;
+      state.refs.set(ref, { el, fingerprint: fingerprint(el) });
+      return ref;
+    };
+    const viewportArea = Math.max(1, innerWidth * innerHeight);
+    const overlays = [];
+    const overlaySelector = 'dialog,[role=dialog],[aria-modal=true],[popover],[class*=modal i],[class*=popup i],[class*=overlay i],[class*=mask i],[class*=cookie i],[class*=consent i],[class*=ad i],[class*=chat i],[id*=modal i],[id*=popup i],[id*=overlay i],[id*=cookie i],[id*=consent i],[id*=ad i],[id*=chat i]';
+    const candidates = new Set([...document.querySelectorAll(overlaySelector)]);
+    for (const el of document.querySelectorAll('body *')) {
+      if (candidates.size >= 250) break;
+      if (!visible(el) || sensitive(el)) continue;
+      const style = getComputedStyle(el);
+      if (!['fixed', 'sticky'].includes(style.position)) continue;
+      const box = el.getBoundingClientRect();
+      const area = Math.max(0, box.width * box.height);
+      if (area > viewportArea * 0.015 || Number(style.zIndex) >= 10) candidates.add(el);
+    }
+    for (const el of candidates) {
+      if (!visible(el) || sensitive(el)) continue;
+      const box = el.getBoundingClientRect();
+      if (box.width < 8 || box.height < 8) continue;
+      const hint = overlayHint(el);
+      const areaRatio = Math.round((box.width * box.height / viewportArea) * 1000) / 1000;
+      const style = getComputedStyle(el);
+      const closeCandidates = [];
+      for (const close of [...el.querySelectorAll('button,a,[role=button],[aria-label],[title]')].filter(closeHint).slice(0, 12)) {
+        if (!visible(close) || sensitive(close)) continue;
+        closeCandidates.push({ ref: makeRef(close), ...elementSummary(close) });
+      }
+      overlays.push({ ref: makeRef(el), hint, areaRatio, position: style.position, zIndex: style.zIndex || 'auto', pointerEvents: style.pointerEvents, opacity: style.opacity, ...elementSummary(el), closeCandidates });
+    }
+    overlays.sort((a, b) => (b.areaRatio - a.areaRatio) || ((Number(b.zIndex) || 0) - (Number(a.zIndex) || 0)));
+    const scrollContainers = [];
+    for (const el of document.querySelectorAll('body *')) {
+      if (scrollContainers.length >= 40) break;
+      if (!visible(el) || sensitive(el)) continue;
+      const style = getComputedStyle(el);
+      if (!/(auto|scroll)/.test(`${style.overflowY} ${style.overflow}`) || el.scrollHeight <= el.clientHeight + 20) continue;
+      scrollContainers.push({ ref: makeRef(el), scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, ...elementSummary(el) });
+    }
+    const samplePoints = [[0.5, 0.5], [0.5, 0.12], [0.5, 0.88], [0.12, 0.5], [0.88, 0.5]];
+    const hitTest = samplePoints.map(([px, py]) => {
+      const x = Math.max(0, Math.min(innerWidth - 1, Math.round(innerWidth * px)));
+      const y = Math.max(0, Math.min(innerHeight - 1, Math.round(innerHeight * py)));
+      const el = document.elementFromPoint(x, y);
+      if (!el || sensitive(el)) return { x, y, element: null };
+      return { x, y, ref: makeRef(el), element: elementSummary(el, { hint: overlayHint(el) || null }) };
+    });
+    return { title: document.title, url: location.href, viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY }, overlays: overlays.slice(0, 50), scrollContainers, hitTest, guidance: 'Use closeCandidates refs with browser_dismiss_overlay only when label/hint clearly identifies a blocker. Use scrollContainers refs with browser_scroll_element for nested panes.', contentTrust: 'untrusted webpage data plus extension hit testing' };
   }
   if (name === 'browser_debug') {
     const describe = el => !el ? null : ({
@@ -357,6 +435,24 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   if (!entry || state.url !== location.href || !entry.el.isConnected || fingerprint(entry.el) !== entry.fingerprint) throw new Error('Stale element reference. Read page again.');
   const el = entry.el;
   if (sensitive(el) || el.disabled || el.getAttribute('aria-disabled') === 'true' || (!visible(el) && name !== 'browser_upload')) throw new Error('Element unavailable or protected');
+  if (name === 'browser_scroll_element') {
+    if (!Number.isInteger(args.deltaY) || Math.abs(args.deltaY) > 5000) throw new Error('Invalid scroll');
+    if (typeof el.scrollTop !== 'number' || el.scrollHeight <= el.clientHeight) throw new Error('Element is not a scrollable container');
+    const before = el.scrollTop;
+    el.scrollTop = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, el.scrollTop + args.deltaY));
+    el.dispatchEvent(new Event('scroll', { bubbles: true }));
+    return { scrollTop: el.scrollTop, before, changed: el.scrollTop !== before, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight };
+  }
+  if (name === 'browser_dismiss_overlay') {
+    const box = el.getBoundingClientRect();
+    const x = Math.min(Math.max(box.left + box.width / 2, 0), innerWidth - 1);
+    const y = Math.min(Math.max(box.top + box.height / 2, 0), innerHeight - 1);
+    const hit = document.elementFromPoint(x, y);
+    if (!hit || (hit !== el && !el.contains(hit))) throw new Error('Dismiss target is covered or not topmost. Scan overlays again.');
+    el.click();
+    const gone = await waitGone(args.expectGoneRef || args.ref, args.timeoutMs ?? 3000);
+    return { clicked: true, verification: gone, note: 'Dismiss clicked once; read or scan overlays again to verify page state.' };
+  }
   if (name === 'browser_upload') {
     if (!fileInput(el)) throw new Error('Element is not a file input');
     if (typeof args.data !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(args.data) || typeof args.fileName !== 'string' || !args.fileName || args.fileName.includes('/') || args.fileName.includes('\\')) throw new Error('Invalid upload payload');
@@ -442,4 +538,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { __aibError: error.message };
   }
 }
+
+
+
 

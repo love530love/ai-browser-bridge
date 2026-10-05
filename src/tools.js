@@ -40,6 +40,7 @@ export const TOOLS = [
     mode: { type: 'string', enum: ['normal', 'cheap'] }
   }, ['tabId', 'query'], true),
   tool('browser_debug', 'Read-only developer diagnostics for the current page: readiness, focus, scroll, visible combobox options, file inputs, dialogs, iframe count, and element role counts. Use this before guessing coordinates when a page automation step is unclear.', { tabId }, ['tabId'], true),
+  tool('browser_scan_overlays', 'Read-only scan for dialogs, ads, cookie banners, guide overlays, chat widgets, transparent blockers, close buttons, hit-test blockers, and scrollable containers. Use before clicking through complex or ad-heavy pages.', { tabId }, ['tabId'], true),
   tool('browser_health', 'Layered health check for service, extension, tab permission, content-script injection, debugger availability hints, page readiness, and tool version. Use before diagnosing blank reads or failed automation.', { tabId }, [], true),
   tool('browser_bridge_modes', 'Read available browser-control modes and their fallback order: DOM, verified transactions, picker/upload bridges, CDP keyboard/pointer, screenshot, and coordinate adapter. Use to choose the least fragile mode.', { tabId }, [], true),
   tool('browser_failure_help', 'Read-only retry guidance after a failed browser action. Classifies the failure, recommends the next safest bridge mode, and states whether retry is allowed or human confirmation is required.', {
@@ -68,6 +69,8 @@ export const TOOLS = [
     tabId, ref, filePath: text(32767), sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, expect, timeoutMs: timeoutMs(10000), agent
   }, ['tabId', 'ref', 'filePath', 'sha256', 'expect']),
   tool('browser_scroll', 'Scroll main frame by a bounded pixel offset. If the tab is leased, pass the matching agent.', { tabId, deltaY: { type: 'integer', minimum: -5000, maximum: 5000 }, agent }, ['tabId', 'deltaY']),
+  tool('browser_scroll_element', 'Scroll a current scrollable container ref from browser_scan_overlays or browser_read. Use for nested panes, modal bodies, virtualized lists, and dropdown menus. If the tab is leased, pass the matching agent.', { tabId, ref, deltaY: { type: 'integer', minimum: -5000, maximum: 5000 }, agent }, ['tabId', 'ref', 'deltaY']),
+  tool('browser_dismiss_overlay', 'Click a current close/dismiss ref from browser_scan_overlays once. Use only when the candidate clearly belongs to an overlay/ad/cookie/chat/guide blocker. If expectGoneRef is supplied, waits until it disappears or becomes hidden.', { tabId, ref, expectGoneRef: { type: 'string', minLength: 1, maxLength: 100 }, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref']),
   tool('browser_navigate', 'Navigate an allowed tab to another user-allowed HTTP(S) URL. If the tab is leased, pass the matching agent.', { tabId, url: text(8000), agent }, ['tabId', 'url']),
   tool('browser_close', 'Close an allowed tab. Unsaved edits may be lost. If the tab is leased, pass the matching agent.', { tabId, agent }, ['tabId']),
   tool('browser_screenshot', 'Capture an allowed tab using a temporary debugger attachment. Fails if another debugger owns it. Pixels may contain sensitive page content and embedded frames.', { tabId }, ['tabId'], true),
@@ -122,3 +125,4 @@ export function validateCall(name, args) {
   }
   return t;
 }
+

@@ -340,7 +340,7 @@ async function execute(name, args) {
   const leaseKey = String(tab.id);
   const lease = tabLeases.get(leaseKey);
   if (lease && lease.expiresAt <= Date.now()) tabLeases.delete(leaseKey);
-  const writeTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close', 'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_pick', 'browser_history']);
+  const writeTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close', 'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_pick', 'browser_history']);
   if (name === 'browser_claim_tab') {
     const started = Date.now();
     const waitBudgetMs = args.wait ? Math.min(args.ttlMs ?? 30000, 60000) : 0;
@@ -466,7 +466,7 @@ async function execute(name, args) {
     const prepared = name === 'browser_upload_verified' ? { ...args, verifyKind: 'upload' } : args;
     return await page(name, prepared);
   }
-  if (!['browser_read', 'browser_find_text', 'browser_debug', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick'].includes(name)) throw new Error('Unknown command');
+  if (!['browser_read', 'browser_find_text', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick'].includes(name)) throw new Error('Unknown command');
   const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
   if (result?.error) throw new Error(result.error.message || 'Page operation failed');
   if (result?.result?.__aibError) throw new Error(result.result.__aibError);
@@ -546,3 +546,4 @@ chrome.runtime.onStartup.addListener(() => connect());
 chrome.runtime.onInstalled.addListener(() => connect());
 // With a saved pairing key, the extension reconnects in the background.
 connect();
+

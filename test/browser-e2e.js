@@ -41,7 +41,7 @@ await new Promise(resolve => mockModel.listen(0, '127.0.0.1', resolve));
 const bridge = createBridge(config, { modelLoader: () => ({ baseUrl: `http://127.0.0.1:${mockModel.address().port}/v1`, model: 'explicit-simulated-test-model', mode: 'tools' }) }); const address = await bridge.listen(); config.port = address.port;
 const fixture = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>本地浏览器验收</title><style>body{font:18px sans-serif;padding:50px;background:#f0f7f4;color:#19382b}input,button{font:inherit;padding:12px}#hidden,#upload,#options{display:none}#options.open{display:block}</style><h1>本地浏览器验收</h1><p>此页是测试夹具，没有外部服务。</p><label for="draft">消息草稿</label><input id="draft"><button id="send">发送到本地测试页</button><label for="task">赛题选择</label><input id="task" role="combobox" readonly aria-expanded="false"><div id="options" role="listbox"><div role="option">Task 108 topk_sigmoid</div><div role="option">Task 109 zero_experts_identity</div></div><label for="upload">ZIP 上传</label><input id="upload" type="file" accept=".zip"><p id="reply">等待输入</p><input type="password" value="PASSWORD_SECRET"><p id="hidden">HIDDEN_SECRET</p><p data-ai-private>PRIVATE_SECRET</p><button id="replace">替换按钮</button><a href="https://not-allowed.example/">未授权链接</a><div style="height:1400px"></div><script>document.querySelector('#send').onclick=()=>{document.querySelector('#reply').textContent='本地回显：'+document.querySelector('#draft').value};document.querySelector('#upload').onchange=e=>{document.querySelector('#reply').textContent='已选择：'+e.target.files[0].name+':'+e.target.files[0].size};const task=document.querySelector('#task'),options=document.querySelector('#options');task.onclick=()=>{options.classList.add('open');task.setAttribute('aria-expanded','true')};options.onclick=e=>{if(e.target.getAttribute('role')==='option'){task.value=e.target.textContent;options.classList.remove('open');task.setAttribute('aria-expanded','false');task.dispatchEvent(new Event('change',{bubbles:true}))}};</script></html>`);
+  res.end(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>本地浏览器验收</title><style>body{font:18px sans-serif;padding:50px;background:#f0f7f4;color:#19382b}input,button{font:inherit;padding:12px}#hidden,#upload,#options{display:none}#options.open{display:block}.ad-overlay{position:fixed;inset:0;background:rgba(255,255,255,.02);z-index:9999;pointer-events:auto}.ad-card{position:absolute;right:24px;top:24px;background:white;border:2px solid #19382b;padding:18px;box-shadow:0 8px 32px #0004}.scroll-pane{height:120px;overflow-y:auto;border:1px solid #19382b;padding:8px;margin:20px 0}</style><h1>本地浏览器验收</h1><p>此页是测试夹具，没有外部服务。</p><div id="ad" class="ad-overlay" role="dialog" aria-modal="true" aria-label="广告引导浮层"><div class="ad-card"><p>广告引导浮层</p><button id="close-ad" aria-label="关闭广告">关闭广告</button></div></div><div id="pane" class="scroll-pane"><p>内部滚动容器顶部</p><div style="height:420px"></div><button id="deep">内部深处按钮</button></div><label for="draft">消息草稿</label><input id="draft"><button id="send">发送到本地测试页</button><label for="task">赛题选择</label><input id="task" role="combobox" readonly aria-expanded="false"><div id="options" role="listbox"><div role="option">Task 108 topk_sigmoid</div><div role="option">Task 109 zero_experts_identity</div></div><label for="upload">ZIP 上传</label><input id="upload" type="file" accept=".zip"><p id="reply">等待输入</p><input type="password" value="PASSWORD_SECRET"><p id="hidden">HIDDEN_SECRET</p><p data-ai-private>PRIVATE_SECRET</p><button id="replace">替换按钮</button><a href="https://not-allowed.example/">未授权链接</a><div style="height:1400px"></div><script>document.querySelector('#send').onclick=()=>{document.querySelector('#reply').textContent='本地回显：'+document.querySelector('#draft').value};document.querySelector('#upload').onchange=e=>{document.querySelector('#reply').textContent='已选择：'+e.target.files[0].name+':'+e.target.files[0].size};document.querySelector('#close-ad').onclick=()=>document.querySelector('#ad').remove();const task=document.querySelector('#task'),options=document.querySelector('#options');task.onclick=()=>{options.classList.add('open');task.setAttribute('aria-expanded','true')};options.onclick=e=>{if(e.target.getAttribute('role')==='option'){task.value=e.target.textContent;options.classList.remove('open');task.setAttribute('aria-expanded','false');task.dispatchEvent(new Event('change',{bubbles:true}))}};</script></html>`);
 });
 await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${fixture.address().port}`;
@@ -160,6 +160,21 @@ try {
   assert.ok(observed.read.text.includes('本地浏览器验收'));
   assert.ok(observed.geometry.some(g => g.label === '消息草稿'));
   mark('browser_health and browser_observe provide layered diagnostics and geometry');
+  let overlayScan = await call('browser_scan_overlays', { tabId });
+  const adOverlay = overlayScan.overlays.find(item => item.label.includes('广告引导浮层') || item.hint === 'dialog');
+  assert.ok(adOverlay?.ref);
+  const closeAd = adOverlay.closeCandidates.find(item => item.label.includes('关闭广告'));
+  assert.ok(closeAd?.ref);
+  const pane = overlayScan.scrollContainers.find(item => item.label.includes('内部滚动容器顶部') || item.selector.includes('pane'));
+  assert.ok(pane?.ref);
+  const paneScroll = await call('browser_scroll_element', { tabId, ref: pane.ref, deltaY: 500 });
+  assert.equal(paneScroll.changed, true);
+  const dismissed = await call('browser_dismiss_overlay', { tabId, ref: closeAd.ref, expectGoneRef: adOverlay.ref, timeoutMs: 3000 });
+  assert.equal(dismissed.clicked, true);
+  assert.equal(dismissed.verification.status, 'gone');
+  overlayScan = await call('browser_scan_overlays', { tabId });
+  assert.equal(overlayScan.overlays.some(item => item.label.includes('广告引导浮层')), false);
+  mark('browser_scan_overlays finds blockers and scroll panes; dismiss and element scroll verified');
   const modes = await call('browser_bridge_modes', { tabId });
   assert.ok(modes.fallbackOrder.includes('coordinate-adapter'));
   const help = await call('browser_failure_help', { tabId, attemptedAction: 'browser_choose Task 108', error: 'Exact visible option not found' });
@@ -267,6 +282,13 @@ try {
   await call('browser_navigate', { tabId, url: `${origin}/second` });
   await page.waitForURL(`${origin}/second`); await page.waitForLoadState('load');
   assert.equal((await call('browser_read', { tabId })).url, `${origin}/second`); mark('navigate and read verified');
+  overlayScan = await call('browser_scan_overlays', { tabId });
+  const secondOverlay = overlayScan.overlays.find(item => item.label.includes('广告引导浮层') || item.hint === 'dialog');
+  if (secondOverlay) {
+    const secondClose = secondOverlay.closeCandidates.find(item => item.label.includes('关闭广告'));
+    assert.ok(secondClose?.ref);
+    await call('browser_dismiss_overlay', { tabId, ref: secondClose.ref, expectGoneRef: secondOverlay.ref, timeoutMs: 3000 });
+  }
   await page.evaluate(() => {
     const field = document.getElementById('draft');
     field.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('reply').textContent = `可信按键=${e.isTrusted}：${field.value}`; });
@@ -327,6 +349,13 @@ try {
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.ok(secondPage); await secondPage.waitForLoadState('load');
+  let secondScan = await call('browser_scan_overlays', { tabId: second.tabId });
+  const allSitesOverlay = secondScan.overlays.find(item => item.label.includes('广告引导浮层') || item.hint === 'dialog');
+  if (allSitesOverlay) {
+    const allSitesClose = allSitesOverlay.closeCandidates.find(item => item.label.includes('关闭广告'));
+    assert.ok(allSitesClose?.ref);
+    await call('browser_dismiss_overlay', { tabId: second.tabId, ref: allSitesClose.ref, expectGoneRef: allSitesOverlay.ref, timeoutMs: 3000 });
+  }
   const secondRead = await call('browser_read', { tabId: second.tabId });
   await call('browser_fill', { tabId: second.tabId, ref: secondRead.elements.find(e => e.label === '消息草稿').ref, text: '所有网站模式' });
   await call('browser_click', { tabId: second.tabId, ref: secondRead.elements.find(e => e.label === '发送到本地测试页').ref });
@@ -372,4 +401,5 @@ try {
   await new Promise(resolve => otherFixture.close(resolve));
   mockModel.closeAllConnections(); await new Promise(resolve => mockModel.close(resolve));
 }
+
 
