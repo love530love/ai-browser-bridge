@@ -19,7 +19,7 @@
 - 扩展保存配对密钥后支持后台自动重连。
 - 服务端断线错误文案已明确要求 AI 不要自动打开扩展设置页。
 - Tab 写租约从“建议遵守”升级为“强制执行”：无 `agent` 或非持有人 `agent` 的写操作会被拒绝，读操作仍允许。
-- MCP 版本号同步到 0.4.17，README 已同步 39 工具和新规则。
+- MCP 版本号同步到 0.4.18，README 已同步 41 工具和新规则。
 - 新增 `browser_wait_until_ready`，用于扩展断线、队列忙或全局任务租约占用后的本地等待。
 - 新请求在扩展断线或队列满时返回 waiting 指引，不再直接让无人值守 agent 以错误结束。
 - `browser_claim_tab wait:true` 会在扩展端等待冲突 tab 租约释放，再尝试获取租约。
@@ -29,29 +29,16 @@
 - 0.4.10 将 cheap 模式采样预算改为从候选查询之后开始，并先返回轻量文本摘要，避免首次查询耗尽预算后返回空 partial。
 - 0.4.14 保留近期多个 `browser_read` 快照，避免多 agent 同页读取覆盖写入 ref；`browser_find_text` 增加直接文本节点命中回退，重页面下查赛题号/错误文案更稳。
 - 0.4.15 让 CLI / agent.ps1 默认对 `status:"waiting"` 做等待、轮询和安全重试；新增 `doctor` 一键诊断；`start.ps1` 会等待服务真正就绪，避免启动瞬时 `fetch failed` 误报。
-- 0.4.17 修复 `browser_find_text` 专用 worker 在重页面先收集全文再搜索导致预算耗尽的偶发未命中，改为遍历文本节点时即时命中。
+- 0.4.16 修复 `browser_find_text` 专用 worker 在重页面先收集全文再搜索导致预算耗尽的偶发未命中，改为遍历文本节点时即时命中。
+- 0.4.17 新增 `browser_scan_overlays`、`browser_dismiss_overlay`、`browser_scroll_element`，覆盖广告/引导框/透明遮罩/客服浮窗/内部滚动容器的识别、关闭和滚动兜底。
+- 0.4.18 新增 `browser_find_element`、`browser_prepare_action` 只读编排层，用于复杂页面写前候选排序、遮挡判断和下一步计划。
 - 新增 `npm run test:stress`，模拟多用户代表在三张重页面上并发读、查找、诊断、写租约和队列背压。
 
 验证结果：
 
 - `node --check src/tools.js src/server.js src/mcp.js extension/worker.js extension/page.js`：通过。
 - `npm test`：21/21 通过。
-- `npm run test:e2e`：34/34 浏览器检查通过。
+- `npm run test:e2e`：35/35 浏览器检查通过。
 - `node test/multi-agent-stress.js`：通过。
 - `npm run test:stress`：9/9 压力检查通过，包含 3 个重页面、12 个并发有界读、queue_full 背压和写租约。
-- `npm run status`：0.4.17 代码验证后记录；常用 Chrome 运行态需重新加载 unpacked extension 后再确认 `extensionVersion:"0.4.17"`。
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+- `npm run status`：0.4.18 代码验证后记录；常用 Chrome 运行态需重新加载 unpacked extension 后再确认 `extensionVersion:"0.4.18"`。

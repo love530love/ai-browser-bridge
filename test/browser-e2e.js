@@ -175,6 +175,13 @@ try {
   overlayScan = await call('browser_scan_overlays', { tabId });
   assert.equal(overlayScan.overlays.some(item => item.label.includes('广告引导浮层')), false);
   mark('browser_scan_overlays finds blockers and scroll panes; dismiss and element scroll verified');
+  const foundSend = await call('browser_find_element', { tabId, query: '发送到本地测试页', action: 'click', maxResults: 5 });
+  assert.equal(foundSend.found, true);
+  assert.equal(foundSend.candidates[0].covered, false);
+  const preparedSend = await call('browser_prepare_action', { tabId, query: '发送到本地测试页', action: 'click', goal: '点击发送按钮' });
+  assert.ok(['click', 'dismiss_overlay'].includes(preparedSend.recommended));
+  assert.ok(preparedSend.steps.length >= 1);
+  mark('browser_find_element and browser_prepare_action rank actionable candidates and next steps');
   const modes = await call('browser_bridge_modes', { tabId });
   assert.ok(modes.fallbackOrder.includes('coordinate-adapter'));
   const help = await call('browser_failure_help', { tabId, attemptedAction: 'browser_choose Task 108', error: 'Exact visible option not found' });

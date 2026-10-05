@@ -466,7 +466,7 @@ async function execute(name, args) {
     const prepared = name === 'browser_upload_verified' ? { ...args, verifyKind: 'upload' } : args;
     return await page(name, prepared);
   }
-  if (!['browser_read', 'browser_find_text', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick'].includes(name)) throw new Error('Unknown command');
+  if (!['browser_read', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick'].includes(name)) throw new Error('Unknown command');
   const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
   if (result?.error) throw new Error(result.error.message || 'Page operation failed');
   if (result?.result?.__aibError) throw new Error(result.result.__aibError);

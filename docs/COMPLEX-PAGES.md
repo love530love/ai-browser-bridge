@@ -26,7 +26,7 @@
 ## 默认流程
 
 1. `browser_health` 确认连接、授权、readyState。
-2. `browser_scan_overlays` 判断是否有遮挡层、透明 blocker、可关闭候选和内部滚动容器。
+2. `browser_prepare_action` / `browser_find_element` 先做候选排序和下一步计划；必要时再用 `browser_scan_overlays` 判断遮挡层、透明 blocker、可关闭候选和内部滚动容器。
 3. 若 closeCandidates 明确属于广告/引导/cookie/客服浮层，先 `browser_claim_tab`，再 `browser_dismiss_overlay`，然后重新 scan/read。
 4. 若目标在内部滚动容器，使用 `browser_scroll_element` 滚动容器 ref，不盲目滚主窗口。
 5. 下拉框使用 `browser_pick`/`browser_choose` exact text；失败时看 `browser_debug.visibleOptions`。

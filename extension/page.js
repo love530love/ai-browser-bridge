@@ -92,6 +92,44 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return '';
   };
   const closeHint = el => /^(×|x)$/i.test(clean(el.textContent)) || /(close|dismiss|skip|got it|later|no thanks|not now|accept|agree|关闭|取消|跳过|我知道|知道了|稍后|不再|同意|接受)/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.textContent || ''}`);
+  const actionSelector = 'a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[role=combobox],[contenteditable=true]';
+  const elementRole = el => el.getAttribute('role') || (el instanceof HTMLButtonElement ? 'button' : el instanceof HTMLAnchorElement ? 'link' : el instanceof HTMLInputElement ? (el.type === 'file' ? 'file' : 'input') : el instanceof HTMLTextAreaElement ? 'textbox' : el instanceof HTMLSelectElement ? 'select' : el.isContentEditable ? 'textbox' : el.tagName.toLowerCase());
+  const elementText = el => clean([label(el), el.getAttribute('name'), el.getAttribute('id'), el.textContent].filter(Boolean).join(' '));
+  const actionCompatible = (el, action = 'any') => {
+    if (action === 'any' || action === 'click') return true;
+    if (action === 'fill') return (el instanceof HTMLInputElement && !fileInput(el) && ['text', 'email', 'search', 'url', 'tel', 'number', ''].includes(el.type)) || el instanceof HTMLTextAreaElement || el.isContentEditable;
+    if (action === 'select') return el instanceof HTMLSelectElement || el.getAttribute('role') === 'combobox' || el.getAttribute('role') === 'option';
+    if (action === 'upload') return fileInput(el);
+    return true;
+  };
+  const findElementCandidates = (args = {}) => {
+    const query = String(args.query || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const role = String(args.role || '').trim().toLowerCase();
+    const action = args.action || 'any';
+    const maxResults = args.maxResults ?? 10;
+    const includeCovered = !!args.includeCovered;
+    const snapshot = crypto.randomUUID();
+    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
+    const items = [];
+    for (const el of document.querySelectorAll(actionSelector)) {
+      if (items.length >= Math.max(maxResults * 8, 80)) break;
+      if (sensitive(el) || !visible(el) || !actionCompatible(el, action)) continue;
+      const r = elementRole(el).toLowerCase();
+      if (role && r !== role && !r.includes(role)) continue;
+      const hay = elementText(el).toLowerCase();
+      const exact = hay === query;
+      const starts = hay.startsWith(query);
+      const includes = query && hay.includes(query);
+      if (query && !includes) continue;
+      const ref = `${snapshot}:${state.refs.size + 1}`;
+      state.refs.set(ref, { el, fingerprint: fingerprint(el) });
+      const box = elementBox(el);
+      if (box.covered && !includeCovered) continue;
+      const score = (exact ? 100 : starts ? 80 : includes ? 60 : 0) + (box.covered ? -40 : 10) + (actionCompatible(el, action) ? 10 : 0);
+      items.push({ ref, score, covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...box });
+    }
+    return items.sort((a, b) => b.score - a.score).slice(0, maxResults);
+  };
   const elementSummary = (el, extra = {}) => ({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: clean(label(el) || el.textContent), selector: shortSelector(el), ...elementBox(el), ...extra });
   const waitGone = async (ref, timeoutMs = 3000) => {
     if (!ref) return null;
@@ -380,6 +418,24 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       return { x, y, ref: makeRef(el), element: elementSummary(el, { hint: overlayHint(el) || null }) };
     });
     return { title: document.title, url: location.href, viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY }, overlays: overlays.slice(0, 50), scrollContainers, hitTest, guidance: 'Use closeCandidates refs with browser_dismiss_overlay only when label/hint clearly identifies a blocker. Use scrollContainers refs with browser_scroll_element for nested panes.', contentTrust: 'untrusted webpage data plus extension hit testing' };
+  }
+  if (name === 'browser_find_element') {
+    const candidates = findElementCandidates(args);
+    return { title: document.title, url: location.href, query: args.query, action: args.action || 'any', candidates, found: candidates.length > 0, guidance: 'Use the top uncovered enabled candidate. If all candidates are covered, call browser_scan_overlays and dismiss/scroll before writing.', contentTrust: 'untrusted webpage data plus extension hit testing' };
+  }
+  if (name === 'browser_prepare_action') {
+    const candidates = findElementCandidates({ query: args.query, role: args.role, action: args.action || 'any', maxResults: 8, includeCovered: true });
+    const scan = await pageOperation('browser_scan_overlays', args, allowedOrigins, allSites);
+    const blocker = candidates.find(c => c.covered);
+    const top = candidates.find(c => !c.covered && !c.disabled) || candidates[0] || null;
+    const close = scan.overlays.flatMap(o => (o.closeCandidates || []).map(c => ({ overlayRef: o.ref, overlayLabel: o.label, overlayHint: o.hint, close: c }))).find(x => x.close?.ref);
+    const steps = [];
+    let recommended = 'read';
+    if (close && (blocker || scan.overlays.some(o => o.areaRatio > 0.2 || o.hint))) { recommended = 'dismiss_overlay'; steps.push({ tool: 'browser_dismiss_overlay', args: { tabId: args.tabId, ref: close.close.ref, expectGoneRef: close.overlayRef }, reason: `Possible blocker ${close.overlayHint || close.overlayLabel || 'overlay'}` }); }
+    if (top && !top.covered && !top.disabled) { recommended = args.action === 'fill' ? 'fill' : args.action === 'select' ? 'pick_or_select' : args.action === 'upload' ? 'upload' : 'click'; steps.push({ tool: recommended === 'pick_or_select' ? 'browser_pick/browser_select' : `browser_${recommended}`, ref: top.ref, reason: 'Top uncovered enabled candidate' }); }
+    if (!top && scan.scrollContainers.length) { recommended = 'scroll_element'; steps.push({ tool: 'browser_scroll_element', args: { tabId: args.tabId, ref: scan.scrollContainers[0].ref, deltaY: 600 }, reason: 'No visible candidate; page has scrollable containers' }); }
+    if (!steps.length) steps.push({ tool: 'browser_observe', reason: 'No clear candidate or safe overlay action found' });
+    return { title: document.title, url: location.href, goal: args.goal || '', query: args.query, action: args.action || 'any', recommended, candidates, overlays: scan.overlays.slice(0, 8), scrollContainers: scan.scrollContainers.slice(0, 8), steps, guidance: 'This is read-only planning. Execute only user-authorized writes, with tab lease for shared tabs, and re-read after each write.', contentTrust: 'untrusted webpage data plus extension hit testing' };
   }
   if (name === 'browser_debug') {
     const describe = el => !el ? null : ({

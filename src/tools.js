@@ -39,6 +39,21 @@ export const TOOLS = [
     includeElements: { type: 'boolean' },
     mode: { type: 'string', enum: ['normal', 'cheap'] }
   }, ['tabId', 'query'], true),
+  tool('browser_find_element', 'Find actionable elements by label/text/role/placeholder/nearby text and return ranked refs with geometry and covered state. Read-only; use before choosing click/fill/select/upload.', {
+    tabId,
+    query: text(1000),
+    role: { type: 'string', maxLength: 80 },
+    action: { type: 'string', enum: ['click', 'fill', 'select', 'upload', 'any'] },
+    maxResults: { type: 'integer', minimum: 1, maximum: 50 },
+    includeCovered: { type: 'boolean' }
+  }, ['tabId', 'query'], true),
+  tool('browser_prepare_action', 'Read-only action planner for complex pages. Combines overlay scan and element search to recommend dismiss/scroll/read/pick/click/fill next steps without executing writes.', {
+    tabId,
+    goal: text(2000),
+    query: text(1000),
+    action: { type: 'string', enum: ['click', 'fill', 'select', 'upload', 'read', 'any'] },
+    role: { type: 'string', maxLength: 80 }
+  }, ['tabId', 'query'], true),
   tool('browser_debug', 'Read-only developer diagnostics for the current page: readiness, focus, scroll, visible combobox options, file inputs, dialogs, iframe count, and element role counts. Use this before guessing coordinates when a page automation step is unclear.', { tabId }, ['tabId'], true),
   tool('browser_scan_overlays', 'Read-only scan for dialogs, ads, cookie banners, guide overlays, chat widgets, transparent blockers, close buttons, hit-test blockers, and scrollable containers. Use before clicking through complex or ad-heavy pages.', { tabId }, ['tabId'], true),
   tool('browser_health', 'Layered health check for service, extension, tab permission, content-script injection, debugger availability hints, page readiness, and tool version. Use before diagnosing blank reads or failed automation.', { tabId }, [], true),
