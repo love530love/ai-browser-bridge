@@ -235,6 +235,15 @@ async function execute(name, args) {
       retryPolicy: 'Never replay uncertain writes automatically. Use browser_failure_help, then re-observe and choose the next safer mode.'
     };
   }
+  if (name === 'browser_frames') {
+    const tab = await chrome.tabs.get(args.tabId);
+    const config = await settings();
+    const frames = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func: () => ({ url: location.href, origin: location.origin, name: name || '', readyState: document.readyState })
+    });
+    return { tabId: tab.id, frames: frames.map(item => ({ frameId: item.frameId, ...(item.result || {}), accessible: !item.error })), contentTrust: 'untrusted webpage metadata' };
+  }
   if (name === 'browser_failure_help') {
     const err = String(args.error || '');
     const attempted = String(args.attemptedAction || '');
@@ -392,10 +401,16 @@ async function execute(name, args) {
     tabLeases.set(leaseKey, activeLease);
   }
   async function page(name, input = args) {
-    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
+    const target = Number.isInteger(input.frame) ? { tabId: tab.id, frameIds: [input.frame] } : { tabId: tab.id };
+    const results = await chrome.scripting.executeScript({ target, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
+    const result = results[0];
     if (result?.result?.__aibError) throw new Error(result.result.__aibError);
     if (result?.result == null) throw new Error('No page result. Inspect page before retrying.');
     return result.result;
+  }
+  if (name === 'browser_read' && args.frame === 'all') {
+    const results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
+    return { status: 'ok', frameResults: results.map(item => ({ frameId: item.frameId, result: item.result || { error: item.error || 'frame unavailable' } })), frameCount: results.length, scope: 'all accessible frames', contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_find_text') {
     const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: findTextOperation, args: [args, config.allowedOrigins, config.allSites] });

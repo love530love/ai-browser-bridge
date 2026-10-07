@@ -27,8 +27,11 @@ export const TOOLS = [
     maxElements: { type: 'integer', minimum: 10, maximum: 1000 },
     maxTextNodes: { type: 'integer', minimum: 50, maximum: 20000 },
     budgetMs: { type: 'integer', minimum: 100, maximum: 15000 },
-    mode: { type: 'string', enum: ['normal', 'cheap'] }
+    mode: { type: 'string', enum: ['normal', 'cheap'] },
+    frame: { type: ['string', 'integer'], enum: ['main', 'all'] },
+    waitFor: { type: 'string', enum: ['idle', 'timeout-then-partial', 'force'] }
   }, ['tabId'], true),
+  tool('browser_frames', 'List accessible frames in a tab, including frameId, URL, origin, name, and same-document status. Use before reading or operating iframe-hosted forms.', { tabId }, ['tabId'], true),
   tool('browser_find_text', 'Find visible or lightweight page text by exact substring and return bounded nearby context plus nearby actionable elements. Use this before full-page reads on large SPA pages.', {
     tabId,
     query: text(1000),

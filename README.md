@@ -153,3 +153,4 @@ npm run test:e2e
 - [Chrome debugger API](https://developer.chrome.com/docs/extensions/reference/api/debugger)
 - [MCP stdio 传输规范](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
 - [Playwright 扩展测试](https://playwright.dev/docs/chrome-extensions)
+\n+0.4.20 增加 `browser_frames` 与 `browser_read frame:"all"`，用于发现和读取 iframe 页面；失败恢复会给出等待与 `browser_prepare_action` 规划建议。跨源 frame 的可访问性由 Chrome 权限决定，结果会明确标注。
