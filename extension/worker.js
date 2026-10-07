@@ -244,6 +244,8 @@ async function execute(name, args) {
     });
     return { tabId: tab.id, frames: frames.map(item => ({ frameId: item.frameId, ...(item.result || {}), accessible: !item.error })), contentTrust: 'untrusted webpage metadata' };
   }
+  const frameRef = typeof args?.ref === 'string' ? args.ref.match(/^(.*)@frame(\d+)$/) : null;
+  const routedArgs = frameRef ? { ...args, ref: frameRef[1], frame: Number(frameRef[2]) } : args;
   if (name === 'browser_performance') {
     const tab = await chrome.tabs.get(args.tabId);
     return withDebugger(tab.id, async send => {
@@ -411,7 +413,7 @@ async function execute(name, args) {
     activeLease.expiresAt = Date.now() + (activeLease.ttlMs ?? 120000);
     tabLeases.set(leaseKey, activeLease);
   }
-  async function page(name, input = args) {
+  async function page(name, input = routedArgs) {
     const target = Number.isInteger(input.frame) ? { tabId: tab.id, frameIds: [input.frame] } : { tabId: tab.id };
     const results = await chrome.scripting.executeScript({ target, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
     const result = results[0];
@@ -421,7 +423,14 @@ async function execute(name, args) {
   }
   if (name === 'browser_read' && args.frame === 'all') {
     const results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
-    return { status: 'ok', frameResults: results.map(item => ({ frameId: item.frameId, result: item.result || { error: item.error || 'frame unavailable' } })), frameCount: results.length, scope: 'all accessible frames', contentTrust: 'untrusted webpage data' };
+    const decorate = (value, frameId) => {
+      if (!value || typeof value !== 'object') return value;
+      if (Array.isArray(value)) return value.map(item => decorate(item, frameId));
+      const copy = {};
+      for (const [key, item] of Object.entries(value)) copy[key] = key === 'ref' && typeof item === 'string' ? `${item}@frame${frameId}` : decorate(item, frameId);
+      return copy;
+    };
+    return { status: 'ok', frameResults: results.map(item => ({ frameId: item.frameId, result: decorate(item.result || { error: item.error || 'frame unavailable' }, item.frameId) })), frameCount: results.length, scope: 'all accessible frames', contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_find_text') {
     const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: findTextOperation, args: [args, config.allowedOrigins, config.allSites] });
@@ -445,7 +454,7 @@ async function execute(name, args) {
     return { dispatched: args.action };
   }
   if (name === 'browser_key' || name === 'browser_hover') {
-    const point = args.ref ? await page('browser_resolve', { ...args, focus: name === 'browser_key' }) : null;
+    const point = routedArgs.ref ? await page('browser_resolve', { ...routedArgs, focus: name === 'browser_key' }) : null;
     await guarded(send => name === 'browser_key' ? key(send, args.key) : pointer(send, { ...point, action: 'hover' }));
     return { dispatched: true, inspectOutcome: true };
   }
@@ -493,10 +502,11 @@ async function execute(name, args) {
   }
   if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'].includes(name)) {
     const prepared = name === 'browser_upload_verified' ? { ...args, verifyKind: 'upload' } : args;
-    return await page(name, prepared);
+    return await page(name, { ...prepared, ...routedArgs, ref: routedArgs.ref });
   }
   if (!['browser_read', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick'].includes(name)) throw new Error('Unknown command');
-  const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
+  const target = Number.isInteger(routedArgs.frame) ? { tabId: tab.id, frameIds: [routedArgs.frame] } : { tabId: tab.id };
+  const [result] = await chrome.scripting.executeScript({ target, func: pageOperation, args: [name, routedArgs, config.allowedOrigins, config.allSites] });
   if (result?.error) throw new Error(result.error.message || 'Page operation failed');
   if (result?.result?.__aibError) throw new Error(result.result.__aibError);
   if (result?.result === undefined) throw new Error('No page result. Page may have navigated; inspect before retrying.');
