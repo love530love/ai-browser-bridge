@@ -257,6 +257,14 @@ async function execute(name, args) {
       return { tabId: tab.id, metrics: metrics.metrics || metrics, layout, timing: timing.result?.result?.value || timing, contentTrust: 'local browser diagnostics' };
     });
   }
+  if (name === 'browser_network_summary') {
+    const tab = await chrome.tabs.get(args.tabId);
+    return withDebugger(tab.id, async send => {
+      const limit = Math.min(200, Math.max(1, args.maxEntries ?? 100));
+      const result = await send('Runtime.evaluate', { expression: `(() => performance.getEntriesByType('resource').slice(-${limit}).map(r => ({ name: String(r.name).slice(0, 500), initiatorType: r.initiatorType, duration: Math.round(r.duration), transferSize: r.transferSize || 0, decodedBodySize: r.decodedBodySize || 0, startTime: Math.round(r.startTime) })))()`, returnByValue: true });
+      return { tabId: tab.id, entries: result.result?.result?.value || [], count: result.result?.result?.value?.length || 0, redaction: 'headers, cookies, request bodies, and response bodies are excluded', contentTrust: 'local browser diagnostics' };
+    });
+  }
   if (name === 'browser_failure_help') {
     const err = String(args.error || '');
     const attempted = String(args.attemptedAction || '');
