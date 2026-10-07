@@ -244,6 +244,17 @@ async function execute(name, args) {
     });
     return { tabId: tab.id, frames: frames.map(item => ({ frameId: item.frameId, ...(item.result || {}), accessible: !item.error })), contentTrust: 'untrusted webpage metadata' };
   }
+  if (name === 'browser_performance') {
+    const tab = await chrome.tabs.get(args.tabId);
+    return withDebugger(tab.id, async send => {
+      const [metrics, layout, timing] = await Promise.all([
+        send('Performance.getMetrics').catch(error => ({ error: error.message })),
+        send('Page.getLayoutMetrics').catch(error => ({ error: error.message })),
+        send('Runtime.evaluate', { expression: `(() => { const n = performance.getEntriesByType('navigation')[0]; return { readyState: document.readyState, visibilityState: document.visibilityState, url: location.href, navigation: n ? { type: n.type, startTime: n.startTime, domInteractive: n.domInteractive, domContentLoaded: n.domContentLoadedEventEnd, loadEventEnd: n.loadEventEnd, responseEnd: n.responseEnd } : null, resources: performance.getEntriesByType('resource').length }; })()`, returnByValue: true }).catch(error => ({ error: error.message }))
+      ]);
+      return { tabId: tab.id, metrics: metrics.metrics || metrics, layout, timing: timing.result?.result?.value || timing, contentTrust: 'local browser diagnostics' };
+    });
+  }
   if (name === 'browser_failure_help') {
     const err = String(args.error || '');
     const attempted = String(args.attemptedAction || '');

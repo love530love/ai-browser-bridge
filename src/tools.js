@@ -58,6 +58,7 @@ export const TOOLS = [
     role: { type: 'string', maxLength: 80 }
   }, ['tabId', 'query'], true),
   tool('browser_debug', 'Read-only developer diagnostics for the current page: readiness, focus, scroll, visible combobox options, file inputs, dialogs, iframe count, and element role counts. Use this before guessing coordinates when a page automation step is unclear.', { tabId }, ['tabId'], true),
+  tool('browser_performance', 'Read-only Chrome DevTools performance snapshot: navigation timing, layout metrics, long-task hints, and page readiness. Use to diagnose heavy SPA pages before choosing a read budget or screenshot.', { tabId }, ['tabId'], true),
   tool('browser_scan_overlays', 'Read-only scan for dialogs, ads, cookie banners, guide overlays, chat widgets, transparent blockers, close buttons, hit-test blockers, and scrollable containers. Use before clicking through complex or ad-heavy pages.', { tabId }, ['tabId'], true),
   tool('browser_health', 'Layered health check for service, extension, tab permission, content-script injection, debugger availability hints, page readiness, and tool version. Use before diagnosing blank reads or failed automation.', { tabId }, [], true),
   tool('browser_bridge_modes', 'Read available browser-control modes and their fallback order: DOM, verified transactions, picker/upload bridges, CDP keyboard/pointer, screenshot, and coordinate adapter. Use to choose the least fragile mode.', { tabId }, [], true),
