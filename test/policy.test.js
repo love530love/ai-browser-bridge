@@ -147,6 +147,54 @@ test('a registered agent without the read scope cannot read', () => {
   assert.equal(evalCall(p, 'browser_click', 'blind-writer', { tabId: 1, ref: 'r' }).allowed, true);
 });
 
+test('a per-agent tool list narrows further than scopes', () => {
+  const p = policy();
+  p.set('form-filler', { scopes: ['read', 'write', 'lease', 'upload'], tools: { deny: ['browser_close', 'browser_navigate'] } });
+  assert.equal(evalCall(p, 'browser_click', 'form-filler', { tabId: 1, ref: 'r' }).allowed, true);
+  const closed = evalCall(p, 'browser_close', 'form-filler', { tabId: 1 });
+  assert.equal(closed.allowed, false);
+  assert.equal(closed.reason, 'agent_tool_denied');
+
+  p.set('readonly-browser', { scopes: ['read', 'write'], tools: { allow: ['browser_read', 'browser_click', 'browser_fill'] } });
+  assert.equal(evalCall(p, 'browser_click', 'readonly-browser', { tabId: 1, ref: 'r' }).allowed, true);
+  const scroll = evalCall(p, 'browser_scroll', 'readonly-browser', { tabId: 1, deltaY: 10 });
+  assert.equal(scroll.allowed, false);
+  assert.equal(scroll.reason, 'agent_tool_denied');
+  assert.equal(scroll.deniedBy, 'allowlist');
+});
+
+// A tool name that does not exist must not be stored: an allowlist containing a
+// typo would otherwise deny nothing while looking like it denies something.
+test('unknown tool names are dropped from a tool list', () => {
+  const p = policy();
+  const saved = p.set('typo', { scopes: ['read', 'write'], tools: { allow: ['browser_read', 'browser_clik'] } });
+  assert.deepEqual(saved.tools.allow, ['browser_read']);
+  assert.equal(p.set('empty', { tools: { allow: ['nope'] } }).tools, undefined, 'a list with no valid entry must not restrict anything');
+});
+
+test('judge modes gate writes only, and never reads', () => {
+  const p = policy();
+  assert.equal(evalCall(p, 'browser_click', 'nobody', { tabId: 1, ref: 'r' }).judgeRequired, undefined, 'unregistered agents are never judged');
+
+  p.set('judged', { scopes: ['read', 'write', 'lease'], judge: 'require' });
+  const write = evalCall(p, 'browser_click', 'judged', { tabId: 1, ref: 'r' });
+  assert.equal(write.allowed, true, 'policy allows it; the service holds the verdict check');
+  assert.equal(write.judge, 'require');
+  assert.equal(write.judgeRequired, true);
+  assert.equal(write.judgeTtlMs, 120000);
+  assert.equal(evalCall(p, 'browser_read', 'judged', { tabId: 1 }).judgeRequired, undefined, 'reads must not depend on the on-device model');
+  assert.equal(evalCall(p, 'browser_claim_tab', 'judged', { tabId: 1 }).judgeRequired, undefined);
+
+  p.set('advised', { scopes: ['read', 'write'], judge: 'advisory' });
+  assert.equal(evalCall(p, 'browser_click', 'advised', { tabId: 1, ref: 'r' }).judgeRequired, false);
+
+  p.set('clamped', { scopes: ['read', 'write'], judge: 'require', judgeTtlMs: 99999999 });
+  assert.equal(evalCall(p, 'browser_click', 'clamped', { tabId: 1, ref: 'r' }).judgeTtlMs, 600000);
+
+  p.set('odd-mode', { scopes: ['read', 'write'], judge: 'always' });
+  assert.equal(evalCall(p, 'browser_click', 'odd-mode', { tabId: 1, ref: 'r' }).judge, undefined, 'an unknown mode falls back to off');
+});
+
 test('the registry persists and is readable by a fresh instance', () => {
   const dir = tmp();
   const file = join(dir, 'agents.json');

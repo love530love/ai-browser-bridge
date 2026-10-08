@@ -20,8 +20,10 @@ export function loadConfig(create = false) {
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
   if (!Number.isInteger(config.port) || config.port < 1024 || config.port > 65535 ||
       !/^[a-f0-9]{64}$/.test(config.agentToken) || !/^[a-f0-9]{64}$/.test(config.extensionToken) ||
-      (config.uploadRoots !== undefined && (!Array.isArray(config.uploadRoots) || config.uploadRoots.some(root => typeof root !== 'string' || !root)))) {
+      (config.uploadRoots !== undefined && (!Array.isArray(config.uploadRoots) || config.uploadRoots.some(root => typeof root !== 'string' || !root))) ||
+      (config.contentBoundaries !== undefined && typeof config.contentBoundaries !== 'boolean') ||
+      (config.requireAgentIdentity !== undefined && typeof config.requireAgentIdentity !== 'boolean')) {
     throw new Error('Invalid local configuration.');
   }
-  return { ...config, uploadRoots: config.uploadRoots ?? [] };
+  return { ...config, uploadRoots: config.uploadRoots ?? [], contentBoundaries: config.contentBoundaries === true };
 }

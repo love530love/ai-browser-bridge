@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
+import { TOOLS } from './tools.js';
 
 // Governance layer. Leases decide *who holds a tab*; policy decides *what a
 // named agent may do at all*. Both are answered by the service so every
@@ -15,7 +16,16 @@ import { LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
 
 export const SCOPES = ['read', 'write', 'lease', 'upload'];
 export const DEFAULT_AGENT_SCOPES = ['read', 'write', 'lease'];
+// How much a named agent must involve Chrome's on-device model before a write.
+//   off      - never (default; the model layer stays purely opt-in per call)
+//   advisory - the guide asks the agent to self-check, the service never blocks
+//   require  - the service refuses a write until a fresh `allow` verdict exists
+// Chrome built-in AI may be absent on a given machine; `require` then fails
+// closed with judge_unavailable rather than silently downgrading to open.
+export const JUDGE_MODES = ['off', 'advisory', 'require'];
+export const DEFAULT_JUDGE_TTL_MS = 120000;
 const FILE_VERSION = 1;
+const KNOWN_TOOLS = new Set(TOOLS.map(tool => tool.name));
 
 // One source of truth for "what does this tool need". Derived from the same
 // sets the lease guard uses, so a tool can never be lease-governed but policy
@@ -44,12 +54,26 @@ function hostAllowed(hostname, allowed) {
   });
 }
 
+// Tool names that do not exist are dropped instead of stored: a typo in an
+// allowlist would otherwise silently deny (or fail to deny) the wrong tool.
+function normalizeTools(entry = {}) {
+  const pick = list => Array.isArray(list) ? [...new Set(list.filter(name => typeof name === 'string' && KNOWN_TOOLS.has(name)))] : null;
+  const allow = pick(entry.allow);
+  const deny = pick(entry.deny);
+  if (!allow?.length && !deny?.length) return {};
+  return { tools: { ...(allow?.length ? { allow } : {}), ...(deny?.length ? { deny } : {}) } };
+}
+
 function normalize(entry = {}) {
   const scopes = Array.isArray(entry.scopes) ? entry.scopes.filter(scope => SCOPES.includes(scope)) : DEFAULT_AGENT_SCOPES;
+  const judge = JUDGE_MODES.includes(entry.judge) ? entry.judge : 'off';
   return {
     scopes: [...new Set(scopes)],
     ...(Array.isArray(entry.origins) && entry.origins.length ? { origins: entry.origins.map(String) } : {}),
     ...(Number.isFinite(entry.maxLeaseMs) ? { maxLeaseMs: Math.trunc(entry.maxLeaseMs) } : {}),
+    ...normalizeTools(entry.tools ?? {}),
+    ...(judge !== 'off' ? { judge, judgeTtlMs: Number.isFinite(entry.judgeTtlMs) ? Math.min(600000, Math.max(1000, Math.trunc(entry.judgeTtlMs))) : DEFAULT_JUDGE_TTL_MS } : {}),
+    ...(typeof entry.contentBoundaries === 'boolean' ? { contentBoundaries: entry.contentBoundaries } : {}),
     ...(typeof entry.note === 'string' ? { note: entry.note.slice(0, 200) } : {})
   };
 }
@@ -133,7 +157,18 @@ export function createAgentPolicy({ file = null, requireIdentity = false } = {})
       try { hostname = target ? new URL(target).hostname : null; } catch { hostname = null; }
       if (!hostname || !hostAllowed(hostname, entry.origins)) return deny('agent_origin_denied', { tool: name, agent: identity, host: hostname, allowedOrigins: entry.origins });
     }
-    return { allowed: true, scope, agent: identity, registered: true, grantedScopes: entry.scopes, ...(entry.maxLeaseMs ? { maxLeaseMs: entry.maxLeaseMs } : {}) };
+    if (entry.tools?.deny?.includes(name)) return deny('agent_tool_denied', { tool: name, agent: identity, deniedBy: 'deny' });
+    if (entry.tools?.allow?.length && !entry.tools.allow.includes(name)) return deny('agent_tool_denied', { tool: name, agent: identity, deniedBy: 'allowlist', allowedTools: entry.tools.allow });
+    // Only state-changing calls are worth a model round trip; gating reads
+    // would make every diagnosis depend on Chrome's on-device model.
+    const judge = entry.judge ?? 'off';
+    const judged = judge !== 'off' && (scope === 'write' || scope === 'upload');
+    return {
+      allowed: true, scope, agent: identity, registered: true, grantedScopes: entry.scopes,
+      ...(entry.maxLeaseMs ? { maxLeaseMs: entry.maxLeaseMs } : {}),
+      ...(judged ? { judge, judgeTtlMs: entry.judgeTtlMs ?? DEFAULT_JUDGE_TTL_MS, judgeRequired: judge === 'require' } : {}),
+      ...(typeof entry.contentBoundaries === 'boolean' ? { contentBoundaries: entry.contentBoundaries } : {})
+    };
   }
 
   load();

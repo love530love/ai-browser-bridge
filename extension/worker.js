@@ -113,8 +113,18 @@ function normalizeJudge(parsed, status, raw, risk) {
   let schemaValid = allowed.has(verdict);
   const warnings = [];
   if (!schemaValid) {
-    warnings.push(`Non-standard verdict ${JSON.stringify(parsed?.verdict ?? null)} mapped to unsure.`);
-    verdict = 'unsure';
+    // Small on-device models frequently emit prose or a localized word instead
+    // of the exact enum. Recovering the verdict from the raw answer keeps the
+    // judge useful instead of degrading every call to `unsure`, which would
+    // make a judge:"require" policy block all writes.
+    const recovered = String(raw || '').toLowerCase().match(/\b(allow|warn|block|unsure)\b/);
+    if (recovered) {
+      warnings.push(`Non-standard verdict ${JSON.stringify(parsed?.verdict ?? null)} recovered from model text as "${recovered[1]}".`);
+      verdict = recovered[1];
+    } else {
+      warnings.push(`Non-standard verdict ${JSON.stringify(parsed?.verdict ?? null)} mapped to unsure.`);
+      verdict = 'unsure';
+    }
   }
   if (risk.injection) {
     if (verdict === 'allow') warnings.push('Prompt-injection pattern forced verdict from allow to warn.');
