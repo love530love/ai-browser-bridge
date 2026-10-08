@@ -119,25 +119,83 @@ export const TOOLS = [
   }, ['tabId', 'action', 'expectedUrl'])
 ];
 
+function editDistance(a, b) {
+  if (a === b) return 0;
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let carry = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const next = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, carry + (a[i - 1] === b[j - 1] ? 0 : 1));
+      carry = next;
+    }
+  }
+  return prev[b.length];
+}
+
+function closest(input, candidates) {
+  let best = null;
+  let bestScore = Infinity;
+  for (const candidate of candidates) {
+    const distance = editDistance(input.toLowerCase(), String(candidate).toLowerCase());
+    if (distance < bestScore) { bestScore = distance; best = candidate; }
+  }
+  return bestScore <= Math.max(2, Math.floor(input.length / 3)) ? best : null;
+}
+
+function argSummary(name, schema) {
+  const keys = Object.keys(schema.properties);
+  const optional = keys.filter(key => !schema.required.includes(key));
+  const parts = [];
+  if (schema.required.length) parts.push(`required: ${schema.required.join(', ')}`);
+  if (optional.length) parts.push(`optional: ${optional.join(', ')}`);
+  return `${name} accepts ${keys.length} argument(s)${parts.length ? ` — ${parts.join('; ')}` : ''}`;
+}
+
+function constraints(property) {
+  const notes = [];
+  if (property.enum) notes.push(`allowed: ${property.enum.join(' | ')}`);
+  if (property.type === 'number' || property.type === 'integer') notes.push(`expected ${property.type}${property.minimum !== undefined || property.maximum !== undefined ? ` in [${property.minimum ?? '-Infinity'}, ${property.maximum ?? 'Infinity'}]` : ''}`);
+  if (property.type === 'string') {
+    notes.push('expected string');
+    if (property.minLength !== undefined || property.maxLength !== undefined) notes.push(`length ${property.minLength ?? 0}..${property.maxLength ?? 'unbounded'}`);
+  }
+  if (property.type === 'boolean') notes.push('expected boolean');
+  if (property.pattern) notes.push(`matching /${property.pattern}/`);
+  if (property.description) notes.push(property.description.split('\n')[0].slice(0, 120));
+  return notes.join('; ');
+}
+
 export function validateCall(name, args) {
   const t = TOOLS.find(t => t.name === name);
-  if (!t) throw new Error('Unknown tool');
+  if (!t) {
+    const hint = closest(name, TOOLS.map(tool => tool.name));
+    throw new Error(`Unknown tool: ${name}.${hint ? ` Did you mean "${hint}"?` : ''} Run browser_agent_guide or node src/cli.js tools to list the ${TOOLS.length} available tools.`);
+  }
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('arguments must be an object');
   const s = t.inputSchema;
-  for (const key of Object.keys(args)) if (!Object.hasOwn(s.properties, key)) throw new Error(`Unknown argument: ${key}`);
-  for (const key of s.required) if (!Object.hasOwn(args, key)) throw new Error(`Missing argument: ${key}`);
+  const known = Object.keys(s.properties);
+  for (const key of Object.keys(args)) if (!Object.hasOwn(s.properties, key)) {
+    const hint = closest(key, known);
+    throw new Error(`Unknown argument: ${key}.${hint ? ` Did you mean "${hint}"?` : ''} ${argSummary(name, s)}`);
+  }
+  for (const key of s.required) if (!Object.hasOwn(args, key)) throw new Error(`Missing argument: ${key}. ${argSummary(name, s)}`);
   for (const [key, value] of Object.entries(args)) {
     const p = s.properties[key];
-    if (p.enum && !p.enum.includes(value)) throw new Error(`Invalid ${key}`);
-    if (p.type === 'number' && (typeof value !== 'number' || !Number.isFinite(value) || value < p.minimum || value > p.maximum)) throw new Error(`Invalid ${key}`);
-    if (p.type === 'integer' && (!Number.isInteger(value) || value < p.minimum || value > (p.maximum ?? Number.MAX_SAFE_INTEGER))) throw new Error(`Invalid ${key}`);
-    if (p.type === 'string' && (typeof value !== 'string' || value.length < (p.minLength ?? 0) || value.length > p.maxLength)) throw new Error(`Invalid ${key}`);
-    if (p.type === 'boolean' && typeof value !== 'boolean') throw new Error(`Invalid ${key}`);
-    if (p.pattern && !new RegExp(p.pattern).test(value)) throw new Error(`Invalid ${key}`);
+    const detail = constraints(p);
+    const fail = why => { throw new Error(`Invalid ${key}: ${JSON.stringify(value)}${why ? ` (${why})` : ''}. ${detail}`); };
+    if (p.enum && !p.enum.includes(value)) fail();
+    if (p.type === 'number' && (typeof value !== 'number' || !Number.isFinite(value) || value < p.minimum || value > p.maximum)) fail();
+    if (p.type === 'integer' && (!Number.isInteger(value) || value < p.minimum || value > (p.maximum ?? Number.MAX_SAFE_INTEGER))) fail();
+    if (p.type === 'string' && (typeof value !== 'string' || value.length < (p.minLength ?? 0) || value.length > p.maxLength)) fail();
+    if (p.type === 'boolean' && typeof value !== 'boolean') fail();
+    if (p.pattern && !new RegExp(p.pattern).test(value)) fail();
   }
   if (name === 'browser_action') {
-    const required = { Tap: ['x', 'y'], 'Double Tap': ['x', 'y'], 'Long Press': ['x', 'y'], Hover: ['x', 'y'], Swipe: ['x', 'y', 'endX', 'endY'], Type: ['text'], Key: ['key'], Wait: ['durationMs'] }[args.action] || [];
-    for (const field of required) if (!Object.hasOwn(args, field)) throw new Error(`Missing action argument: ${field}`);
+    const action = args.action;
+    const required = { Tap: ['x', 'y'], 'Double Tap': ['x', 'y'], 'Long Press': ['x', 'y'], Hover: ['x', 'y'], Swipe: ['x', 'y', 'endX', 'endY'], Type: ['text'], Key: ['key'], Wait: ['durationMs'] }[action] || [];
+    for (const field of required) if (!Object.hasOwn(args, field)) throw new Error(`Missing action argument: ${field} for action "${action}". ${argSummary(name, s)}`);
   }
   if (args.url) {
     const u = new URL(args.url);

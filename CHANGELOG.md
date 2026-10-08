@@ -5,6 +5,75 @@
 
 ---
 
+## 0.5.3 — 2026-10-08 · 参数错误回传可用列表 + 服务不可达可操作诊断（可用性层）
+
+### 触发来源
+
+另一位 Agent 留下 `docs/ai-browser-bridge-阻塞与不便清单.md`（实测于 **0.4.19**，本次一并提交入库，
+此前未跟踪）。它列了 P0/P1/P2 共 8 项。**先审计再动手**——其中多项在 0.5.x 已解决：
+
+| 清单项 | 现状（0.5.3 实测） |
+|---|---|
+| 1.1 跨 iframe 读取/操作（P0） | ✅ **已解决**：`browser_read` 支持 `frame:'all'`（多帧返回 `frameResults`），ref 自动加 `@frameN` 后缀；`worker.js:247` 解析该后缀后按 `frameIds` 精确注入；另有 `browser_frames` 工具列帧 |
+| 1.2 重 SPA `read_timeout` | 🟡 部分：`browser_read` 已支持 `waitFor` 与 `partial:true` 降级快照 |
+| 2.1 upload 受 allowlist 根约束（P1） | 🟡 部分：已有 `node src/cli.js allow-upload-root <绝对路径>` 可加根；SHA256 校验仍在（安全设计，不移除） |
+| 2.2 服务单点（P1） | 🟡 **本次改进**：错误区分 service-down / extension-disconnected |
+| 2.3 版本必须匹配 | ✅ `doctor` 已给出分级建议；本项目仍保持同版本发布 |
+| 2.4 坐标点击（P2） | 🟡 已有 `browser_action`（0–1000 归一化坐标 + `expectedUrl` 守卫）作为显式兜底 |
+| 2.5 控制台编码 mojibake | ⬜ 未改：属终端呈现层，工具内部数据正确 |
+| 2.6 参数错误不回传可用列表（P2） | ✅ **本次解决** |
+
+本次只动**性价比最高、且不影响运行时行为**的两处（均为错误提示层，不改正常路径）。
+
+### 改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `src/tools.js` | `validateCall` 全面增强：新增 `editDistance` / `closest` / `argSummary` / `constraints` 四个纯函数。① `Unknown argument: X` → 追加「Did you mean "Y"?」与完整参数清单（区分 required / optional）；② `Missing argument` 同样附清单；③ `Invalid <key>` → 回传实际值 + 约束（enum 取值 / 数值区间 / 长度 / pattern / 描述）；④ `Unknown tool` → 给出最近工具名与工具总数；⑤ `browser_action` 缺参提示带上 action 名 |
+| `src/client.js` | `request()` 增加两段兜底：① `fetch` 失败 → 区分 timeout 与 refused，报 `State: service-down` 并给出 `start.ps1` / `doctor` 指引；② 响应非 JSON → 报 HTTP 状态与响应片段（原先 `res.json()` 直接抛难读错误）；③ `loadConfig` 失败单独提示 |
+| `src/server.js` / `src/mcp.js` / `extension/manifest.json` / `package.json` | 版本 0.5.2 → **0.5.3** |
+| `docs/ai-browser-bridge-阻塞与不便清单.md` | 另一位 Agent 的实测清单，原为未跟踪文件，本次提交入库（内容未改动） |
+
+### 实测输出（修复前 → 修复后）
+
+```
+Unknown argument: query
+  → Unknown argument: query. browser_read accepts 8 argument(s) — required: tabId;
+    optional: maxChars, maxElements, maxTextNodes, budgetMs, mode, frame, waitFor
+
+Unknown argument: txt
+  → Unknown argument: txt. Did you mean "text"? browser_fill accepts 4 argument(s) — ...
+
+Missing argument: tabId
+  → Missing argument: tabId. browser_read accepts 8 argument(s) — ...
+
+Invalid action          → Invalid action: "Click". allowed: Tap | Double Tap | Long Press |
+                          Hover | Swipe | Type | Key | Back | Wait; expected string
+Invalid x               → Invalid x: 9999. expected number in [0, 1000]
+Unknown tool: browser_red → Unknown tool: browser_red. Did you mean "browser_read"? Run
+                          browser_agent_guide or node src/cli.js tools to list the 44 available tools.
+fetch failed            → Bridge service is not listening or refused the connection on
+                          http://127.0.0.1:19387 (fetch failed). State: service-down. Start it
+                          with start.ps1 (or 'node src/server.js'), then re-check with
+                          'node src/cli.js doctor'. ...
+```
+
+### 验证
+
+- 单元测试 **21/21 通过**（无回归）。
+- 上述 7 类错误文案逐一实机调用确认（`call-raw` 走真实服务端校验）。
+- 正常路径回归：T110 竞赛标签 `browser_read` 正常返回（含 `diagnostics`），`browser_frames` 正常。
+- `node src/cli.js doctor` → `ok: true`，7 项检查全绿（含 version-match 0.5.3 / 0.5.3）。
+- 服务不可达路径实测：执行 `stop.ps1` 后调用 → 输出新的可操作文案；随后 `start.ps1` 恢复。
+
+### 生效条件
+
+- 服务端改动：重启服务即生效（已重启至 0.5.3）。
+- 扩展版本随 manifest 一并升到 0.5.3，**扩展端逻辑本次未改**；为避免 `doctor` 报版本不匹配，
+  需重载一次扩展（实测已自动上报 0.5.3）。
+
+---
+
 ## 0.5.2 — 2026-10-08 · 修复多 Agent 租约冲突拖垮整条桥（并发层）
 
 ### 症状（修复前，实测）
@@ -64,6 +133,9 @@
 ## 已知限制与待办（给接手 Agent）
 
 按优先级排列。**这些本次未改**，避免一次改动面过大。
+另见 `docs/ai-browser-bridge-阻塞与不便清单.md`（另一位 Agent 在 0.4.19 上的实测，8 项处置状态见
+0.5.3 章节的对照表）。该清单里**尚未解决**的两项并入下列待办：重 SPA 降级快照策略（1.2）、
+控制台编码呈现（2.5，属终端层，数据本身正确）。
 
 1. **租约存在 Service Worker 内存中，SW 重启即丢失**
    `extension/worker.js` 的 `tabLeases = new Map()` 是 SW 作用域内存。MV3 的 SW 会被 Chrome
@@ -93,7 +165,7 @@
 
 | 层 | 状态 | 内容 |
 |---|---|---|
-| 契约层 | ✅ | `browser_agent_guide` / `browser_bridge_modes` / 实时 schema / `browser_failure_help` |
+| 契约层 | ✅ | `browser_agent_guide` / `browser_bridge_modes` / 实时 schema / `browser_failure_help` / **参数错误回传可用列表与纠错建议（0.5.3）** |
 | 传输层 | ✅ | MCP stdio / CLI / HTTP + Bearer |
 | 并发层 | ⚠️ 部分 | tab 租约 / 队列优先级 / waiting 契约 —— **本次修了断连 bug，仍有第 1、2 条待办** |
 | 治理层 | ❌ | agent 身份 / 权限域 / 审计 |
