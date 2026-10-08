@@ -9,6 +9,7 @@ import { TOOLS, validateCall } from './tools.js';
 import { createTasks } from './tasks.js';
 import { errorCategory } from './diagnostics.js';
 import { createLeaseStore, LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
+import { createAgentPolicy } from './policy.js';
 
 function equal(a, b) {
   return typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -25,7 +26,7 @@ async function body(req) {
   }
   return JSON.parse(raw);
 }
-export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, leaseStateFile = join(stateDir, 'tab-leases.json') } = {}) {
+export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), requireAgentIdentity = false } = {}) {
   config = { ...config, uploadRoots: config.uploadRoots ?? [] };
   let extension = null;
   let current = null;
@@ -37,7 +38,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const agentGuide = () => ({
     service: 'ai-browser-bridge',
-    version: '0.5.4',
+    version: '0.5.5',
     defaults: {
       unattended: true,
       allHttpSitesAllowedByDefault: true,
@@ -54,6 +55,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       'On large or ad-heavy pages, call browser_prepare_action or browser_scan_overlays before writes; call browser_find_text/browser_find_element before full reads.',
       'For shared-tab multi-step writes, call browser_claim_tab with a stable agent name.',
       'Pass the same agent on write tools until browser_release_tab.',
+      'Every tool also accepts an optional agent name; pass it on reads too so the audit log can attribute each call.',
+      'If a call returns status=denied with retryable=false, do not retry it: register or widen that agent with node src/cli.js agent set, or re-call with an allowed host.',
       'If any tool returns status=waiting and retryable=true, call browser_wait_until_ready or nextPollTool/nextPollArgs when present, then resume.',
       'If a target is covered, use browser_scan_overlays and only dismiss explicit close refs; use browser_scroll_element for nested scroll panes.',
       'If browser_read returns partial:true or times out on a heavy page, retry with mode:"cheap" or smaller maxChars/maxElements/maxTextNodes/budgetMs before escalating.',
@@ -76,9 +79,12 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // worker: a recycled worker must not silently drop a lease or hand a tab to a
   // second agent. Survives worker restarts and, via stateFile, service restarts.
   const leases = createLeaseStore({ stateFile: leaseStateFile });
+  // Governance: scopes/origins per named agent, answered by the service like
+  // leases so MCP, CLI and HTTP share one decision point. Default is open.
+  const policy = createAgentPolicy({ file: agentPolicyFile, requireIdentity: requireAgentIdentity || config.requireAgentIdentity === true });
   const queueSnapshot = () => ({
     service: 'ai-browser-bridge',
-    version: '0.5.4',
+    version: '0.5.5',
     extensionVersion,
     tabLeases: leases.list(),
     connected: extension?.readyState === WebSocket.OPEN,
@@ -93,6 +99,10 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       recommendedNextAction: current ? 'Wait for the active command or inspect queuedJobs before submitting conflicting writes.' : (queue.length ? 'Wait for queued jobs to drain or submit read-only diagnostics.' : 'Queue is idle; submit the next browser task.'),
       priorityOrder: ['read', 'transaction', 'write', 'normal', 'navigation'],
       tabWriteLeases: 'Owned by the service, answered locally (never queued, never sent to the extension) and persisted across restarts. A recycled extension worker can no longer drop a lease or hand a tab to a second agent.',
+      agentPolicy: policy.size()
+        ? `${policy.size()} registered agent(s); scopes/origins enforced per agent. Denied calls return status:"denied" with retryable:false.`
+        : 'No registered agents: named agents run unpoliced (registered:false is recorded in the audit log). Register with node src/cli.js agent set.',
+      requireAgentIdentity: policy.requireIdentity(),
       readTimeout: 'Read-only timeouts fail only that request and keep the bridge connected.',
       writeTimeout: 'Write timeouts still disconnect because the outcome may be unknown.'
     }
@@ -135,17 +145,20 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // enters the job queue. It therefore cannot occupy the single active slot or
   // reach the timeout path that used to drop() the extension and break every
   // other agent sharing the bridge.
-  function leaseCall(name, args) {
+  function leaseCall(name, args, decision) {
     const tabId = args.tabId;
     if (!Number.isInteger(tabId) || tabId < 1) throw new Error('Invalid tabId');
+    // An agent may be capped to a shorter lease than it asked for.
+    const candidates = [args.ttlMs, decision?.maxLeaseMs].filter(value => Number.isFinite(value));
+    const ttlMs = candidates.length ? Math.min(...candidates) : undefined;
     if (name === 'browser_tab_lease') return { tabId, lease: leases.get(tabId) };
     if (name === 'browser_release_tab') return leases.release({ tabId, agent: args.agent });
-    if (name === 'browser_renew_tab') return leases.renew({ tabId, agent: args.agent, ttlMs: args.ttlMs });
-    return leases.claim({ tabId, agent: args.agent, ttlMs: args.ttlMs, wait: args.wait === true });
+    if (name === 'browser_renew_tab') return leases.renew({ tabId, agent: args.agent, ttlMs });
+    return leases.claim({ tabId, agent: args.agent, ttlMs, wait: args.wait === true });
   }
   function finish(job, error, result) {
     clearTimeout(job.timer);
-    audit({ time: new Date().toISOString(), id: job.id, tool: job.name, tabId: job.args.tabId ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : 'ok', errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
+    audit({ time: new Date().toISOString(), id: job.id, tool: job.name, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : 'ok', errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
     if (error) job.reject(new Error(error)); else job.resolve(result);
   }
   function drop(reason) {
@@ -201,8 +214,15 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (name === 'browser_agent_guide') return agentGuide();
     if (name === 'browser_queue_status') return queueSnapshot();
     if (name === 'browser_wait_until_ready') return waitUntilReady(args);
+    // Governance is evaluated before anything is dispatched or queued, so a
+    // denied call costs no queue slot and never reaches the extension.
+    const decision = policy.evaluate({ name, tool, args, agent: args.agent ?? null });
+    if (!decision.allowed) {
+      audit({ time: new Date().toISOString(), id: randomUUID(), tool: name, tabId: args.tabId ?? null, agent: decision.agent ?? null, outcome: 'denied', errorCategory: decision.reason, durationMs: 0 });
+      return decision;
+    }
     // Answered locally: no queue slot, no extension round trip, no timeout path.
-    if (LEASE_TOOLS.has(name)) return leaseCall(name, args);
+    if (LEASE_TOOLS.has(name)) return leaseCall(name, args, decision);
     if (lease && lease !== owner) {
       return { status: 'waiting', retryable: true, reason: 'global_agent_task_lease', holder: lease, suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true }, recommendedNextAction: 'Keep the agent task alive and wait until the global task lease clears.', queue: queueSnapshot() };
     }

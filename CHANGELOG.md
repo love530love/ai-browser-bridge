@@ -5,6 +5,77 @@
 
 ---
 
+## 0.5.5 — 2026-10-08 · 治理层：per-agent 作用域 / 源白名单 / 租约上限 / 审计记名（架构第 4 层）
+
+### 背景
+
+并发层（0.5.4）解决的是「**谁持有**某个标签页」，治理层解决的是「**一个具名 agent 到底能做什么**」。
+此前 `agent` 只是自由字符串：任何 agent 可冒名，没有权限边界，审计日志也不记录 agent。
+
+### 改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `src/policy.js`（新增） | 治理子系统 `createAgentPolicy`：`requiredScope()` 从**同一套** `LEASE_TOOLS`/`WRITE_TOOLS` 推导所需作用域（避免与租约层漂移）；`evaluate()` 在被入队/下发**之前**裁决；支持 `scopes`、`origins`（导航源白名单）、`maxLeaseMs`（租约时长上限）；策略文件按 **mtime 自动重载**，运维改动无需重启；落盘失败不影响桥接（治理是运维状态不是安全状态） |
+| `src/server.js` | 单一裁决点：`call()` 内在租约处理之前执行 `policy.evaluate()`，拒绝即返回 `status:"denied"` + `retryable:false`，**不占队列槽、不下发扩展**；租约 TTL 受 `maxLeaseMs` 钳制；审计行新增 `agent` 字段；拒绝调用单独写审计（`outcome:"denied"`）；`/status.policy` 暴露注册数量与 `requireAgentIdentity` |
+| `src/cli.js` | 新增运维入口 `agent list / show NAME / set NAME [JSON\|--stdin] / remove NAME`；`doctor` 增加 `agent-policy` 检查项 |
+| `src/tools.js` | **44 个工具全部接受可选 `agent`**（此前只有写/租约类 21 个带，读类无法归属）。`browser_open` 新增可选 `agent` 并显式声明 `required:['url']`（`tool()` 默认把所有属性列为必填，漏写会把 `agent` 变成必填而直接破坏入参校验）。租约三件套仍为必填 |
+| `test/policy.test.js`（新增） | 13 条：作用域推导与租约层一致、默认开放不破坏单用户、作用域限制、upload 独立作用域、源白名单仅管导航、租约上限、`requireIdentity`、非法作用域剔除、**每个工具都能携带可选 agent 身份**、**未授予 read 的 agent 读也被拒**、持久化与跨进程可见、运维改动免重启生效 |
+| 版本 | 0.5.4 → **0.5.5** |
+
+### 关键设计决策
+
+1. **作用域只有四个**：`read` / `write` / `lease` / `upload`。
+   `requiredScope()` 复用租约层的同一份工具集合推导，**不存在第二份需要手工同步的清单**。
+2. **`upload` 不给默认**：`DEFAULT_AGENT_SCOPES = ['read','write','lease']`，上传必须显式授予。
+3. **`browser_tab_lease` 归 `read` 而非 `lease`** —— 它是纯查询，且是**每个租约冲突响应里的 `nextPollTool`**。
+   若把它归到 `lease`，被策略拦下的调用方去轮询恢复路径时会被同一套策略再次拒绝，形成死锁。
+4. **默认开放（open by default）**：未注册/未具名的调用行为完全不变，单用户安装不会被这道门禁弄坏。
+   具名但未注册的 agent 放行，但审计记 `registered:false`，运维能看到谁在裸跑。
+   → 真正要收紧时，注册 agent 并/或开 `requireAgentIdentity`。
+5. **`requireAgentIdentity`（默认关，需显式开启）**：开启后，未具名的受管调用（非读）一律拒绝，
+   且**读操作仍然放行**——否则无人能诊断问题。
+6. **威胁模型写清楚**：agent 名是**声明**不是密码学身份（所有客户端共用一个 bearer token）。
+   本层防的是「越权与误操作」，不防「冒名」。要做到真身份认证需 per-agent token / 传输层绑定，
+   那是后续项（见待办）。
+
+### 验证
+
+- 单元测试 65 条全绿（含 13 条治理测试）。
+- 实机：注册只读 agent 后 `browser_click` / `browser_open` 返回 `denied`（`reason: agent_scope_denied`，`requiredScope: write`）；
+  `scoped` 打开白名单外的 `evil.test` 返回 `agent_origin_denied`（`host: evil.test`），`browser_navigate` 同样被拦；
+  `browser_claim_tab` 请求 300000ms 被钳制到 `ttlMs: 30000`；读类工具带身份正常返回；
+  具名未注册 agent（`ghost`）与不传 `agent` 的调用行为不变；运维 `agent set` 修改后**无需重启**即生效；
+  审计行确认 `agent` 已归属（`browser_open/scoped/…`）。
+- `cli.js doctor` 新增 `agent-policy` 检查项且为绿。
+
+### 踩坑
+
+- `tool(name, desc, properties)` 的 `required` 缺省为 `Object.keys(properties)`：
+  给 `browser_open` 加 `agent` 时若不显式传 `['url']`，`agent` 会变成必填，所有既存调用立刻报
+  `Missing argument: agent`。已由「每个工具都能携带可选 agent 身份」这条测试锁死。
+- `browser_open` 归 `write` 作用域（开标签本身是状态变更，且租约层管不到尚无 tabId 的调用），
+  只读 agent 需要由人或其它 agent 先开好标签。
+
+### 运维示例
+
+```bash
+node src/cli.js agent set reader  '{"scopes":["read"]}'
+node src/cli.js agent set shipper '{"scopes":["read","write","lease","upload"]}'
+node src/cli.js agent set scoped  '{"scopes":["read","write","lease"],"origins":["example.com","internal.dev"],"maxLeaseMs":30000}'
+node src/cli.js agent list
+node src/cli.js agent remove reader
+```
+
+策略文件：`stateDir/agents.json`（默认 `.local/agents.json`）。删掉该文件即回到「无注册 agent」的开放状态。
+
+### 已知限制
+
+- 冒名未根治（见上第 6 条）。
+- `origins` 只作用于 `browser_open` / `browser_navigate`；页面内跳转与 iframe 内的导航不受此白名单约束（那属于浏览器侧权限）。
+
+---
+
 ## 0.5.4 — 2026-10-08 · 租约所有权上移到服务端并持久化（并发层架构变更）
 
 > 本次为**架构级**改动，不是补丁。租约从「扩展 Service Worker 的内存」搬到

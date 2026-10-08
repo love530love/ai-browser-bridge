@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { configPath, loadConfig, ROOT, stateDir } from './config.js';
 import { request } from './client.js';
 import { callWithWaitingRecovery } from './auto-recovery.js';
+import { createAgentPolicy } from './policy.js';
 
 async function rawToolCall(name, args) {
   return await request('/call', { name, arguments: args });
@@ -28,6 +29,8 @@ async function doctor() {
     add('version-match', !!status.version && !!status.extensionVersion && status.version === status.extensionVersion, { serviceVersion: status.version, extensionVersion: status.extensionVersion ?? null });
     add('queue-idle', !status.active && status.queued === 0, { active: status.active, queued: status.queued });
     add('upload-roots', (status.uploadRoots ?? 0) === (config.uploadRoots?.length ?? 0), { count: status.uploadRoots ?? 0 });
+    const agentPolicy = createAgentPolicy({ file: join(stateDir, 'agents.json') });
+    add('agent-policy', true, { registeredAgents: agentPolicy.size(), note: agentPolicy.size() ? 'scopes enforced per registered agent' : 'no registered agents; named agents run unpoliced' });
     if (!status.connected) report.recommendations.push('Extension is not connected. Do not open many panel tabs automatically; reload the unpacked extension once or open its panel manually if needed.');
     if (status.version && status.extensionVersion && status.version !== status.extensionVersion) {
       if (status.extensionVersion > status.version) report.recommendations.push('Extension is newer than the running service. Restart the bridge service with start.ps1 or stop.ps1 then start.ps1.');
@@ -65,6 +68,21 @@ try {
     config.uploadRoots = [...new Set([...(config.uploadRoots ?? []), root])];
     writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
     console.log(JSON.stringify({ allowedUploadRoot: root, count: config.uploadRoots.length }));
+  } else if (cmd === 'agent') {
+    // Operator surface for the governance layer. Writes land in
+    // stateDir/agents.json and take effect on the next call; no restart needed
+    // because the service re-reads decisions through the same file on boot and
+    // the CLI writes are picked up by the running service's next evaluate().
+    const policy = createAgentPolicy({ file: join(stateDir, 'agents.json') });
+    if (name === 'list') console.log(JSON.stringify(policy.list(), null, 2));
+    else if (name === 'show' && args) console.log(JSON.stringify(policy.get(args) ?? { agent: args, registered: false }, null, 2));
+    else if (name === 'set' && args) {
+      const payload = process.argv[5];
+      const entry = payload === '--stdin' ? JSON.parse(readFileSync(0, 'utf8')) : JSON.parse(payload || '{}');
+      console.log(JSON.stringify(policy.set(args, entry), null, 2));
+    }
+    else if (name === 'remove' && args) console.log(JSON.stringify(policy.remove(args), null, 2));
+    else throw new Error('Usage: node src/cli.js agent list | show NAME | set NAME [JSON|--stdin] | remove NAME');
   } else if (cmd === 'status') console.log(JSON.stringify(await request('/status'), null, 2));
   else if (cmd === 'doctor') console.log(JSON.stringify(await doctor(), null, 2));
   else if (cmd === 'tools') console.log(JSON.stringify(await request('/tools'), null, 2));
@@ -76,6 +94,6 @@ try {
       ? await raw()
       : await callWithWaitingRecovery({ name, args: parsed, rawCall: rawToolCall, maxWaitMs: Number(process.env.AIB_AUTO_WAIT_MS || 120000) });
     console.log(JSON.stringify(result, null, 2));
-  } else throw new Error('Usage: node src/cli.js setup | doctor | allow-upload-root ABSOLUTE_PATH | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin]');
+  } else throw new Error('Usage: node src/cli.js setup | doctor | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin]');
 } catch (e) { console.error(e.message); process.exitCode = 1; }
 

@@ -2,11 +2,11 @@
 
 **默认用途：让已有 AI Agent 直接操作浏览器，无需配置模型。** 终端 Agent 可立即使用 [接入说明](AGENT-QUICKSTART.md) 和 agent.ps1；MCP 客户端使用本机生成的工具配置。插件内模型任务页只是可选功能。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。扩展版本 **0.4.18 / 本地原型**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。扩展版本 **0.5.5 / 本地原型**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 ### 当前版本升级指南
 
-0.4.18 新增 `browser_find_element`、`browser_prepare_action` 只读编排层，用于复杂页面写前候选排序和下一步计划；0.4.17 新增 `browser_scan_overlays`、`browser_dismiss_overlay`、`browser_scroll_element`，用于广告/引导框/透明遮罩/客服浮窗/内部滚动容器的只读识别与明确 ref 操作；0.4.16 修复 `browser_find_text` 专用 worker 在重页面先收集全文再搜索导致预算耗尽的偶发未命中，改为遍历文本节点时即时命中；0.4.15 让 CLI/agent.ps1 默认对 `status:"waiting"` 做等待、轮询和安全重试，新增 `doctor` 一键诊断，并让 `start.ps1` 等待服务就绪，减少启动瞬时 `fetch failed`；0.4.14 为多 agent 同页读写保留近期多个 read 快照，避免其他 agent 读取覆盖写入 ref，同时强化 `browser_find_text` 的直接文本节点命中回退，新增 `npm run test:stress` 重网页/多用户代表压力测试，并让 `browser_read mode:"cheap"` 与 `browser_find_text` 跳过隐藏、密码和 `data-ai-private` 文本；0.4.11 新增 `browser_find_text`，可按关键词快速定位长页面中的赛题、按钮、错误信息和附近上下文；0.4.10 让 `browser_read mode:"cheap"` 先返回轻量摘要，再采样元素，避免重页面 cheap 只有空 partial；0.4.9 修复 cheap 首次候选查询吃掉采样预算的问题；0.4.8 新增 cheap read 和重页面自动 cheap fallback，避免 SPA/竞赛页因昂贵可见性判断卡到外层超时；0.4.7 新增 `browser_renew_tab`、tab 租约自动续租、租约剩余/空闲诊断，以及 `browser_read` DOM/时间预算与 partial 诊断返回；0.4.6 新增 `browser_wait_until_ready`、断线 waiting 返回、`browser_claim_tab wait:true` 真等待和无人值守恢复指引；0.4.5 新增 agent 接入指南、waiting 下一步轮询建议和无人值守默认协议；0.4.4 新增多 agent 队列状态、租约冲突 waiting 结果和 claim wait 语义；0.4.3 新增读类工具超时不掉线、后台自动重连、扩展端强制 tab 写租约和 WorkBuddy 调用规则；0.4.1 新增多桥接模式说明 `browser_bridge_modes`、失败后恢复引导 `browser_failure_help` 和服务端优先级队列；0.4.0 新增分层健康诊断 `browser_health`、统一观察 `browser_observe`、智能选择器 `browser_pick`、验证型点击/填写/上传和 tab 写租约；0.3.6 加固 Chrome 本地裁判 JSON 结构、解析告警和高风险动作兜底。请阅读 [0.3.0 使用与升级说明](docs/UPDATE-0.3.0.md)。
+0.5.5（本次）新增多 agent 治理层：可为具名 agent 注册作用域（read/write/lease/upload）、导航源白名单和租约时长上限，越权调用返回 `status:"denied"` + `reason`（不重试），由服务端统一裁决，MCP/CLI/HTTP 共用同一决策点；所有工具都接受可选 `agent` 参数，审计日志据此归属每次调用；策略文件改动无需重启服务即刻生效。另补充 0.5.4 的服务未启动诊断文案与 `doctor` 引导。0.4.18 新增 `browser_find_element`、`browser_prepare_action` 只读编排层，用于复杂页面写前候选排序和下一步计划；0.4.17 新增 `browser_scan_overlays`、`browser_dismiss_overlay`、`browser_scroll_element`，用于广告/引导框/透明遮罩/客服浮窗/内部滚动容器的只读识别与明确 ref 操作；0.4.16 修复 `browser_find_text` 专用 worker 在重页面先收集全文再搜索导致预算耗尽的偶发未命中，改为遍历文本节点时即时命中；0.4.15 让 CLI/agent.ps1 默认对 `status:"waiting"` 做等待、轮询和安全重试，新增 `doctor` 一键诊断，并让 `start.ps1` 等待服务就绪，减少启动瞬时 `fetch failed`；0.4.14 为多 agent 同页读写保留近期多个 read 快照，避免其他 agent 读取覆盖写入 ref，同时强化 `browser_find_text` 的直接文本节点命中回退，新增 `npm run test:stress` 重网页/多用户代表压力测试，并让 `browser_read mode:"cheap"` 与 `browser_find_text` 跳过隐藏、密码和 `data-ai-private` 文本；0.4.11 新增 `browser_find_text`，可按关键词快速定位长页面中的赛题、按钮、错误信息和附近上下文；0.4.10 让 `browser_read mode:"cheap"` 先返回轻量摘要，再采样元素，避免重页面 cheap 只有空 partial；0.4.9 修复 cheap 首次候选查询吃掉采样预算的问题；0.4.8 新增 cheap read 和重页面自动 cheap fallback，避免 SPA/竞赛页因昂贵可见性判断卡到外层超时；0.4.7 新增 `browser_renew_tab`、tab 租约自动续租、租约剩余/空闲诊断，以及 `browser_read` DOM/时间预算与 partial 诊断返回；0.4.6 新增 `browser_wait_until_ready`、断线 waiting 返回、`browser_claim_tab wait:true` 真等待和无人值守恢复指引；0.4.5 新增 agent 接入指南、waiting 下一步轮询建议和无人值守默认协议；0.4.4 新增多 agent 队列状态、租约冲突 waiting 结果和 claim wait 语义；0.4.3 新增读类工具超时不掉线、后台自动重连、扩展端强制 tab 写租约和 WorkBuddy 调用规则；0.4.1 新增多桥接模式说明 `browser_bridge_modes`、失败后恢复引导 `browser_failure_help` 和服务端优先级队列；0.4.0 新增分层健康诊断 `browser_health`、统一观察 `browser_observe`、智能选择器 `browser_pick`、验证型点击/填写/上传和 tab 写租约；0.3.6 加固 Chrome 本地裁判 JSON 结构、解析告警和高风险动作兜底。请阅读 [0.3.0 使用与升级说明](docs/UPDATE-0.3.0.md)。
 
 
 ### 远程沙箱与 VNC 登录边界
@@ -42,8 +42,9 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 - MCP stdio、带认证的本机 HTTP API、CLI 三种入口；不绑定模型厂商。
 - 默认允许所有 HTTP / HTTPS 网站；关闭“允许所有网站”后按完整 origin 列表检查。拒绝 `file:`、`javascript:`、Chrome 内部页和带账户信息的 URL；浏览器保护的页面仍受 Chrome 限制。
 - 命令全局顺序执行；失效元素引用与改变了标签/链接的元素会拒绝操作。多客户端共享同一标签页时，可用 `browser_claim_tab` 获取强制写租约；租约有效期间，写操作必须传入匹配的 `agent`，读操作仍可观察。
+- 可选的多 agent 治理：用 `node src/cli.js agent set <name> '{"scopes":["read"],"origins":["example.com"],"maxLeaseMs":60000}'` 注册具名 agent 后，超出作用域的写入/上传/认领租约、白名单外的导航都会被服务直接拒绝并返回 `status:"denied"`、`reason`、`retryable:false`，租约时长会被钳制到上限；未注册或未具名的调用保持默认开放，不会削弱单机使用。所有工具都接受可选 `agent`，建议读操作也带上以便审计归属。策略存放于 `.local/agents.json`，运维改动无需重启。
 - 断线和超时不自动重放写入；断线后的新请求返回 waiting 恢复指引，已派发或排队的未知结果命令仍失败返回。暂停不撤销已经执行的操作。扩展保存配对密钥后会在后台自动重连，不需要 AI 自动打开扩展设置页。
-- 日志仅记录操作名称、标签页编号、时间和成功/失败，不记录输入内容、正文、截图或密钥。
+- 日志仅记录操作名称、标签页编号、调用方 agent 名、时间和成功/失败，不记录输入内容、正文、截图或密钥。
 
 ## 本机启动与安装
 
