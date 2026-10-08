@@ -376,7 +376,10 @@ async function execute(name, args) {
   const writeTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close', 'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_pick', 'browser_history']);
   if (name === 'browser_claim_tab') {
     const started = Date.now();
-    const waitBudgetMs = args.wait ? Math.min(args.ttlMs ?? 30000, 60000) : 0;
+    // Must stay below the service job timeout (default 20s). A longer wait here
+    // makes the service call drop(), which disconnects the extension and breaks
+    // every other agent using the bridge.
+    const waitBudgetMs = args.wait ? Math.min(args.ttlMs ?? 30000, 60000, 12000) : 0;
     let existing = tabLeases.get(leaseKey);
     while (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent && Date.now() - started < waitBudgetMs) {
       await sleep(Math.min(500, Math.max(50, existing.expiresAt - Date.now())));

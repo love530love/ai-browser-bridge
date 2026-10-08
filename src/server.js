@@ -36,7 +36,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const agentGuide = () => ({
     service: 'ai-browser-bridge',
-    version: '0.5.1',
+    version: '0.5.2',
     defaults: {
       unattended: true,
       allHttpSitesAllowedByDefault: true,
@@ -71,7 +71,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   });
   const queueSnapshot = () => ({
     service: 'ai-browser-bridge',
-    version: '0.5.1',
+    version: '0.5.2',
     extensionVersion,
     connected: extension?.readyState === WebSocket.OPEN,
     queued: queue.length,
@@ -83,7 +83,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     policy: {
       conflictResult: 'Lease conflicts return status=waiting instead of failing the tool call.',
       recommendedNextAction: current ? 'Wait for the active command or inspect queuedJobs before submitting conflicting writes.' : (queue.length ? 'Wait for queued jobs to drain or submit read-only diagnostics.' : 'Queue is idle; submit the next browser task.'),
-      priorityOrder: ['read', 'transaction', 'write', 'normal', 'navigation'],
+      priorityOrder: ['read', 'lease', 'transaction', 'write', 'normal', 'navigation'],
       readTimeout: 'Read-only timeouts fail only that request and keep the bridge connected.',
       writeTimeout: 'Write timeouts still disconnect because the outcome may be unknown.'
     }
@@ -121,7 +121,20 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     };
   }
   const status = queueSnapshot;
-  const jobTimeoutMs = name => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000) : timeoutMs;
+  // Lease bookkeeping never mutates page state and never has an unknown
+  // outcome, so it must not be allowed to hold the single active slot until the
+  // generic job timeout fires: that path calls drop(), which disconnects the
+  // extension and breaks every other agent sharing the bridge.
+  const LEASE_TOOLS = new Set(['browser_claim_tab', 'browser_renew_tab', 'browser_release_tab', 'browser_tab_lease']);
+  // Sits above the extension's own 12s lease-wait cap and below the generic
+  // 20s job timeout, so a healthy extension always answers first and only a
+  // genuinely stuck one reaches this safety net.
+  const LEASE_TOOL_TIMEOUT_MS = 15000;
+  const jobTimeoutMs = name => {
+    if (name === 'browser_local_judge') return Math.max(timeoutMs, 120000);
+    if (LEASE_TOOLS.has(name)) return Math.min(LEASE_TOOL_TIMEOUT_MS, timeoutMs);
+    return timeoutMs;
+  };
   function finish(job, error, result) {
     clearTimeout(job.timer);
     audit({ time: new Date().toISOString(), id: job.id, tool: job.name, tabId: job.args.tabId ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : 'ok', errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
@@ -138,6 +151,24 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     current = queue.shift();
     const job = current;
     job.timer = setTimeout(() => {
+      if (LEASE_TOOLS.has(job.name)) {
+        current = null;
+        finish(job, null, {
+          status: 'waiting',
+          retryable: true,
+          reason: 'lease_bookkeeping_timeout',
+          tool: job.name,
+          tabId: job.args.tabId ?? null,
+          agent: job.args.agent ?? null,
+          suggestedDelayMs: 1000,
+          nextPollTool: 'browser_tab_lease',
+          nextPollArgs: job.args.tabId ? { tabId: job.args.tabId } : {},
+          recommendedNextAction: 'Lease bookkeeping did not answer in time. The extension stays connected; poll browser_tab_lease, then retry the lease operation.',
+          queue: queueSnapshot()
+        });
+        pump();
+        return;
+      }
       const readOnly = !!job.tool.annotations?.readOnlyHint;
       if (readOnly) {
         current = null;
@@ -153,6 +184,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   }
   function priorityFor(tool, name) {
     if (tool.annotations?.readOnlyHint) return { value: 10, name: 'read' };
+    if (LEASE_TOOLS.has(name)) return { value: 20, name: 'lease' };
     if (name.includes('_verified') || name === 'browser_pick' || name === 'browser_upload') return { value: 50, name: 'transaction' };
     if (['browser_click', 'browser_fill', 'browser_key', 'browser_action', 'browser_select', 'browser_choose'].includes(name)) return { value: 60, name: 'write' };
     if (['browser_close', 'browser_navigate'].includes(name)) return { value: 80, name: 'navigation' };
