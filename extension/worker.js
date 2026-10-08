@@ -8,21 +8,14 @@ let connectionState = '未连接';
 let lastAction = '';
 let connectionEpoch = 0;
 const uiRequests = new Map();
-const tabLeases = new Map();
+// Tab write leases are owned by the bridge service (src/leases.js), not by this
+// service worker. Chrome recycles MV3 workers, which used to make leases vanish
+// mid-task. Lease tools are answered by the service and never reach the
+// extension; this worker only executes page operations.
 const defaults = { port: 19387, token: '', allowedOrigins: [], allSites: true, enabled: false };
 const reconnectAlarm = 'ai-browser-bridge-reconnect';
 const settings = () => chrome.storage.local.get(defaults);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function normalizeLease(tabId, lease) {
-  if (!lease || lease.expiresAt <= Date.now()) return null;
-  return {
-    tabId,
-    ...lease,
-    remainingMs: Math.max(0, lease.expiresAt - Date.now()),
-    idleMs: Math.max(0, Date.now() - (lease.lastActiveAt ?? lease.acquiredAt)),
-    autoRenewOnOwnerWrite: true
-  };
-}
 function findTextOperation(args, allowedOrigins, allSites) {
   if (!['http:', 'https:'].includes(location.protocol) || (!allSites && !allowedOrigins.includes(location.origin))) throw new Error('Origin changed or not allowed.');
   const started = performance.now();
@@ -330,7 +323,7 @@ async function execute(name, args) {
       connectionState,
       lastAction,
       permissions: { allSites: !!config.allSites, allowedOrigins: config.allowedOrigins || [] },
-      leases: [...tabLeases.entries()].map(([tabId, value]) => normalizeLease(Number(tabId), value)).filter(Boolean)
+      leaseOwner: 'bridge-service'
     };
     if (!Number.isInteger(args?.tabId)) return base;
     try {
@@ -370,60 +363,9 @@ async function execute(name, args) {
   const tab = await chrome.tabs.get(args.tabId);
   checkedUrl(tab.url, config);
   if (tab.pendingUrl && tab.pendingUrl !== tab.url) throw new Error('Navigation in progress. Wait and read again.');
-  const leaseKey = String(tab.id);
-  const lease = tabLeases.get(leaseKey);
-  if (lease && lease.expiresAt <= Date.now()) tabLeases.delete(leaseKey);
-  const writeTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close', 'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_pick', 'browser_history']);
-  if (name === 'browser_claim_tab') {
-    const started = Date.now();
-    // Must stay below the service job timeout (default 20s). A longer wait here
-    // makes the service call drop(), which disconnects the extension and breaks
-    // every other agent using the bridge.
-    const waitBudgetMs = args.wait ? Math.min(args.ttlMs ?? 30000, 60000, 12000) : 0;
-    let existing = tabLeases.get(leaseKey);
-    while (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent && Date.now() - started < waitBudgetMs) {
-      await sleep(Math.min(500, Math.max(50, existing.expiresAt - Date.now())));
-      existing = tabLeases.get(leaseKey);
-    }
-    if (existing && existing.expiresAt > Date.now() && existing.agent !== args.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tabId: tab.id, requestedAgent: args.agent, holder: existing.agent, holderLeaseId: existing.leaseId, expiresAt: existing.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, existing.expiresAt - Date.now())), nextPollTool: 'browser_claim_tab', nextPollArgs: { tabId: tab.id, agent: args.agent, ttlMs: args.ttlMs, wait: true }, recommendedNextAction: 'Keep the task alive; retry browser_claim_tab with wait:true, then write with the same agent after acquisition.' };
-    const now = Date.now();
-    const current = tabLeases.get(leaseKey);
-    if (current?.agent === args.agent) {
-      const renewed = { ...current, ttlMs: args.ttlMs ?? current.ttlMs ?? 120000, lastActiveAt: now, lastTool: 'browser_claim_tab', renewCount: (current.renewCount ?? 0) + 1 };
-      renewed.expiresAt = now + renewed.ttlMs;
-      tabLeases.set(leaseKey, renewed);
-      return normalizeLease(tab.id, renewed);
-    }
-    const record = { agent: args.agent, leaseId: crypto.randomUUID(), acquiredAt: now, lastActiveAt: now, lastTool: 'browser_claim_tab', renewCount: 0, ttlMs: args.ttlMs ?? 120000, expiresAt: now + (args.ttlMs ?? 120000) };
-    tabLeases.set(leaseKey, record);
-    return normalizeLease(tab.id, record);
-  }
-  if (name === 'browser_renew_tab') {
-    const existing = tabLeases.get(leaseKey);
-    if (!existing || existing.expiresAt <= Date.now()) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_missing', tabId: tab.id, requestedAgent: args.agent, suggestedDelayMs: 1000, nextPollTool: 'browser_claim_tab', nextPollArgs: { tabId: tab.id, agent: args.agent, ttlMs: args.ttlMs, wait: true }, recommendedNextAction: 'Re-acquire the tab lease with browser_claim_tab before continuing writes.' };
-    if (existing.agent !== args.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tabId: tab.id, requestedAgent: args.agent, holder: existing.agent, holderLeaseId: existing.leaseId, expiresAt: existing.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, existing.expiresAt - Date.now())), nextPollTool: 'browser_claim_tab', nextPollArgs: { tabId: tab.id, agent: args.agent, ttlMs: args.ttlMs, wait: true }, recommendedNextAction: 'Keep the task alive; wait for the current lease to clear, then claim the tab before continuing writes.' };
-    const now = Date.now();
-    const renewed = { ...existing, ttlMs: args.ttlMs ?? existing.ttlMs ?? 120000, lastActiveAt: now, lastTool: 'browser_renew_tab', renewCount: (existing.renewCount ?? 0) + 1 };
-    renewed.expiresAt = now + renewed.ttlMs;
-    tabLeases.set(leaseKey, renewed);
-    return normalizeLease(tab.id, renewed);
-  }
-  if (name === 'browser_release_tab') {
-    const existing = tabLeases.get(leaseKey);
-    if (existing && existing.agent !== args.agent) throw new Error(`Tab is leased by ${existing.agent}`);
-    tabLeases.delete(leaseKey);
-    return { released: true, tabId: tab.id };
-  }
-  if (name === 'browser_tab_lease') return { tabId: tab.id, lease: normalizeLease(tab.id, tabLeases.get(leaseKey)) };
-  const activeLease = tabLeases.get(leaseKey);
-  if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent !== activeLease.agent) return { status: 'waiting', retryable: true, reason: 'tab_write_lease_conflict', tool: name, tabId: tab.id, requestedAgent: args.agent ?? null, holder: activeLease.agent, holderLeaseId: activeLease.leaseId, expiresAt: activeLease.expiresAt, suggestedDelayMs: Math.min(10000, Math.max(1000, activeLease.expiresAt - Date.now())), nextPollTool: 'browser_tab_lease', nextPollArgs: { tabId: tab.id }, recommendedNextAction: 'Keep the task alive, wait suggestedDelayMs, poll browser_tab_lease, then retry the write with the same agent after release.' };
-  if (activeLease && activeLease.expiresAt > Date.now() && writeTools.has(name) && args.agent === activeLease.agent) {
-    activeLease.lastActiveAt = Date.now();
-    activeLease.lastTool = name;
-    activeLease.renewCount = (activeLease.renewCount ?? 0) + 1;
-    activeLease.expiresAt = Date.now() + (activeLease.ttlMs ?? 120000);
-    tabLeases.set(leaseKey, activeLease);
-  }
+  // Lease tools never reach the extension: the service owns and answers them.
+  // Page operations below therefore execute unconditionally; conflicting writes
+  // were already rejected by the service before this job was dispatched.
   async function page(name, input = routedArgs) {
     const target = Number.isInteger(input.frame) ? { tabId: tab.id, frameIds: [input.frame] } : { tabId: tab.id };
     const results = await chrome.scripting.executeScript({ target, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
@@ -570,6 +512,12 @@ async function connect() {
 }
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === reconnectAlarm) connect({ automatic: true });
+});
+// A tab closed by the user (not through the bridge) can never be written again.
+// Tell the service so it drops the lease immediately instead of holding it until
+// the TTL expires and blocking the next agent.
+chrome.tabs.onRemoved.addListener(tabId => {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'tab-removed', tabId }));
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // Only our own extension UI may configure or reconnect. No content-script API.

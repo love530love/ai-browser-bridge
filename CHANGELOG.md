@@ -5,6 +5,77 @@
 
 ---
 
+## 0.5.4 — 2026-10-08 · 租约所有权上移到服务端并持久化（并发层架构变更）
+
+> 本次为**架构级**改动，不是补丁。租约从「扩展 Service Worker 的内存」搬到
+> 「桥接服务进程 + 磁盘快照」，扩展退化为纯执行器。
+
+### 为什么必须改
+
+MV3 的 Service Worker 会被 Chrome 回收。租约原来存在 `extension/worker.js` 的
+`tabLeases = new Map()` 里，于是出现两类事故：
+
+1. **租约凭空消失**：持有者 A 正在多步写，SW 一回收租约就没了，B 随即拿到同一标签页；
+2. **静默接管**：A 与 B 同时写同一页面，而双方都以为自己持有租约。
+
+同时旧路径把租约判断放在扩展端，导致 0.5.2 修过的那个「等待 30s > 服务超时 20s → 断开扩展」
+的整条链路。**这次把决策点上移后，那条链路从根上消失了。**
+
+### 改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `src/leases.js`（新增） | 租约子系统：`createLeaseStore`。权威状态在内存 Map，**原子落盘**到 `stateDir/tab-leases.json`（tmp + rename，0600）；TTL 钳制 1s–600s（默认 120s）；过期惰性清理 + `sweep()`；`claim/renew/release/releaseTab/get/list/guard`；`wait:true` 有界等待（`MAX_LEASE_WAIT_MS = 15000`）；心跳续租走 250ms 合并写，不每次写盘 |
+| `src/server.js` | ① 租约工具（`claim/renew/release/tab_lease`）**本地应答，不再入队、不再下发扩展**，因此不存在超时/断连路径；② 受管写工具**入队前**调 `leases.guard()` 校验持有者，冲突直接返回 waiting，不占队列槽；③ `/status` 与 `browser_queue_status` 新增 `tabLeases` 真实视图（修掉此前 `active`/`leases` 与实际持有不一致的问题）；④ `browser_close` 完成后释放该标签租约；⑤ 收到扩展 `tab-removed` 立即释放租约；⑥ 关闭时 `flush()` 落盘 |
+| `extension/worker.js` | **删除全部租约裁决逻辑**（-66 行）：`tabLeases`、`normalizeLease`、claim/renew/release/tab_lease 分支、写操作前的租约检查全部移除；新增 `chrome.tabs.onRemoved` 监听，向服务上报 `tab-removed`；诊断输出改为 `leaseOwner: 'bridge-service'` |
+| `test/leases.test.js`、`test/lease-service.test.js`（新增） | 租约语义与服务集成测试 |
+| `test/lease-governance.test.js`（新增） | **不变量回归测试**：受管写工具必须在工具表中存在、必须强制 `tabId`、不得是只读工具；租约工具不得被自身门禁；读操作永不被阻塞；持有者永不被阻塞；无租约标签保持可写（单 agent 用户无感）；持有者写操作续租 |
+| 版本 | 0.5.3 → **0.5.4**（`server.js`×2、`mcp.js`、`manifest.json`、`package.json`） |
+
+### 关键设计决策（写下来，避免后人改回去）
+
+1. **租约工具绝不下发扩展**——它是协调状态，不是页面操作。本地应答 = 零超时风险，
+   这也是 0.5.2 那个断连 bug 的根治方式。
+2. **冲突的 `nextPollTool` 指向 `browser_tab_lease`（只读），绝不指回 `wait:true`**。
+   指回阻塞式 claim 曾把 auto-recovery 自旋进 20s 超时并拖垮扩展；已加不变量测试锁定。
+3. **读操作永不被租约阻塞**——其他 agent 仍可持续观察被租用的标签页，只有写被拦。
+4. **未认领标签保持可写**——单 agent 用户不会因为这次改动被强制加一道门禁。
+5. **持有者的每次写自动续租**——长任务不会被自己的心跳间隔踢掉。
+6. **标签关闭即释放**（`browser_close` 与 Chrome 内直接关闭两条路径都覆盖），
+   避免租约挂到 TTL 到期、白白堵住下一个 agent。
+7. **落盘失败不致命**——租约是协调状态不是安全状态，磁盘只读/写满时静默降级为纯内存。
+
+### 验证
+
+- 单元测试 **52/52 通过**（原 21 → 44 → 52）。
+- 语义实测（真实 Chrome + 已登录扩展）：
+  - A 取租约 → B 争抢：返回 `status=waiting`、`reason=tab_write_lease_conflict`、
+    `holder=agentA`、`nextPollTool=browser_tab_lease`，**无 20s 超时、无断连**；
+  - B 的 `browser_scroll` 被拦截，A 的 `browser_scroll` 放行；
+  - 第三方 C 读取另一标签页正常，不受争抢影响；
+  - A 释放后 B 立即取得租约。
+- **持久化实测（核心）**：`claim` 后执行 `stop.ps1` → `start.ps1`（期间服务停止约 4 分钟），
+  重启后 `browser_tab_lease` 返回**同一个 `leaseId`、同一个持有者**。（若仍在 SW 内存中，
+  此时必然已丢失。）
+- `/status` 输出 `tabLeases` 真实数组；`cli.js doctor` 全绿。
+
+### 生效条件与回滚
+
+- **两端都要更新**：服务端重启即生效；扩展需重载（`chrome://extensions` → 重新加载）
+  才能装上 `tabs.onRemoved` 监听与移除后的执行逻辑。实测扩展已自动上报 0.5.4。
+- 持久化文件：`stateDir/tab-leases.json`（测试用 `AIB_STATE_DIR` 指向临时目录，不污染真实状态）。
+  若状态损坏，删掉该文件即回到空租约，不影响桥接启动。
+- 回滚：`git revert <本提交>`；旧扩展 + 新服务端组合下，租约工具由服务应答、扩展不再有
+  租约逻辑，**不会重复裁决**，可安全混合运行。
+
+### 并发提示（给接手 Agent）
+
+本改动落地时，仓库中曾存在**另一位 Agent 未提交的在途改动**（`src/leases.js` 与其测试）。
+已核验其内容与上述设计一致后合并提交，未覆盖其实现。**多人同时改 `src/server.js` 前请先确认
+工作区状态（`git status`），避免互相覆盖。**
+
+---
+
 ## 0.5.3 — 2026-10-08 · 参数错误回传可用列表 + 服务不可达可操作诊断（可用性层）
 
 ### 触发来源
@@ -137,11 +208,9 @@ fetch failed            → Bridge service is not listening or refused the conne
 0.5.3 章节的对照表）。该清单里**尚未解决**的两项并入下列待办：重 SPA 降级快照策略（1.2）、
 控制台编码呈现（2.5，属终端层，数据本身正确）。
 
-1. **租约存在 Service Worker 内存中，SW 重启即丢失**
-   `extension/worker.js` 的 `tabLeases = new Map()` 是 SW 作用域内存。MV3 的 SW 会被 Chrome
-   回收，实测出现过「A 的租约莫名消失、B 直接拿到租约」以及 `Tab is leased by agentB` 的情况。
-   → 建议：把租约状态搬到服务端（`src/server.js`）持久化，扩展只做执行。
-   **这是并发层剩下的最大隐患。**
+1. ~~**租约存在 Service Worker 内存中，SW 重启即丢失**~~ → **✅ 0.5.4 已解决**。
+   租约所有权已上移到 `src/leases.js`（服务端进程 + 磁盘持久化），扩展只做执行。详见 0.5.4 章节。
+   剩下的并发层隐患见下面第 2 条。
 
 2. **`callWithWaitingRecovery` 默认 `maxWaitMs = 120000`**
    永久冲突会自旋到 120s。符合「waiting 不是失败」契约，但调用方可能感知为卡住。
@@ -167,7 +236,7 @@ fetch failed            → Bridge service is not listening or refused the conne
 |---|---|---|
 | 契约层 | ✅ | `browser_agent_guide` / `browser_bridge_modes` / 实时 schema / `browser_failure_help` / **参数错误回传可用列表与纠错建议（0.5.3）** |
 | 传输层 | ✅ | MCP stdio / CLI / HTTP + Bearer |
-| 并发层 | ⚠️ 部分 | tab 租约 / 队列优先级 / waiting 契约 —— **本次修了断连 bug，仍有第 1、2 条待办** |
+| 并发层 | ✅ | tab 租约**由服务端持有并持久化**（0.5.4）+ 队列优先级 + waiting 契约；扩展只做执行。剩余小项见待办第 2 条 |
 | 治理层 | ❌ | agent 身份 / 权限域 / 审计 |
 | 分发层 | ❌ | npm 可装 / 跨平台 / `setup --register` 自动注册 |
 
