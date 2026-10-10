@@ -1,4 +1,3 @@
-#Requires -Version 7.0
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 $nodePath = (Get-Command node.exe -ErrorAction Stop).Source

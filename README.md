@@ -71,6 +71,49 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 
 扩展更新后，在 Chrome 扩展页点“重新加载”。已保存配对密钥且未暂停时，扩展会在后台自动重连；连接成功时每 20 秒发送一个纯本机保活消息，**不会调用模型或消耗模型 token**。AI 客户端诊断断线时只应读取 `npm run status` 或 `GET /status`，不要自动打开 `chrome-extension://.../panel.html`。
 
+## 开机 / 关机后的必要操作
+
+服务注册为登录自启后，日常使用**不需要任何手动操作**。下面分「一次性设置」和「日常」两部分。
+
+### 一次性设置（每台机器只做一次）
+
+```powershell
+Set-Location 'K:\PythonProjects5\AI-Browser-Bridge'
+.\install-autostart.ps1
+```
+
+它会做两件事：
+
+1. 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写入 `AIBrowserBridge`，让服务在你的 Windows 账户登录时自动启动。
+2. 在项目根目录生成隐藏窗口启动器 `bridge-autostart.vbs`（内含本机 `node.exe` 路径，已加入 `.gitignore`，不进仓库）。
+
+不需要管理员权限，也不会弹出控制台窗口。想撤销时运行 `.\uninstall-autostart.ps1`，它会同时删掉注册表项和启动器。
+
+此外，扩展只需要在 Chrome 里加载 `extension/` 并用 `.\pair.ps1` 配对**一次**；配对密钥保存在扩展里，之后自动重连。
+
+### 每次开机 / 重新登录后
+
+什么都不用做。登录 Windows 时服务自动起来，打开 Chrome 后扩展自动连上，**不需要**再跑 `start.ps1` 或 `pair.ps1`。
+
+想确认状态就跑 `npm run status`，看到 `"connected": true` 说明 Chrome 扩展实际已连上。
+
+### 关机 / 重启前
+
+不需要任何操作，直接关机即可，服务随 Windows 一起退出。
+
+只想中途停掉服务、但保留自启：运行 `.\stop.ps1`（只结束当前进程，注册表项还在，下次登录照常自启）。
+
+### 状态不对时的排查顺序
+
+| 现象 | 处理 |
+|---|---|
+| 服务未监听、`fetch failed` | 手动 `.\start.ps1` 拉起；反复失败看 `.local\server-error.log` |
+| 服务在跑但 `connected: false` | 扩展被暂停：打开扩展面板点“保存并连接”；或在 `chrome://extensions` 点 Reload |
+| 扩展卡着红色 `Errors` 角标 | 只是历史错误残留，不影响使用。等几分钟，或 Reload 扩展即清除 |
+| 换电脑 / 重装系统 | `npm ci` → `.\install-autostart.ps1` → `.\pair.ps1` |
+
+> `start.ps1` 已不再要求 PowerShell 7，Windows PowerShell 5.1 也能直接运行。
+
 ## 让其他 AI 接入
 
 ### MCP 客户端
@@ -143,6 +186,8 @@ npm run test:e2e
 | `src/mcp.js` | MCP stdio 适配 |
 | `src/cli.js` | 命令行入口 |
 | `.local/` | 本机密钥、日志、PID、接入配置，不进入分发包 |
+| `install-autostart.ps1` | 注册登录自启（写 HKCU Run + 生成隐藏窗口启动器） |
+| `uninstall-autostart.ps1` | 撤销登录自启 |
 | `test/` | 服务测试和真实扩展端到端测试 |
 | `docs/HANDOFF.md` | 后续开发交接与已知限制 |
 
