@@ -44,7 +44,24 @@ test('websocket denies website origin and wrong pairing key', async t => {
   const ws = new WebSocket(wsUrl, { origin: `chrome-extension://${'a'.repeat(32)}` });
   await once(ws, 'open'); const closed = once(ws, 'close');
   ws.send(JSON.stringify({ type: 'hello', token: 'wrong' }));
-  assert.equal((await closed)[0], 4001);
+  assert.equal((await closed)[0], 4002);
+});
+test('close codes distinguish a wrong pairing key from a second Chrome profile', async t => {
+  const { wsUrl } = await setup(t);
+  const hello = tok => {
+    const ws = new WebSocket(wsUrl, { origin: `chrome-extension://${'a'.repeat(32)}` });
+    return once(ws, 'open').then(() => { const closed = once(ws, 'close'); ws.send(JSON.stringify({ type: 'hello', token: tok })); return closed; });
+  };
+  // Wrong key must be distinguishable from "someone else already connected",
+  // otherwise a second Chrome profile looks like a broken pairing.
+  assert.equal((await hello('wrong'))[0], 4002);
+  const first = new WebSocket(wsUrl, { origin: `chrome-extension://${'a'.repeat(32)}` });
+  await once(first, 'open'); first.send(JSON.stringify({ type: 'hello', token: config.extensionToken })); await once(first, 'message');
+  const second = new WebSocket(wsUrl, { origin: `chrome-extension://${'a'.repeat(32)}` });
+  await once(second, 'open'); const closedSecond = once(second, 'close');
+  second.send(JSON.stringify({ type: 'hello', token: config.extensionToken }));
+  assert.equal((await closedSecond)[0], 4003);
+  first.close();
 });
 test('strict validation denies unsupported actions and unsafe URL schemes', () => {
   assert.throws(() => validateCall('eval', {}));

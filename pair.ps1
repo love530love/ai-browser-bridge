@@ -1,4 +1,3 @@
-#Requires -Version 7.0
 $ErrorActionPreference = 'Stop'
 $config = Get-Content -LiteralPath (Join-Path $PSScriptRoot '.local\config.json') -Raw | ConvertFrom-Json
 Set-Clipboard -Value $config.extensionToken

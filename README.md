@@ -49,25 +49,30 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 
 ## 本机启动与安装
 
-要求：Node.js 22+、PowerShell 7、Chrome 120+。
+要求：Node.js 22+、Chrome 120+。**不需要会命令行**：每个 `.ps1` 都配了同名 `.bat`，双击即可运行。
 
 本机已安装依赖；迁移到另一台电脑时先在项目目录运行 `npm ci`。
 
-1. 在 PowerShell 7 中运行：
-
-   ```powershell
-   Set-Location 'K:\PythonProjects5\AI-Browser-Bridge'
-   .\start.ps1
-   ```
-
-   服务只监听 `127.0.0.1:19387`，后台运行。再次启动会先检查已有服务，不会重复启动。
-
-2. 在你希望使用的 Chrome 用户配置中打开 `chrome://extensions`，开启开发者模式，点击“加载已解压的扩展程序”，选择本项目的 **extension 文件夹**。
-3. 运行 `.\pair.ps1`，密钥会复制到剪贴板，不会打印。打开“自主浏览器”的扩展选项，粘贴配对密钥。
+1. **双击 `start.bat`**。服务只监听 `127.0.0.1:19387`，后台运行。再次启动会先检查已有服务，不会重复启动。
+2. 在你希望使用的 Chrome 用户配置中打开 `chrome://extensions`，打开右上角的**开发者模式**开关，点左上角“加载已解压的扩展程序”，选择本项目的 **extension 文件夹**。
+3. **双击 `pair.bat`**，密钥会复制到剪贴板（不会打印）。点击浏览器工具栏右上角的**拼图图标 → 自主浏览器**（若被折叠，先点拼图图标把它固定出来），粘贴配对密钥。
 4. 默认勾选“允许所有网站”，无需填写网站列表，点击“保存并连接”，状态会自动更新为“已连接”。若只想操作部分网站，取消勾选并逐行填写源地址，例如 `https://example.com`，再保存。路径不能填写；不同端口属于不同 origin。
-5. 运行 `npm run status`。只有 `connected: true` 才表明当前 Chrome 扩展实际连接成功。
+5. **双击 `status.bat`**。只有 `connected: true` 才表明当前 Chrome 扩展实际连接成功。
 
-现有 AutoGLM 无需卸载。建议不要让两个自动化工具同时操作同一个标签页。第一版每个服务只连接一个 Chrome 用户配置，重复连接会被拒绝。
+### 瞄一眼就知道通不通：工具栏角标
+
+| 角标 | 含义 | 该做什么 |
+|---|---|---|
+| `ON`（绿） | 已连接 | 直接用 |
+| `...`（黄） | 正在连接 | 稍等几秒 |
+| `OFF`（灰） | 已被暂停 | 点图标 → “重新连接” |
+| `?`（红） | 配对密钥不匹配 | 重跑 `pair.bat` 再粘贴 |
+| `2`（橙） | 服务已被**另一个 Chrome 配置**占用 | 先在那边断开 |
+| `!`（红） | 服务没起来或连接断开 | 双击 `start.bat`；扩展会后台自动重连 |
+
+出问题时还会弹一次系统通知（同一类问题 10 分钟内至多一次），不用盯着角标等。
+
+现有 AutoGLM 无需卸载。建议不要让两个自动化工具同时操作同一个标签页。每个服务只连接一个 Chrome 用户配置；第二个配置会被拒绝，并在角标上显示 `2`，不再只是无意义地转圈。
 
 扩展更新后，在 Chrome 扩展页点“重新加载”。已保存配对密钥且未暂停时，扩展会在后台自动重连；连接成功时每 20 秒发送一个纯本机保活消息，**不会调用模型或消耗模型 token**。AI 客户端诊断断线时只应读取 `npm run status` 或 `GET /status`，不要自动打开 `chrome-extension://.../panel.html`。
 
@@ -77,42 +82,48 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 
 ### 一次性设置（每台机器只做一次）
 
+**双击 `install-autostart.bat`**。
+
+默认用「启动文件夹」方式：在「启动」文件夹放一个快捷方式。**不写注册表、不生成 vbs**，可以在「任务管理器 → 启动应用」里自己关掉，也不会被杀毒软件当成可疑的持久化行为。
+
+确实想要完全无窗口时，改用注册表方式：
+
 ```powershell
-Set-Location 'K:\PythonProjects5\AI-Browser-Bridge'
-.\install-autostart.ps1
+.\install-autostart.ps1 -Method Registry
 ```
 
-它会做两件事：
+两种方式都会：记住本机 `node.exe` 路径（找不到时自动回退到 PATH，不会因为 Node 升级而永久失效）、把启动过程写进 `.local\server-start.log`、并在安装时**当场试启动一次**，直接告诉你端口有没有起来。
 
-1. 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写入 `AIBrowserBridge`，让服务在你的 Windows 账户登录时自动启动。
-2. 在项目根目录生成隐藏窗口启动器 `bridge-autostart.vbs`（内含本机 `node.exe` 路径，已加入 `.gitignore`，不进仓库）。
+撤销：双击 `uninstall-autostart.bat`。它会清掉快捷方式、注册表项和生成的启动器，但**保留配对密钥和你的配置**。
 
-不需要管理员权限，也不会弹出控制台窗口。想撤销时运行 `.\uninstall-autostart.ps1`，它会同时删掉注册表项和启动器。
-
-此外，扩展只需要在 Chrome 里加载 `extension/` 并用 `.\pair.ps1` 配对**一次**；配对密钥保存在扩展里，之后自动重连。
+此外，扩展只需要加载 `extension/` 并用 `pair.bat` 配对**一次**；密钥保存在扩展里，之后自动重连。
 
 ### 每次开机 / 重新登录后
 
-什么都不用做。登录 Windows 时服务自动起来，打开 Chrome 后扩展自动连上，**不需要**再跑 `start.ps1` 或 `pair.ps1`。
+什么都不用做。登录 Windows 时服务自动起来，打开 Chrome 后扩展自动连上，不需要再跑 `start.bat` 或 `pair.bat`。
 
-想确认状态就跑 `npm run status`，看到 `"connected": true` 说明 Chrome 扩展实际已连上。
+想确认就双击 `status.bat`，看到 `"connected": true` 即可。
 
-### 关机 / 重启前
+### 关机 / 重启 / 合盖
 
-不需要任何操作，直接关机即可，服务随 Windows 一起退出。
+都不需要任何操作。休眠唤醒后约 10~30 秒自动恢复，期间 AI 报 `waiting` 属正常，**不要重发任务**。
 
-只想中途停掉服务、但保留自启：运行 `.\stop.ps1`（只结束当前进程，注册表项还在，下次登录照常自启）。
+只想中途停掉服务、但保留自启：双击 `stop.bat`（只结束当前进程，下次登录照常自启）。
 
 ### 状态不对时的排查顺序
 
+先双击 `doctor.bat`，它会直接告诉你卡在哪一层。
+
 | 现象 | 处理 |
 |---|---|
-| 服务未监听、`fetch failed` | 手动 `.\start.ps1` 拉起；反复失败看 `.local\server-error.log` |
-| 服务在跑但 `connected: false` | 扩展被暂停：打开扩展面板点“保存并连接”；或在 `chrome://extensions` 点 Reload |
-| 扩展卡着红色 `Errors` 角标 | 只是历史错误残留，不影响使用。等几分钟，或 Reload 扩展即清除 |
-| 换电脑 / 重装系统 | `npm ci` → `.\install-autostart.ps1` → `.\pair.ps1` |
+| 服务未监听、`fetch failed` | 双击 `start.bat`；反复失败看 `.local\server-error.log` 与 `server-start.log` |
+| 服务在跑但 `connected: false` | 扩展被暂停（角标 `OFF`）：点图标 → “重新连接” |
+| 角标 `?` | 配对密钥不匹配，重跑 `pair.bat` 再粘贴 |
+| 角标 `2` | 另一个 Chrome 配置已占用，先在那边断开 |
+| 扩展卡着红色 `Errors` | 只是历史错误残留，不影响使用。等几分钟或在 `chrome://extensions` 点 Reload |
+| 换电脑 / 重装系统 | `npm ci` → `start.bat` → `install-autostart.bat` → `pair.bat` |
 
-> `start.ps1` 已不再要求 PowerShell 7，Windows PowerShell 5.1 也能直接运行。
+> 所有 `.ps1` 都不再要求 PowerShell 7，Windows PowerShell 5.1 也能直接运行。
 
 ## 让其他 AI 接入
 
@@ -186,8 +197,9 @@ npm run test:e2e
 | `src/mcp.js` | MCP stdio 适配 |
 | `src/cli.js` | 命令行入口 |
 | `.local/` | 本机密钥、日志、PID、接入配置，不进入分发包 |
-| `install-autostart.ps1` | 注册登录自启（写 HKCU Run + 生成隐藏窗口启动器） |
-| `uninstall-autostart.ps1` | 撤销登录自启 |
+| 各 `.bat` | 双击入口：`start` / `stop` / `pair` / `status` / `doctor` / `install-autostart` / `uninstall-autostart` |
+| `install-autostart.ps1` | 注册登录自启，默认启动文件夹，`-Method Registry` 用注册表 |
+| `uninstall-autostart.ps1` | 撤销登录自启，清掉所有方式与生成的启动器 |
 | `test/` | 服务测试和真实扩展端到端测试 |
 | `docs/HANDOFF.md` | 后续开发交接与已知限制 |
 

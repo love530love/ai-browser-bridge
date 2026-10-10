@@ -4,11 +4,12 @@
   "version": "0.5.6",
   "description": "通过本机 MCP / CLI 将授权网页交给你选择的 AI，支持受限目录文件上传。无内置云模型。",
   "minimum_chrome_version": "120",
-  "permissions": ["storage", "scripting", "tabs", "debugger", "sidePanel", "alarms"],
+  "permissions": ["storage", "scripting", "tabs", "debugger", "sidePanel", "alarms", "notifications"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": { "service_worker": "worker.js", "type": "module" },
-  "action": { "default_title": "自主浏览器：连接与授权", "default_popup": "panel.html" },
+  "action": { "default_title": "自主浏览器：连接与授权", "default_popup": "panel.html", "default_icon": { "16": "icon-16.png", "32": "icon-32.png", "48": "icon-48.png", "128": "icon-128.png" } },
   "options_page": "panel.html",
   "side_panel": { "default_path": "connect.html" },
+  "icons": { "16": "icon-16.png", "32": "icon-32.png", "48": "icon-48.png", "128": "icon-128.png" },
   "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:*" }
 }

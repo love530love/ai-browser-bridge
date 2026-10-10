@@ -1,4 +1,3 @@
-#Requires -Version 7.0
 param(
     [ValidateSet('status','tools','call','call-raw','doctor','allow-upload-root')][string]$Action = 'status',
     [string]$Tool,

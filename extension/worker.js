@@ -180,7 +180,53 @@ async function localJudge(args) {
     try { session?.destroy?.(); } catch {}
   }
 }
+// The badge used to be blank for everything except "connected", so a paused
+// extension, a dead service and an unpaired install all looked identical in the
+// toolbar. One glance at the badge has to tell them apart.
+const BADGE_STATES = [
+  { match: s => s === '已连接', text: 'ON', color: '#22b895' },
+  { match: s => s === '已暂停', text: 'OFF', color: '#888780' },
+  { match: s => s === '请先配对', text: '?', color: '#888780' },
+  { match: s => s.startsWith('配对密钥'), text: '?', color: '#E24B4A' },
+  { match: s => s.startsWith('另一个 Chrome'), text: '2', color: '#BA7517' },
+  { match: s => s.startsWith('连接中'), text: '...', color: '#BA7517' }
+];
+function applyBadge() {
+  const state = BADGE_STATES.find(item => item.match(connectionState)) || { text: '!', color: '#E24B4A' };
+  chrome.action.setBadgeBackgroundColor({ color: state.color });
+  chrome.action.setBadgeText({ text: state.text });
+}
+// After we've been connected once, a small system notification when something
+// goes wrong replaces the user's "I just stare at a blank badge" feeling. Throttled
+// so we don't pester anyone — at most one per problem state per 10 minutes.
+let wasConnected = false;
+let lastNotifyAt = 0;
+const NOTIFY_COOLDOWN_MS = 10 * 60 * 1000;
+const NOTIFY_PROBLEMS = {
+  '配对密钥': ['配对密钥不匹配', '请重新运行 pair.ps1，把新的密钥粘贴到扩展面板。'],
+  '另一个 Chrome': ['本机服务已被另一个 Chrome 配置占用', '在那一配置的扩展面板里断开连接，然后再试。'],
+  '本机服务不可用': ['本机桥接服务未运行', '请在项目目录里运行 start.ps1（已配置登录自启后通常不需要手动启动）。']
+};
+function maybeNotify(state) {
+  if (!chrome.notifications?.create) return;
+  if (state === '已连接') { wasConnected = true; return; }
+  if (!wasConnected) return;
+  const match = Object.entries(NOTIFY_PROBLEMS).find(([prefix]) => state.startsWith(prefix));
+  if (!match) return;
+  if (Date.now() - lastNotifyAt < NOTIFY_COOLDOWN_MS) return;
+  lastNotifyAt = Date.now();
+  chrome.notifications.create(`aib-${Date.now()}`, {
+    type: 'basic',
+    iconUrl: chrome.runtime.getURL('icon-48.png'),
+    title: '自主浏览器 · AI Browser Bridge',
+    message: match[1][0],
+    contextMessage: match[1][1],
+    silent: true
+  });
+}
 function notifyStatus() {
+  applyBadge();
+  maybeNotify(connectionState);
   chrome.runtime.sendMessage({ type: 'connection-status', connectionState, lastAction }).catch(() => {});
 }
 chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
@@ -191,14 +237,14 @@ function clearReconnect() {
   clearTimeout(reconnectTimer); reconnectTimer = null;
   chrome.alarms.clear(reconnectAlarm).catch(() => {});
 }
-async function scheduleReconnect() {
+async function scheduleReconnect(delayMs = 5000) {
   const config = await settings();
   if (!validConnectionConfig(config)) return;
   clearReconnect();
-  reconnectTimer = setTimeout(() => connect({ automatic: true }), 5000);
-  chrome.alarms.create(reconnectAlarm, { delayInMinutes: 0.1 });
+  reconnectTimer = setTimeout(() => connect({ automatic: true }), delayMs);
+  chrome.alarms.create(reconnectAlarm, { delayInMinutes: Math.max(0.1, delayMs / 60000) });
 }
-function disconnect(message = '已暂停', { automaticReconnect = false } = {}) {
+function disconnect(message = '已暂停', { automaticReconnect = false, reconnectDelayMs = 5000 } = {}) {
   connectionEpoch++;
   clearInterval(keepalive); keepalive = null;
   clearTimeout(connectDeadline); connectDeadline = null;
@@ -209,8 +255,7 @@ function disconnect(message = '已暂停', { automaticReconnect = false } = {}) 
   uiRequests.clear();
   connectionState = message;
   notifyStatus();
-  chrome.action.setBadgeText({ text: '' });
-  if (automaticReconnect) scheduleReconnect();
+  if (automaticReconnect) scheduleReconnect(reconnectDelayMs);
 }
 function checkedUrl(url, config) {
   const u = new URL(url);
@@ -501,8 +546,6 @@ async function connect() {
         clearTimeout(connectDeadline); connectDeadline = null;
         connectionState = '已连接';
         notifyStatus();
-        chrome.action.setBadgeBackgroundColor({ color: '#22b895' });
-        chrome.action.setBadgeText({ text: 'ON' });
         // Transport keepalive only: no model, no task polling, no cloud requests.
         keepalive = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'keepalive' })); }, 20000);
       } else if (message.type === 'command') {
@@ -518,7 +561,14 @@ async function connect() {
     } catch { disconnect('协议错误，后台自动重连中', { automaticReconnect: true }); }
   };
   ws.onerror = () => { if (socket === ws) { connectionState = '本机服务不可用'; notifyStatus(); } };
-  ws.onclose = () => { if (socket === ws) disconnect('连接已断开，后台自动重连中', { automaticReconnect: true }); };
+  ws.onclose = event => {
+    if (socket !== ws) return;
+    // The service used to close every rejection with the same 4001, so a stale
+    // pairing key and a second Chrome profile both looked like "reconnecting".
+    if (event.code === 4002) { disconnect('配对密钥不匹配，请重新运行 pair.ps1'); return; }
+    if (event.code === 4003) { disconnect('另一个 Chrome 配置已占用此服务，请先断开它', { automaticReconnect: true, reconnectDelayMs: 30000 }); return; }
+    disconnect('连接已断开，后台自动重连中', { automaticReconnect: true });
+  };
 }
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === reconnectAlarm) connect({ automatic: true });
@@ -535,7 +585,13 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   (async () => {
     if (message.type === 'status') return { connectionState, lastAction, ...(await settings()), token: undefined };
     if (message.type === 'connect') { await chrome.storage.local.set({ enabled: true }); await connect(); return { ok: true }; }
-    if (message.type === 'pause') { await chrome.storage.local.set({ enabled: false }); disconnect(); return { ok: true }; }
+    if (message.type === 'pause') {
+      // Tell the service it is a deliberate pause. Without this every later call
+      // reports extension_disconnected and the user restarts everything instead
+      // of just clicking Reconnect.
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'pause' }));
+      await chrome.storage.local.set({ enabled: false }); disconnect(); return { ok: true };
+    }
     if (message.type === 'open-assistant') { await chrome.sidePanel.open({ windowId: message.windowId }); return { ok: true }; }
     if (message.type === 'agent') {
       if (socket?.readyState !== WebSocket.OPEN || connectionState !== '已连接') throw new Error('请先连接本机服务');
