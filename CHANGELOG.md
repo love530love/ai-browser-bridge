@@ -5,6 +5,58 @@
 
 ---
 
+## 0.5.7 — 2026-10-11 · 可用性与稳定性：状态可见、故障可辨、自启可靠（体验层）
+
+### 背景
+
+源于一次[小白用户找茬评审](docs/NOVICE-UX-REVIEW-2026-10-10.md)：5 位用户代表（纯小白、半懂技术、
+公司受限账户、多设备迁移、重度日常使用）各走一遍安装与排障流程。结论是功能没问题，
+但**用户不知道系统现在是什么状态、出事时不知道该做什么**。几个具体硬伤：
+
+- 工具栏角标只有「已连接」有显示，暂停 / 服务挂了 / 未配对 / 第二个 Chrome 配置被拒**长得一模一样**。
+- 服务端把所有拒绝都用 `4001 Authentication failed or another browser connected` 关掉，
+  于是「密钥过期」和「另一个 Chrome 配置已占用」无法区分，后者只会无限转圈。
+- 用户点了「暂停」之后，所有报错仍返回 `extension_disconnected`，导致用户重启一切而不是点一下恢复。
+- 单个写操作超时调用 `drop()`，`queue.splice(0)` 把**其他客户端排队中的任务全部判死**。
+- 最常用的 MCP 通道只有 `recoverRead`，没有 CLI 那份 `callWithWaitingRecovery`。
+- 自启启动器把 `node.exe` 绝对路径烤死在 vbs 里，Node 升级后开机即**静默失效**；
+  且 `HKCU Run` + `.vbs` + `wscript //B` 三连在公司杀软/EDR 眼里就是可疑持久化。
+- 每个入口都是 `.ps1`，小白双击只会用记事本打开。
+
+### 改动
+
+| 文件 | 改动 |
+|---|---|
+| `extension/worker.js` | 角标状态表（`ON`/`...`/`OFF`/`?`/`2`/`!`）+ 每类问题 10 分钟一次的系统通知；按 close code 区分 4002（密钥不匹配，不自动重连）与 4003（另一配置占用，30 秒退避重连）；暂停前先告知服务端 |
+| `extension/manifest.json` | 新增 `notifications` 权限与 16/32/48/128 图标（角标与通知需要） |
+| `src/server.js` | 关闭码拆分为 4001/4002/4003；新增 `extensionPaused` 与 `extension_paused` + `howToResume`；`drop(reason, {keepQueued})` 只失败当前 job，保留队列并给 30 秒重连宽限（`RECONNECT_GRACE_MS`）；版本改为读取 `src/version.js` |
+| `src/mcp.js` | 在 `recoverRead` 之外再包 `callWithWaitingRecovery`，与 CLI 对齐 |
+| `src/version.js`（新增） | 从 `package.json` 读取版本，消除 4 处硬编码副本 |
+| `install-autostart.ps1` | 默认 `-Method StartupFolder`（启动文件夹快捷方式，不写注册表不落地 vbs），`-Method Registry` 保留旧行为；记录 `node-path.txt` 并在缺失时回退 PATH；启动过程写入 `.local\server-start.log`；安装时当场试启动并回报端口状态 |
+| `uninstall-autostart.ps1` | 清掉所有方式（快捷方式 / 注册表 / cmd / vbs / node-path），保留密钥与配置 |
+| `stop.ps1` | 改为按端口与命令行解析进程；自启路径从不写 PID 文件，旧版会误报「No managed service PID.」 |
+| 各 `.bat`（新增 `install`/`uninstall`） | 双击入口；同时去掉 `pair.ps1` / `stop.ps1` / `upgrade.ps1` / `agent.ps1` 剩余的 `#Requires -Version 7.0` |
+| `README.md` | 第一步改为双击图形化入口；新增角标状态表；排查表补 doctor、密钥不匹配、第二配置、休眠唤醒 |
+| `test/version.test.js`（新增） | 断言 `package.json` / `manifest.json` / `src/version.js` 三者版本一致 |
+
+### 验证
+
+- `npm test` **73 条全绿**（新增 4002/4003 拆分用例与 2 条版本一致性用例）
+- 6 个 `.ps1` 通过 `[System.Management.Automation.Language.Parser]::ParseFile` 语法校验
+- 升级后需在 `chrome://extensions` 重新加载扩展，新权限与图标才生效；密钥与配置保留
+
+### 还剩什么
+
+- **方案 C（Chrome Native Messaging）**未做：让扩展一连接就由 Chrome 拉起本机服务，
+  精确命中「打开浏览器那一刻就可用」，不必依赖登录自启。需改造连接层，单独立项。
+- 配置仍散在三处（白名单在 `chrome.storage.local`、上传根在 `.local/config.json`、策略在 `.local/agents.json`），
+  没有导出/导入命令，换机器要手工重配。
+- 公司环境仍无解的两点：Node 需管理员安装、企业策略禁用开发者模式后无法加载扩展。
+
+| 版本 | 0.5.6 → **0.5.7** |
+
+---
+
 ## 0.5.6 — 2026-10-09 · 治理层续：工具级 allow/deny、内容边界、接入 Chrome 内置模型裁决（模型层）
 
 ### 背景

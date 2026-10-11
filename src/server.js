@@ -5,6 +5,7 @@ import { basename, extname, isAbsolute, join, relative, resolve } from 'node:pat
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { loadConfig, stateDir } from './config.js';
+import { VERSION } from './version.js';
 import { TOOLS, validateCall } from './tools.js';
 import { createTasks } from './tasks.js';
 import { errorCategory } from './diagnostics.js';
@@ -64,7 +65,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const agentGuide = () => ({
     service: 'ai-browser-bridge',
-    version: '0.5.6',
+    version: VERSION,
     defaults: {
       unattended: true,
       allHttpSitesAllowedByDefault: true,
@@ -145,7 +146,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const boundariesFor = decision => decision?.contentBoundaries ?? (config.contentBoundaries === true || process.env.AIB_CONTENT_BOUNDARIES === '1');
   const queueSnapshot = () => ({
     service: 'ai-browser-bridge',
-    version: '0.5.6',
+    version: VERSION,
     extensionVersion,
     tabLeases: leases.list(),
     connected: extension?.readyState === WebSocket.OPEN,
