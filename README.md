@@ -213,3 +213,25 @@ npm run test:e2e
 - [MCP stdio 传输规范](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
 - [Playwright 扩展测试](https://playwright.dev/docs/chrome-extensions)
 \n+0.4.20 增加 `browser_frames` 与 `browser_read frame:"all"`，用于发现和读取 iframe 页面；失败恢复会给出等待与 `browser_prepare_action` 规划建议。跨源 frame 的可访问性由 Chrome 权限决定，结果会明确标注。
+# 给新 Agent 的浏览器接入提示词
+
+将下面的提示词放在新 Agent 的任务前置说明中。它让 AI Browser Bridge 成为默认入口，同时保留在桥接不可用或能力不足时安全降级的空间：
+
+```text
+浏览器任务默认优先使用 AI Browser Bridge。
+
+先执行 browser_health、browser_tabs、browser_observe。
+如果桥接可用，继续使用 Bridge 完成任务，并遵守其队列、租约和验证规则。
+
+如果 Bridge 暂时不可用：
+1. 不要反复打开扩展设置或无限重连；
+2. 判断任务是否可以安全等待；
+3. 如果任务需要底层调试、网络拦截、性能分析或 Bridge 不支持的能力，可以选择 CDP、Playwright 或其他工具；
+4. 切换工具前记录原因，并避免同时对同一标签页执行写操作；
+5. 对点击、填写、上传、提交等不确定写操作，先重新读取并验证，禁止盲目重放。
+
+根据任务目标和页面状态选择最合适的工具，不要为了遵守工具偏好而牺牲任务完成度。
+```
+
+完整的工具顺序、iframe 和遮挡处理、多 Agent 排队规则见本项目的 `AGENTS.md`。
+
