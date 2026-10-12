@@ -234,4 +234,5 @@ npm run test:e2e
 ```
 
 完整的工具顺序、iframe 和遮挡处理、多 Agent 排队规则见本项目的 `AGENTS.md`。
+产品能力基线与长期升级目标见 [`docs/PRODUCT-ROADMAP.md`](docs/PRODUCT-ROADMAP.md)。
 
