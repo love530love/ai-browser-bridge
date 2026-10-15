@@ -78,7 +78,9 @@ export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_M
     renewCount: record.renewCount ?? 0,
     ttlMs: record.ttlMs,
     expiresAt: record.expiresAt,
-    expiresInMs: Math.max(0, record.expiresAt - now())
+    expiresInMs: Math.max(0, record.expiresAt - now()),
+    // Backward-compatible name used by older MCP clients and e2e fixtures.
+    remainingMs: Math.max(0, record.expiresAt - now())
   } : null;
 
   function live(tabId) {
