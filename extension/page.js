@@ -236,7 +236,10 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   };
   if (name === 'browser_viewport') {
     const active = document.activeElement;
-    return { width: innerWidth, height: innerHeight, url: location.href, editable: !!active && !sensitive(active) && !active.disabled && !active.readOnly && (active.isContentEditable || active.matches('textarea,input[type=text],input:not([type]),input[type=search],input[type=email],input[type=url],input[type=tel],input[type=number]')) };
+    const visual = globalThis.visualViewport;
+    const width = Math.max(Number(innerWidth) || 0, Number(document.documentElement?.clientWidth) || 0, Number(visual?.width) || 0);
+    const height = Math.max(Number(innerHeight) || 0, Number(document.documentElement?.clientHeight) || 0, Number(visual?.height) || 0);
+    return { width, height, url: location.href, layoutReady: width > 0 && height > 0, visibilityState: document.visibilityState, focused: document.hasFocus(), editable: !!active && !sensitive(active) && !active.disabled && !active.readOnly && (active.isContentEditable || active.matches('textarea,input[type=text],input:not([type]),input[type=search],input[type=email],input[type=url],input[type=tel],input[type=number]')) };
   }
   if (name === 'browser_wait') {
     const matches = () => ['http:', 'https:'].includes(location.protocol) && (allSites || allowedOrigins.includes(location.origin)) && (document.body?.innerText || '').includes(args.text);

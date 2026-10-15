@@ -483,6 +483,9 @@ async function execute(name, args) {
     if (args.expectedUrl !== tab.url) throw new Error('Observation URL is stale. Read page again.');
     const viewport = await page('browser_viewport');
     if (viewport.url !== args.expectedUrl) throw new Error('Observation URL changed');
+    if (!viewport.layoutReady || viewport.width < 2 || viewport.height < 2) {
+      return { status: 'waiting', retryable: true, reason: 'viewport_unavailable', nextPollTool: 'browser_wait_until_ready', recommendedNextAction: 'Bring the tab to the foreground or wait for SPA layout, then observe again. No coordinate action was dispatched.' };
+    }
     if (args.action === 'Wait') { await new Promise(resolve => setTimeout(resolve, args.durationMs)); return { waited: args.durationMs }; }
     if (args.action === 'Back') { await chrome.tabs.goBack(tab.id); return { dispatched: 'back' }; }
     await guarded(async send => {
