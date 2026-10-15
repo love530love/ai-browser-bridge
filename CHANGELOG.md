@@ -1,5 +1,9 @@
 # Unreleased
 
+- Shadow DOM inventory exposes actionable snapshot refs; pointer checks descend open roots.
+- Reload verification uses authenticated configured service and exact target version; failed attempts return nonzero.
+- See docs/COMPONENT-OPERATIONS.md for acceptance gaps.
+
 ## Documentation
 
 - 新增一次性升级与验收方案，统一浏览器操控、受保护 UI、Python Worker、多 Agent 恢复、验收矩阵和新 Agent 接入提示词。

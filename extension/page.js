@@ -76,10 +76,19 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     return { matches, textNodesVisited, textBudgetHit };
   };
+  const deepHit = (x, y) => {
+    let hit = document.elementFromPoint(x, y);
+    for (let depth = 0; hit?.shadowRoot && depth < 32; depth++) {
+      const next = hit.shadowRoot.elementFromPoint(x, y);
+      if (!next || next === hit) break;
+      hit = next;
+    }
+    return hit;
+  };
   const elementBox = el => {
     const box = el.getBoundingClientRect();
     const x = box.left + box.width / 2, y = box.top + box.height / 2;
-    const hit = box.width > 0 && box.height > 0 ? document.elementFromPoint(Math.min(Math.max(x, 0), innerWidth - 1), Math.min(Math.max(y, 0), innerHeight - 1)) : null;
+    const hit = box.width > 0 && box.height > 0 ? deepHit(Math.min(Math.max(x, 0), innerWidth - 1), Math.min(Math.max(y, 0), innerHeight - 1)) : null;
     return { x, y, left: box.left, top: box.top, width: box.width, height: box.height, covered: !!hit && hit !== el && !el.contains(hit), hitTag: hit?.tagName?.toLowerCase() || null };
   };
   const shortSelector = el => clean([el.tagName?.toLowerCase(), el.id ? `#${el.id}` : '', el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 3).join('.') : ''].join(''));
@@ -97,6 +106,8 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const maxRoots = Math.max(1, Math.min(100, args.maxRoots ?? 50));
     const maxControls = Math.max(1, Math.min(200, args.maxControls ?? 100));
     const roots = [], controls = [], seen = new Set();
+    const snapshot = crypto.randomUUID();
+    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
     const visit = (node, path) => {
       if (!node || roots.length >= maxRoots) return;
       const children = node instanceof ShadowRoot ? [...node.children] : [...(node.children || [])];
@@ -109,8 +120,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
           visit(el.shadowRoot, nextPath + '/shadow');
         }
         if (controls.length < maxControls && el.matches?.(actionSelector)) {
+          if (sensitive(el)) continue;
+          const ref = `${snapshot}:${state.refs.size + 1}`;
+          state.refs.set(ref, { el, fingerprint: fingerprint(el) });
           const box = el.getBoundingClientRect();
-          controls.push({ path: nextPath, tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), label: clean([el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent].filter(Boolean).join(' ')).slice(0, 300), visible: box.width > 0 && box.height > 0, rect: { left: box.left, top: box.top, width: box.width, height: box.height } });
+          controls.push({ ref, path: nextPath, tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), label: label(el) || cheapLabel(el), visible: visible(el), rect: { left: box.left, top: box.top, width: box.width, height: box.height } });
         }
         if (roots.length < maxRoots) visit(el, nextPath);
       }
@@ -534,7 +548,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const box = el.getBoundingClientRect();
     const x = Math.min(Math.max(box.left + box.width / 2, 0), innerWidth - 1);
     const y = Math.min(Math.max(box.top + box.height / 2, 0), innerHeight - 1);
-    const hit = document.elementFromPoint(x, y);
+    const hit = deepHit(x, y);
     if (!hit || (hit !== el && !el.contains(hit))) throw new Error('Dismiss target is covered or not topmost. Scan overlays again.');
     el.click();
     const gone = await waitGone(args.expectGoneRef || args.ref, args.timeoutMs ?? 3000);
@@ -578,7 +592,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (args.focus) el.focus();
     const box = el.getBoundingClientRect();
     const x = box.left + box.width / 2, y = box.top + box.height / 2;
-    const hit = document.elementFromPoint(x, y);
+    const hit = deepHit(x, y);
     if (!hit || (hit !== el && !el.contains(hit))) throw new Error('Element is covered');
     return { x, y, url: location.href };
   }
@@ -589,7 +603,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     el.scrollIntoView({ block: 'center', inline: 'nearest' });
     const box = el.getBoundingClientRect();
-    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    const hit = deepHit(box.left + box.width / 2, box.top + box.height / 2);
     if (!hit || (hit !== el && !el.contains(hit))) throw new Error('Element is covered. Read page again.');
     el.click();
     return { clicked: true, note: 'Click dispatched; read page to verify outcome.' };

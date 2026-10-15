@@ -1,0 +1,26 @@
+# Complex component operations: implementation and acceptance
+
+Use the existing Chrome session. Observe the authorized page, scan overlays,
+then call `browser_shadow_tree` when ordinary element lookup misses a widget.
+Its controls now include snapshot refs for `browser_click` and `browser_fill`.
+Re-scan after a component changes; never guess a ref or fill an unrelated textarea.
+
+Open shadow roots are traversed for pointer hit testing. A covering sibling
+still blocks a click. Closed roots and inaccessible frames are not solved by
+this change: use a current screenshot to locate a verified target and the
+available pointer/keyboard adapter, then read back the result. If the target
+cannot be identified, preserve the task and report the missing observation.
+
+## Acceptance status
+
+- Existing-browser basic input/click/readback/scroll/screenshot smoke: passed
+  on 2026-10-15 before this change.
+- Shadow refs: implemented; installed-extension end-to-end acceptance pending.
+- Panda assistant question and reply: pending; do not claim completed.
+- Desktop extension reload: best effort, not guaranteed. Verification now uses
+  the configured port, authenticated status request and exact manifest version.
+- Hardware scheduling and universal desktop fallback: not implemented here.
+
+All MCP clients discover the same tool schema through tools/list. Clients
+that cache schemas must refresh their MCP connection. No model is required
+for the deterministic ref and hit-test operations.

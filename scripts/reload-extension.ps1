@@ -5,6 +5,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$config = Get-Content -LiteralPath (Join-Path $projectRoot '.local/config.json') -Raw | ConvertFrom-Json
+$expectedVersion = (Get-Content -LiteralPath (Join-Path $projectRoot 'extension/manifest.json') -Raw | ConvertFrom-Json).version
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type @'
 using System;
@@ -18,14 +21,14 @@ $chrome = Get-Process chrome -ErrorAction SilentlyContinue |
   Where-Object { $_.MainWindowHandle -ne 0 -and [NativeWindow]::IsWindowVisible($_.MainWindowHandle) } |
   Select-Object -First 1
 if (-not $chrome) {
-  if ($BestEffort) { Write-Warning 'No visible Chrome window; extension reload was not attempted.'; exit 0 }
+  if ($BestEffort) { Write-Warning 'No visible Chrome window; extension reload was not attempted.'; exit 2 }
   throw 'No visible Chrome window found.'
 }
 [NativeWindow]::SetForegroundWindow($chrome.MainWindowHandle) | Out-Null
 $shell = New-Object -ComObject WScript.Shell
 $shell.SendKeys('^l'); $shell.SendKeys('chrome://extensions'); $shell.SendKeys('{ENTER}')
 Start-Sleep -Milliseconds 1200
-$root = [System.Windows.Automation.AutomationElement]::RootElement
+$root = [System.Windows.Automation.AutomationElement]::FromHandle($chrome.MainWindowHandle)
 $condition = New-Object System.Windows.Automation.PropertyCondition(
   [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
   [System.Windows.Automation.ControlType]::Button)
@@ -43,7 +46,7 @@ foreach ($button in $buttons) {
   if ($context -match [regex]::Escape($ExtensionId) -or $context -match '自主浏览器|AI Browser Bridge') { $candidate = $button; break }
 }
 if (-not $candidate) {
-  if ($BestEffort) { Write-Warning "Reload button for $ExtensionId was not exposed through Windows UI Automation."; exit 0 }
+  if ($BestEffort) { Write-Warning "Reload button for $ExtensionId was not exposed through Windows UI Automation."; exit 2 }
   throw "Reload button for extension $ExtensionId was not found. No action was taken."
 }
 $candidate.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
@@ -55,12 +58,12 @@ $deadline = (Get-Date).AddSeconds($VerifyTimeoutSec)
 do {
   Start-Sleep -Milliseconds 500
   try {
-    $status = Invoke-RestMethod -Uri 'http://127.0.0.1:19387/status' -TimeoutSec 2
-    if ($status.connected -eq $true -and $status.extensionVersion) {
+    $status = Invoke-RestMethod -Uri "http://127.0.0.1:$($config.port)/status" -Headers @{ Authorization = "Bearer $($config.agentToken)" } -TimeoutSec 2
+    if ($status.connected -eq $true -and $status.extensionVersion -eq $expectedVersion) {
       Write-Host "Extension connection is healthy (version $($status.extensionVersion))."
       exit 0
     }
   } catch { }
 } while ((Get-Date) -lt $deadline)
-if ($BestEffort) { Write-Warning 'Reload was clicked, but the extension did not report connected before timeout.'; exit 0 }
+if ($BestEffort) { Write-Warning 'Reload was clicked, but the target version was not verified.'; exit 2 }
 throw 'Reload was clicked, but the extension did not report connected before timeout.'
