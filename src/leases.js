@@ -223,6 +223,19 @@ export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_M
     return conflict(existing, { tabId, agent, tool });
   }
 
+  // Reads remain unblocked for every agent, but a holder's own reads are a
+  // useful heartbeat during long unattended workflows. This prevents a slow
+  // heavy-page inspection from expiring the lease before the next write.
+  function heartbeat(tabId, agent, tool = 'read') {
+    if (!agent) return false;
+    const existing = live(tabId);
+    if (!existing || existing.agent !== agent) return false;
+    const stamp = now();
+    leases.set(String(tabId), { ...existing, lastActiveAt: stamp, lastTool: tool, expiresAt: stamp + (existing.ttlMs ?? ttlMs) });
+    schedulePersist();
+    return true;
+  }
+
   load();
   sweep();
 
@@ -234,6 +247,7 @@ export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_M
     release,
     releaseTab,
     guard,
+    heartbeat,
     sweep,
     flush: () => { if (pendingPersist) { clearTimeout(pendingPersist); pendingPersist = null; } persist(); },
     size: () => leases.size

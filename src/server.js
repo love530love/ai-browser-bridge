@@ -335,6 +335,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     }
     // Answered locally: no queue slot, no extension round trip, no timeout path.
     if (LEASE_TOOLS.has(name)) return leaseCall(name, args, decision);
+    if (!WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) leases.heartbeat(args.tabId, args.agent ?? null, name);
     if (lease && lease !== owner) {
       return { status: 'waiting', retryable: true, reason: 'global_agent_task_lease', holder: lease, suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true }, recommendedNextAction: 'Keep the agent task alive and wait until the global task lease clears.', queue: queueSnapshot() };
     }
