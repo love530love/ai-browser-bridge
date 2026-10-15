@@ -38,6 +38,7 @@ export const TOOLS = [
     waitFor: { type: 'string', enum: ['idle', 'timeout-then-partial', 'force'] },
     agent,
   }, ['tabId'], true),
+  tool('browser_shadow_tree', 'Read-only inventory of open Shadow DOM and custom-element controls. Use for chat assistants, floating widgets, ad/tool panels, and web components that are absent from light-DOM reads. Never executes actions.', { tabId, maxRoots: { type: 'integer', minimum: 1, maximum: 100 }, maxControls: { type: 'integer', minimum: 1, maximum: 200 }, agent }, ['tabId'], true),
   tool('browser_frames', 'List accessible frames in a tab, including frameId, URL, origin, name, and same-document status. Use before reading or operating iframe-hosted forms.', { tabId, agent }, ['tabId'], true),
   tool('browser_find_text', 'Find visible or lightweight page text by exact substring and return bounded nearby context plus nearby actionable elements. Use this before full-page reads on large SPA pages.', {
     tabId,

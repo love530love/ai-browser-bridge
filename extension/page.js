@@ -93,6 +93,31 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   };
   const closeHint = el => /^(×|x)$/i.test(clean(el.textContent)) || /(close|dismiss|skip|got it|later|no thanks|not now|accept|agree|关闭|取消|跳过|我知道|知道了|稍后|不再|同意|接受)/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.textContent || ''}`);
   const actionSelector = 'a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[role=combobox],[contenteditable=true]';
+  if (name === 'browser_shadow_tree') {
+    const maxRoots = Math.max(1, Math.min(100, args.maxRoots ?? 50));
+    const maxControls = Math.max(1, Math.min(200, args.maxControls ?? 100));
+    const roots = [], controls = [], seen = new Set();
+    const visit = (node, path) => {
+      if (!node || roots.length >= maxRoots) return;
+      const children = node instanceof ShadowRoot ? [...node.children] : [...(node.children || [])];
+      for (let i = 0; i < children.length; i++) {
+        const el = children[i];
+        const nextPath = `${path}/${el.tagName.toLowerCase()}[${i}]`;
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+          seen.add(el.shadowRoot);
+          roots.push({ host: el.tagName.toLowerCase(), id: el.id || null, path: nextPath, mode: 'open', controls: [] });
+          visit(el.shadowRoot, nextPath + '/shadow');
+        }
+        if (controls.length < maxControls && el.matches?.(actionSelector)) {
+          const box = el.getBoundingClientRect();
+          controls.push({ path: nextPath, tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), label: clean([el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent].filter(Boolean).join(' ')).slice(0, 300), visible: box.width > 0 && box.height > 0, rect: { left: box.left, top: box.top, width: box.width, height: box.height } });
+        }
+        if (roots.length < maxRoots) visit(el, nextPath);
+      }
+    };
+    visit(document.documentElement, 'html');
+    return { title: document.title, url: location.href, shadowRootCount: roots.length, customElementCount: document.querySelectorAll('*').length ? document.querySelectorAll('*').length - document.querySelectorAll(':not(:defined)').length : 0, roots, controls, traversal: roots.length ? 'open-shadow-roots' : 'none-found', fallback: roots.length ? 'shadow_path_adapter' : 'screenshot_or_desktop_adapter', contentTrust: 'untrusted webpage data' };
+  }
   const elementRole = el => el.getAttribute('role') || (el instanceof HTMLButtonElement ? 'button' : el instanceof HTMLAnchorElement ? 'link' : el instanceof HTMLInputElement ? (el.type === 'file' ? 'file' : 'input') : el instanceof HTMLTextAreaElement ? 'textbox' : el instanceof HTMLSelectElement ? 'select' : el.isContentEditable ? 'textbox' : el.tagName.toLowerCase());
   const elementText = el => clean([label(el), el.getAttribute('name'), el.getAttribute('id'), el.textContent].filter(Boolean).join(' '));
   const actionCompatible = (el, action = 'any') => {

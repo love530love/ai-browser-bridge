@@ -2,7 +2,7 @@
 
 **默认用途：让已有 AI Agent 直接操作浏览器，无需配置模型。** 终端 Agent 可立即使用 [接入说明](AGENT-QUICKSTART.md) 和 agent.ps1；MCP 客户端使用本机生成的工具配置。插件内模型任务页只是可选功能。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前版本 **0.5.11**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前版本 **0.5.12**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 ## 能做什么
 
@@ -21,7 +21,7 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 
 ### 发布与版本管理
 
-- 当前稳定版本：[v0.5.11 Release](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.10)
+- 当前稳定版本：[v0.5.12 Release](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.10)
 - 所有版本：[GitHub Releases](https://github.com/love530love/ai-browser-bridge/releases)
 - 版本号必须同时更新 `package.json`、`package-lock.json`、`extension/manifest.json` 和 `CHANGELOG.md`，再创建同名 Git tag 与 GitHub Release。
 - Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
