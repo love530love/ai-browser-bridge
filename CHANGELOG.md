@@ -26,6 +26,8 @@
 - `node --check src/cli.js src/server.js extension/worker.js`
 - `node src/cli.js diagnose-upgrade`
 
+- 升级脚本对扩展 Reload 做有限次数重试，并在 UI 自动化不可用时将 `manual-extension-reload` 写入升级结果，避免 BestEffort 模式静默掩盖版本不匹配。
+
 ---
 
 ## 0.5.8 — 2026-10-15 · 连接恢复、离线执行与审计日志

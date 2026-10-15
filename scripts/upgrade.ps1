@@ -14,7 +14,7 @@ New-Item -ItemType Directory -Force -Path $state | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $resultPath = Join-Path $state 'last-result.json'
 $backupPath = Join-Path $state "backup-$stamp"
-$result = [ordered]@{ startedAt=(Get-Date).ToString('o'); root=$root; appliedGitUpdate=$false; reload='skipped'; doctor=$null; ok=$false }
+$result = [ordered]@{ startedAt=(Get-Date).ToString('o'); root=$root; appliedGitUpdate=$false; reload='skipped'; reloadAttempts=0; doctor=$null; ok=$false }
 
 function Invoke-BridgeDoctor {
   $out = & $node (Join-Path $root 'src\cli.js') doctor 2>&1
@@ -41,8 +41,13 @@ try {
   try { & npm ci --ignore-scripts; if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' } } finally { Pop-Location }
   & $pwsh -NoProfile -File (Join-Path $root 'start.ps1') | Out-Null
   if (-not $SkipReload) {
-    & $pwsh -NoProfile -File (Join-Path $PSScriptRoot 'reload-extension.ps1') -BestEffort
-    $result.reload = if ($LASTEXITCODE -eq 0) { 'attempted' } else { 'failed' }
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+      $result.reloadAttempts = $attempt
+      & $pwsh -NoProfile -File (Join-Path $PSScriptRoot 'reload-extension.ps1') -BestEffort
+      if ($LASTEXITCODE -eq 0) { $result.reload = 'attempted'; break }
+      $result.reload = 'failed'
+      Start-Sleep -Seconds 1
+    }
   }
   $deadline = (Get-Date).AddSeconds($HealthTimeoutSec)
   do {
@@ -51,7 +56,12 @@ try {
   } while ((Get-Date) -lt $deadline)
   if (-not $doctor) { throw 'doctor returned no report' }
   $result.doctor = $doctor
-  if (-not $doctor.ok) { throw 'doctor reported unhealthy bridge' }
+  if (-not $doctor.ok) {
+    if ($doctor.recommendations -match 'Reload the unpacked extension') {
+      $result.actionRequired = 'manual-extension-reload'
+    }
+    throw 'doctor reported unhealthy bridge'
+  }
   $result.ok = $true
 } catch {
   $result.error = $_.Exception.Message
