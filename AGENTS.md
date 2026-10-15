@@ -7,6 +7,7 @@ When a task requires controlling a real browser, use the AI Browser Bridge MCP t
 1. Call `browser_health` (or the bridge `doctor`/status equivalent).
 2. Call `browser_tabs` and select an existing authorized tab.
 3. Call `browser_observe` or `browser_read` before any action.
+4. Reuse the selected logged-in tab. If the exact target URL is not already open, call `browser_open` (it reuses an exact URL by default) to create one tab in the same running Chrome; never start a second browser or a fresh Playwright context.
 
 Do not start Playwright, Puppeteer, Selenium, CDP, or a second browser-control bridge unless the bridge is unavailable and the user explicitly authorizes a fallback.
 

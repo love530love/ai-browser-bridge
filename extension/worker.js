@@ -424,8 +424,16 @@ async function execute(name, args) {
     }).map(({ id, title, url, active, windowId }) => ({ id, title, url, active, windowId }));
   }
   if (name === 'browser_open') {
-    const tab = await chrome.tabs.create({ url: checkedUrl(args.url, config), active: true });
-    return { tabId: tab.id, url: args.url, loading: true };
+    const targetUrl = checkedUrl(args.url, config);
+    if (args.reuseExisting !== false) {
+      const existing = (await chrome.tabs.query({})).find(candidate => candidate.url === targetUrl);
+      if (existing) {
+        await chrome.tabs.update(existing.id, { active: true });
+        return { tabId: existing.id, url: existing.url, reused: true, loading: existing.status !== 'complete' };
+      }
+    }
+    const tab = await chrome.tabs.create({ url: targetUrl, active: true });
+    return { tabId: tab.id, url: targetUrl, reused: false, loading: true };
   }
   if (!Number.isInteger(args.tabId) || args.tabId < 1) throw new Error('Invalid tabId');
   const tab = await chrome.tabs.get(args.tabId);
