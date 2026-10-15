@@ -94,6 +94,8 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 
 两种方式都会：记住本机 `node.exe` 路径（找不到时自动回退到 PATH，不会因为 Node 升级而永久失效）、把启动过程写进 `.local\server-start.log`、并在安装时**当场试启动一次**，直接告诉你端口有没有起来。
 
+运行期调用、连接恢复、队列等待、权限拒绝和错误分类会自动追加到 `.local\logs\audit.jsonl`；单文件超过 10 MB 时滚动为 `audit.1.jsonl`。这些日志用于下一次版本升级的回归分析，不包含页面正文、输入值、Cookie 或 Authorization。
+
 撤销：双击 `uninstall-autostart.bat`。它会清掉快捷方式、注册表项和生成的启动器，但**保留配对密钥和你的配置**。
 
 此外，扩展只需要加载 `extension/` 并用 `pair.bat` 配对**一次**；密钥保存在扩展里，之后自动重连。

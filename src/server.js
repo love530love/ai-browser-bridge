@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { appendFileSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from 'node:fs';
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -452,9 +452,21 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     close: async () => { stopped = true; leases.flush(); if (lease) tasks.cancel(); drop('Bridge stopped'); for (const ws of clients) ws.terminate(); wss.close(); server.closeIdleConnections(); await new Promise(resolve => server.close(resolve)); }
   };
 }
+function appendAuditLog(row) {
+  const logDir = join(stateDir, 'logs');
+  const file = join(logDir, 'audit.jsonl');
+  mkdirSync(logDir, { recursive: true });
+  try {
+    if (statSync(file).size > 10 * 1024 * 1024) {
+      const rotated = join(logDir, 'audit.1.jsonl');
+      try { renameSync(file, rotated); } catch { /* another writer may have rotated it */ }
+    }
+  } catch { /* first write */ }
+  appendFileSync(file, JSON.stringify(row) + '\n', { encoding: 'utf8' });
+}
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const config = loadConfig();
-  const bridge = createBridge(config, { audit: row => appendFileSync(join(stateDir, 'audit.jsonl'), JSON.stringify(row) + '\n') });
+  const bridge = createBridge(config, { audit: appendAuditLog });
   await bridge.listen();
   console.log(`AI Browser Bridge listening on 127.0.0.1:${config.port}`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => bridge.close().then(() => process.exit(0)));
