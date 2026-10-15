@@ -473,3 +473,9 @@ git revert <commit>        # 或直接 git checkout <commit> -- src/server.js ex
 - Chrome 内置 AI 明确为可选规划/风险增强，不影响离线确定性执行。
 - 发布标签：[v0.5.11](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.11)。
 
+## 0.5.12 — 2026-10-15 · Shadow DOM 与视觉组件兜底
+
+- 新增只读 `browser_shadow_tree`，枚举 open ShadowRoot、自定义组件宿主和交互控件候选。
+- 固化客服浮窗、广告、背景音乐和异常组件的 DOM → Shadow DOM → 截图/桌面适配器回退顺序。
+- 发布标签：[v0.5.12](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.12)。
+

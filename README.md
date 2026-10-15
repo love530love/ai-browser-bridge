@@ -21,7 +21,7 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 
 ### 发布与版本管理
 
-- 当前稳定版本：[v0.5.12 Release](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.10)
+- 当前稳定版本：[v0.5.12 Release](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.12)
 - 所有版本：[GitHub Releases](https://github.com/love530love/ai-browser-bridge/releases)
 - 版本号必须同时更新 `package.json`、`package-lock.json`、`extension/manifest.json` 和 `CHANGELOG.md`，再创建同名 Git tag 与 GitHub Release。
 - Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
