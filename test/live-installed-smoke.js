@@ -90,6 +90,12 @@ try {
   await call('browser_navigate', { tabId, url: firstUrl });
   await readReady(firstUrl, '等待测试');
   const widget = await call('browser_shadow_tree', { tabId });
+  report.shadowDiagnostics = {
+    roots: widget.roots?.map(r => r.host),
+    partial: widget.partial ?? null,
+    controls: widget.controls?.filter(c => c.label?.startsWith('Widget')).map(c => ({ label: c.label, visible: c.visible, hasRef: typeof c.ref === 'string' })),
+    hasAnyRef: widget.controls?.some(c => typeof c.ref === 'string') ?? false
+  };
   const control = label => widget.controls.find(c => c.label === label && c.visible);
   assert.ok(control('Widget message')?.ref, 'Shadow control must expose an actionable ref');
   await call('browser_fill', { tabId, ref: control('Widget message').ref, text: 'shadow roundtrip' });
