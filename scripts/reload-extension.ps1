@@ -1,6 +1,7 @@
 param(
   [string]$ExtensionId = 'mmopbppoabmhliflinadkgnedjpmbgig',
-  [switch]$BestEffort
+  [switch]$BestEffort,
+  [int]$VerifyTimeoutSec = 15
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,3 +48,19 @@ if (-not $candidate) {
 }
 $candidate.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
 Write-Host "Requested Reload for extension $ExtensionId."
+
+# Reload is asynchronous. Give the service a chance to reconnect and report a
+# useful result to upgrade.ps1; never click a second time automatically.
+$deadline = (Get-Date).AddSeconds($VerifyTimeoutSec)
+do {
+  Start-Sleep -Milliseconds 500
+  try {
+    $status = Invoke-RestMethod -Uri 'http://127.0.0.1:19387/status' -TimeoutSec 2
+    if ($status.connected -eq $true -and $status.extensionVersion) {
+      Write-Host "Extension connection is healthy (version $($status.extensionVersion))."
+      exit 0
+    }
+  } catch { }
+} while ((Get-Date) -lt $deadline)
+if ($BestEffort) { Write-Warning 'Reload was clicked, but the extension did not report connected before timeout.'; exit 0 }
+throw 'Reload was clicked, but the extension did not report connected before timeout.'
