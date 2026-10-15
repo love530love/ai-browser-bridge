@@ -19,6 +19,13 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 
 完整能力基线、限制、验收指标和升级目标见 [产品路线图](docs/PRODUCT-ROADMAP.md)；新 Agent 接入规则见 [AGENTS.md](AGENTS.md)。
 
+### 发布与版本管理
+
+- 当前稳定版本：[v0.5.8 Release](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.8)
+- 所有版本：[GitHub Releases](https://github.com/love530love/ai-browser-bridge/releases)
+- 版本号必须同时更新 `package.json`、`package-lock.json`、`extension/manifest.json` 和 `CHANGELOG.md`，再创建同名 Git tag 与 GitHub Release。
+- Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
+
 ### 当前版本升级指南
 
 0.5.8：在 0.5.7 稳定性基础上加入 WebSocket 指数退避与随机抖动重连、离线确定性执行能力描述 `browser_execution_profile`、对抗性广告关闭链接过滤、滚动审计日志（`.local\logs\audit.jsonl`）和服务/扩展版本统一。完整历史见 [CHANGELOG.md](CHANGELOG.md)。
