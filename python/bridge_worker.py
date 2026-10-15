@@ -7,6 +7,7 @@ explicit operations after they have their own policy and tests.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -18,7 +19,10 @@ from typing import Any
 
 MAX_TASK_BYTES = 64 * 1024
 MAX_READ_BYTES = 8 * 1024 * 1024
-OPS = frozenset(("hash_file", "read_text", "list_files"))
+OPS = frozenset((
+    "hash_file", "read_text", "list_files",
+    "read_json", "read_csv", "write_json", "write_csv",
+))
 
 
 class TaskError(ValueError):
@@ -33,6 +37,10 @@ class Task:
     encoding: str = "utf-8"
     max_bytes: int = MAX_READ_BYTES
     timeout_ms: int = 30_000
+    value: Any = None
+    rows: Any = None
+    headers: Any = None
+    max_rows: int = 10_000
 
     @classmethod
     def parse(cls, value: dict[str, Any]) -> "Task":
@@ -55,7 +63,18 @@ class Task:
             raise TaskError(f"max_bytes must be between 1 and {MAX_READ_BYTES}")
         if not isinstance(timeout_ms, int) or not 0 < timeout_ms <= 300_000:
             raise TaskError("timeout_ms must be between 1 and 300000")
-        return cls(task_id, op, path, encoding, max_bytes, timeout_ms)
+        max_rows = value.get("max_rows", 10_000)
+        if not isinstance(max_rows, int) or not 0 < max_rows <= 100_000:
+            raise TaskError("max_rows must be between 1 and 100000")
+        if op == "write_json" and "value" not in value:
+            raise TaskError("value is required for write_json")
+        if op == "write_csv":
+            if not isinstance(value.get("rows"), list):
+                raise TaskError("rows must be a list for write_csv")
+            if value.get("headers") is not None and not isinstance(value.get("headers"), list):
+                raise TaskError("headers must be a list for write_csv")
+        return cls(task_id, op, path, encoding, max_bytes, timeout_ms,
+                   value.get("value"), value.get("rows"), value.get("headers"), max_rows)
 
 
 def _root(path: str, roots: list[Path]) -> Path:
@@ -80,6 +99,22 @@ def _check_size(path: Path, limit: int) -> None:
         raise TaskError("file exceeds task max_bytes")
 
 
+def _write_bytes(path: Path, payload: bytes, limit: int) -> None:
+    if len(payload) > limit:
+        raise TaskError("output exceeds task max_bytes")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Replace atomically so readers never observe a partially written artifact.
+    temporary = path.with_name(f".{path.name}.bridge-tmp-{os.getpid()}")
+    try:
+        temporary.write_bytes(payload)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def execute(task: Task, roots: list[Path]) -> dict[str, Any]:
     started = time.monotonic()
     path = _root(task.path or "", roots)
@@ -96,6 +131,53 @@ def execute(task: Task, roots: list[Path]) -> dict[str, Any]:
             result = {"text": path.read_text(encoding=task.encoding), "bytes": path.stat().st_size}
         except (LookupError, UnicodeError) as exc:
             raise TaskError(f"cannot decode file: {exc}") from exc
+    elif task.op == "read_json":
+        _check_size(path, task.max_bytes)
+        try:
+            parsed = json.loads(path.read_text(encoding=task.encoding))
+        except (LookupError, UnicodeError, json.JSONDecodeError) as exc:
+            raise TaskError(f"cannot parse JSON: {exc}") from exc
+        if len(json.dumps(parsed, ensure_ascii=False).encode("utf-8")) > task.max_bytes:
+            raise TaskError("parsed JSON exceeds task max_bytes")
+        result = {"value": parsed, "bytes": path.stat().st_size}
+    elif task.op == "read_csv":
+        _check_size(path, task.max_bytes)
+        try:
+            with path.open("r", encoding=task.encoding, newline="") as stream:
+                reader = csv.DictReader(stream)
+                headers = reader.fieldnames or []
+                rows = []
+                for row in reader:
+                    if len(rows) >= task.max_rows:
+                        raise TaskError("CSV exceeds max_rows")
+                    rows.append(dict(row))
+        except (LookupError, UnicodeError, csv.Error) as exc:
+            raise TaskError(f"cannot parse CSV: {exc}") from exc
+        result = {"headers": headers, "rows": rows, "bytes": path.stat().st_size}
+    elif task.op == "write_json":
+        payload = json.dumps(task.value, ensure_ascii=False, indent=2).encode("utf-8")
+        _write_bytes(path, payload, task.max_bytes)
+        result = {"bytes": len(payload), "path": str(path)}
+    elif task.op == "write_csv":
+        rows = task.rows or []
+        if len(rows) > task.max_rows:
+            raise TaskError("rows exceeds max_rows")
+        headers = task.headers
+        if headers is None:
+            keys = {key for row in rows if isinstance(row, dict) for key in row}
+            headers = sorted(keys)
+        if not all(isinstance(key, str) and key for key in headers):
+            raise TaskError("CSV headers must be non-empty strings")
+        if not all(isinstance(row, dict) for row in rows):
+            raise TaskError("CSV rows must be objects")
+        import io
+        buffer = io.StringIO(newline="")
+        writer = csv.DictWriter(buffer, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+        payload = buffer.getvalue().encode("utf-8")
+        _write_bytes(path, payload, task.max_bytes)
+        result = {"bytes": len(payload), "path": str(path), "headers": headers, "rows": len(rows)}
     else:  # list_files
         if not path.is_dir():
             raise TaskError("path is not a directory")
@@ -116,7 +198,7 @@ def execute(task: Task, roots: list[Path]) -> dict[str, Any]:
 
 
 def health() -> dict[str, Any]:
-    return {"ok": True, "service": "ai-browser-python-worker", "version": "0.1.0", "ops": sorted(OPS)}
+    return {"ok": True, "service": "ai-browser-python-worker", "version": "0.2.0", "ops": sorted(OPS)}
 
 
 def main(argv: list[str] | None = None) -> int:
