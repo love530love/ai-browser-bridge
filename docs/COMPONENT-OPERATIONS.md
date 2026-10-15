@@ -15,7 +15,7 @@ cannot be identified, preserve the task and report the missing observation.
 
 - Existing-browser basic input/click/readback/scroll/screenshot smoke: passed
   on 2026-10-15 before this change.
-- Shadow refs: implemented; installed-extension end-to-end acceptance pending.
+- Shadow refs: installed-extension input/click/readback and transparent-overlay rejection passed after manual reload on 2026-10-15.
 - Panda assistant question and reply: pending; do not claim completed.
 - Desktop extension reload: best effort, not guaranteed. Verification now uses
   the configured port, authenticated status request and exact manifest version.
@@ -34,3 +34,12 @@ target exists. A scan is observation, not permission to click unrelated widgets.
 All MCP clients discover the same tool schema through tools/list. Clients
 that cache schemas must refresh their MCP connection. No model is required
 for the deterministic ref and hit-test operations.
+
+## Installed acceptance after manual reload
+
+On 2026-10-15, `node test/live-installed-smoke.js` completed successfully
+using the existing Chrome: shadow input fill, shadow button click, response
+readback and transparent-overlay click rejection all passed. The test closed
+only its own tab. Report: `output/live-installed/report.json`. This confirms
+the new code is active despite retaining version 0.5.14; it does not verify
+automatic extension reload, closed roots, or the real Panda assistant.
