@@ -446,3 +446,9 @@ git revert <commit>        # 或直接 git checkout <commit> -- src/server.js ex
 - 新增一次性升级与验收方案，统一浏览器操控、受保护 UI、Python Worker、多 Agent 恢复、验收矩阵和新 Agent 接入提示词。
 - 明确 Python 重型依赖按需安装，避免默认安装膨胀；明确高风险动作与未知写结果的授权和恢复边界。
 
+## 0.5.9
+
+- Added a deterministic, no-third-party Python sidecar worker with allowlisted file operations, hash checks, size/time limits, and health probing.
+- Hardened protected UI planning for Chrome/Edge internal pages with risk levels and single-action user authorization semantics.
+- Added the one-shot upgrade and acceptance plan covering browser control, protected UI, Python automation, recovery, and multi-agent validation.
+
