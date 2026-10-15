@@ -4,6 +4,12 @@ let socket = null;
 let keepalive = null;
 let connectDeadline = null;
 let reconnectTimer = null;
+// The service worker can be suspended between retries. Keep the retry state in
+// memory for the current worker lifetime and mirror every retry through an
+// alarm, so a refused localhost connection does not turn into a permanent
+// disconnect or a storm of simultaneous sockets.
+let reconnectAttempt = 0;
+let connectInFlight = false;
 let connectionState = '未连接';
 let lastAction = '';
 let connectionEpoch = 0;
@@ -237,10 +243,17 @@ function clearReconnect() {
   clearTimeout(reconnectTimer); reconnectTimer = null;
   chrome.alarms.clear(reconnectAlarm).catch(() => {});
 }
-async function scheduleReconnect(delayMs = 5000) {
+async function scheduleReconnect(delayMs = null) {
   const config = await settings();
   if (!validConnectionConfig(config)) return;
   clearReconnect();
+  if (delayMs == null) {
+    const base = Math.min(30000, 1000 * (2 ** Math.min(reconnectAttempt, 5)));
+    // Small jitter prevents several profiles/workers from reconnecting in the
+    // same millisecond after the bridge service is restarted.
+    delayMs = Math.round(base * (0.9 + Math.random() * 0.2));
+    reconnectAttempt++;
+  }
   reconnectTimer = setTimeout(() => connect({ automatic: true }), delayMs);
   chrome.alarms.create(reconnectAlarm, { delayInMinutes: Math.max(0.1, delayMs / 60000) });
 }
@@ -520,16 +533,20 @@ async function execute(name, args) {
   if (result?.result === undefined) throw new Error('No page result. Page may have navigated; inspect before retrying.');
   return result.result;
 }
-async function connect() {
+async function connect({ automatic = false } = {}) {
+  if (connectInFlight) return;
+  if (automatic && socket?.readyState === WebSocket.OPEN) return;
+  connectInFlight = true;
   clearReconnect();
   disconnect('连接中');
   const epoch = connectionEpoch;
   const config = await settings();
-  if (epoch !== connectionEpoch) return;
-  if (!config.enabled) { connectionState = '已暂停'; notifyStatus(); return; }
-  if (!/^[a-f0-9]{64}$/.test(config.token) || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535) { connectionState = '请先配对'; notifyStatus(); return; }
+  if (epoch !== connectionEpoch) { connectInFlight = false; return; }
+  if (!config.enabled) { connectionState = '已暂停'; notifyStatus(); connectInFlight = false; return; }
+  if (!/^[a-f0-9]{64}$/.test(config.token) || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535) { connectionState = '请先配对'; notifyStatus(); connectInFlight = false; return; }
   const ws = new WebSocket(`ws://127.0.0.1:${config.port}/extension`);
   socket = ws;
+  connectInFlight = false;
   connectDeadline = setTimeout(() => { if (socket === ws) disconnect('连接超时，后台自动重连中', { automaticReconnect: true }); }, 10000);
   ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token: config.token, version: chrome.runtime.getManifest().version }));
   ws.onmessage = async event => {
@@ -544,6 +561,7 @@ async function connect() {
       if (message.type === 'task-state') { chrome.runtime.sendMessage(message).catch(() => {}); return; }
       if (message.type === 'ready') {
         clearTimeout(connectDeadline); connectDeadline = null;
+        reconnectAttempt = 0;
         connectionState = '已连接';
         notifyStatus();
         // Transport keepalive only: no model, no task polling, no cloud requests.
