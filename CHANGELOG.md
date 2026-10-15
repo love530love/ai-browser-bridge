@@ -459,3 +459,10 @@ git revert <commit>        # 或直接 git checkout <commit> -- src/server.js ex
 - Python Worker 增加安全的 JSON/CSV 读写适配器，继续限制路径、大小和任务范围。
 - 发布标签：[v0.5.9](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.9)。
 
+## 0.5.10 — 2026-10-15 · SPA 布局回退与坐标安全
+
+- 对 `innerWidth/innerHeight` 为零的 SPA 页面增加 `documentElement`/`visualViewport` 回退和 `layoutReady` 诊断。
+- 坐标动作在视口不可用时返回可恢复 `waiting`，不再盲目派发点击。
+- 适用于客服浮窗、图标按钮和重型页面的前台聚焦/布局等待场景。
+- 发布标签：[v0.5.10](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.10)。
+
