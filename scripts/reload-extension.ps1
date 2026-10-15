@@ -30,8 +30,16 @@ $condition = New-Object System.Windows.Automation.PropertyCondition(
   [System.Windows.Automation.ControlType]::Button)
 $buttons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
 $candidate = $null
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 foreach ($button in $buttons) {
-  if (@('Reload','重新加载','Reload extension') -contains [string]$button.Current.Name) { $candidate = $button; break }
+  if (@('Reload','重新加载','Reload extension') -notcontains [string]$button.Current.Name) { continue }
+  $node = $button
+  $context = ''
+  for ($i = 0; $i -lt 8 -and $node; $i++) {
+    $context += ' ' + [string]$node.Current.Name + ' ' + [string]$node.Current.AutomationId
+    $node = $walker.GetParent($node)
+  }
+  if ($context -match [regex]::Escape($ExtensionId) -or $context -match '自主浏览器|AI Browser Bridge') { $candidate = $button; break }
 }
 if (-not $candidate) {
   if ($BestEffort) { Write-Warning "Reload button for $ExtensionId was not exposed through Windows UI Automation."; exit 0 }
