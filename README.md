@@ -30,6 +30,8 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 
 0.5.8：在 0.5.7 稳定性基础上加入 WebSocket 指数退避与随机抖动重连、离线确定性执行能力描述 `browser_execution_profile`、对抗性广告关闭链接过滤、滚动审计日志（`.local\logs\audit.jsonl`）和服务/扩展版本统一。完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
+下一阶段的一次性重构与 Python 数据自动化接入方案见 [一次性升级与验收方案](docs/ONE-SHOT-UPGRADE-PLAN.md)。该文件区分已实现能力、实施批次和验收证据；计划内容不会自动视为当前版本功能。
+
 
 ### 远程沙箱与 VNC 登录边界
 

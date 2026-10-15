@@ -1,3 +1,10 @@
+# Unreleased
+
+## Documentation
+
+- 新增一次性升级与验收方案，统一浏览器操控、受保护 UI、Python Worker、多 Agent 恢复、验收矩阵和新 Agent 接入提示词。
+- 明确 Python 重型依赖按需安装，避免默认安装膨胀；明确高风险动作与未知写结果的授权和恢复边界。
+
 # 修改日志（CHANGELOG）
 
 供其他 Agent 接手改进时快速了解：改了哪些文件、为什么改、怎么验证、还剩什么。
@@ -432,3 +439,10 @@ git log --oneline          # 找到本改动前的提交
 git revert <commit>        # 或直接 git checkout <commit> -- src/server.js extension/worker.js
 # 重启服务；扩展需在 chrome://extensions 重新加载
 ```
+# Unreleased
+
+## Documentation
+
+- 新增一次性升级与验收方案，统一浏览器操控、受保护 UI、Python Worker、多 Agent 恢复、验收矩阵和新 Agent 接入提示词。
+- 明确 Python 重型依赖按需安装，避免默认安装膨胀；明确高风险动作与未知写结果的授权和恢复边界。
+
