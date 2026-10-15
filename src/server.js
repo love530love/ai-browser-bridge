@@ -133,6 +133,14 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       nextAction: 'Use the fallbackOrder; call browser_failure_help only after a deterministic path is exhausted.'
     }
   });
+  const capabilities = () => ({
+    ordinaryPage: { status: 'available', channels: ['extension_dom', 'accessibility', 'debugger', 'screenshot', 'coordinate_fallback'], modelRequired: false },
+    protectedUi: { status: 'requires_user_or_desktop_adapter', channels: ['computer_use', 'isolated_chrome'], pages: ['chrome://extensions', 'chrome://settings', 'chrome://inspect', 'chrome-extension://*'], modelRequired: false },
+    nativeMessaging: { status: 'not_configured', purpose: ['lifecycle', 'health', 'diagnostics'], arbitraryShell: false },
+    policy: { installOrRemoveExtension: 'requires_user', developerMode: 'requires_user', browserSecuritySettings: 'requires_user', cookiesAndSecrets: 'blocked' },
+    fallback: ['ordinary_page', 'protected_ui', 'requires_user'],
+    guarantees: ['Protected pages are never misreported as ordinary DOM success.', 'Model outage does not remove deterministic ordinary-page control.', 'High-risk UI changes require a fresh user confirmation and an auditable checkpoint.']
+  });
   // Tab write leases are owned by the service process, not the MV3 service
   // worker: a recycled worker must not silently drop a lease or hand a tab to a
   // second agent. Survives worker restarts and, via stateFile, service restarts.
@@ -316,6 +324,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   function call(name, args, owner = null) {
     const tool = validateCall(name, args);
     if (name === 'browser_agent_guide') return agentGuide();
+    if (name === 'browser_capabilities') return capabilities();
     if (name === 'browser_execution_profile') return executionProfile();
     if (name === 'browser_queue_status') return queueSnapshot();
     if (name === 'browser_wait_until_ready') return waitUntilReady(args);

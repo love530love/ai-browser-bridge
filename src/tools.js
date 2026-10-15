@@ -15,6 +15,7 @@ const tool = (name, description, properties = {}, required, readOnly = false) =>
 export const TOOLS = [
   tool('browser_tabs', 'List tabs on user-allowed origins only.', { agent }, [], true),
   tool('browser_agent_guide', 'Read the default unattended multi-agent operating guide. Call once when an agent first connects or after uncertainty.', { agent }, [], true),
+  tool('browser_capabilities', 'Read the local capability matrix and protected-page requirements before choosing a browser control path.', { agent }, [], true),
   tool('browser_execution_profile', 'Read the deterministic browser execution profile and offline fallback order. This is answered locally by the bridge and does not depend on GPT, Chrome built-in AI, or an extension round trip.', { tabId, agent }, [], true),
   tool('browser_queue_status', 'Read service queue, active command, connected extension, and scheduling guidance. Use when coordinating multiple agents or after a waiting result.', { agent }, [], true),
   tool('browser_wait_until_ready', 'Wait locally until the extension is connected and, by default, the service queue is idle. Use after status=waiting or temporary disconnects so unattended agents keep their task alive.', {
