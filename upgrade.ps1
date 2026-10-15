@@ -8,4 +8,8 @@ $ps = if (Test-Path (Join-Path $PSScriptRoot 'stop.ps1')) { 'powershell.exe' } e
 if ($LASTEXITCODE -ne 0) { throw 'Stop failed' }
 & $ps -NoProfile -File (Join-Path $root 'start.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Start failed' }
-Write-Host 'Bridge restarted. Reconnect from the extension popup if needed.'
+$reload = Join-Path $root 'scripts/reload-extension.ps1'
+if (Test-Path $reload) {
+  & (Get-Command pwsh.exe).Source -NoProfile -File $reload -BestEffort
+}
+Write-Host 'Bridge restarted. Extension reload was attempted only when Chrome exposed a Reload control.'
