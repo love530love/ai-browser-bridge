@@ -104,6 +104,35 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     },
     minimalConfiguration: ['Load extension once', 'Run pair.ps1 once', 'Configure upload roots only when uploading files']
   });
+  // This contract is deliberately local and deterministic. Agents must be able
+  // to discover the usable browser path even when every optional model is
+  // offline; keeping it separate from browser_ai_status avoids making the
+  // capability handshake itself depend on Chrome or a model session.
+  const executionProfile = () => ({
+    mode: 'deterministic-first',
+    modelRequired: false,
+    offlineReady: true,
+    optionalEnhancers: ['chrome_on_device_ai', 'configured_model_endpoint'],
+    fallbackOrder: [
+      'browser_observe',
+      'browser_find_element_or_browser_find_text',
+      'browser_frames_and_browser_scan_overlays',
+      'verified_dom_transaction',
+      'browser_debug',
+      'browser_screenshot',
+      'browser_action_coordinate_adapter'
+    ],
+    guarantees: [
+      'Model outage does not cancel or discard a browser task.',
+      'Read and deterministic browser tools remain usable without GPT.',
+      'Uncertain writes are reported as unknown and are never replayed automatically.',
+      'waiting is resumable and must be polled rather than treated as failure.'
+    ],
+    modelUnavailable: {
+      status: 'continue_locally',
+      nextAction: 'Use the fallbackOrder; call browser_failure_help only after a deterministic path is exhausted.'
+    }
+  });
   // Tab write leases are owned by the service process, not the MV3 service
   // worker: a recycled worker must not silently drop a lease or hand a tab to a
   // second agent. Survives worker restarts and, via stateFile, service restarts.
@@ -287,6 +316,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   function call(name, args, owner = null) {
     const tool = validateCall(name, args);
     if (name === 'browser_agent_guide') return agentGuide();
+    if (name === 'browser_execution_profile') return executionProfile();
     if (name === 'browser_queue_status') return queueSnapshot();
     if (name === 'browser_wait_until_ready') return waitUntilReady(args);
     // Governance is evaluated before anything is dispatched or queued, so a

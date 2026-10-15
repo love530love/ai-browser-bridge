@@ -74,6 +74,7 @@ test('strict validation denies unsupported actions and unsafe URL schemes', () =
   validateCall('browser_renew_tab', { tabId: 1, agent: 'lease-owner', ttlMs: 1000 });
   validateCall('browser_queue_status', {});
   validateCall('browser_agent_guide', {});
+  validateCall('browser_execution_profile', {});
   validateCall('browser_wait_until_ready', { timeoutMs: 100, idle: true });
   validateCall('browser_read', { tabId: 1, mode: 'cheap', budgetMs: 100, maxElements: 10, maxTextNodes: 50 });
   validateCall('browser_find_text', { tabId: 1, query: 'Task 114', mode: 'cheap', maxMatches: 5, contextChars: 80 });
@@ -84,6 +85,15 @@ test('strict validation denies unsupported actions and unsafe URL schemes', () =
   assert.throws(() => validateCall('browser_read', { tabId: 1, mode: 'expensive' }));
   assert.throws(() => validateCall('browser_find_text', { tabId: 1, query: '', maxMatches: 5 }));
   assert.throws(() => validateCall('browser_upload', { tabId: 1, ref: 'a', filePath: 'C:/a.zip', sha256: 'bad' }));
+});
+test('execution profile is available offline without an extension or model', async t => {
+  const { b } = await setup(t);
+  const profile = await b.call('browser_execution_profile', {});
+  assert.equal(profile.mode, 'deterministic-first');
+  assert.equal(profile.offlineReady, true);
+  assert.equal(profile.modelRequired, false);
+  assert.ok(profile.fallbackOrder.includes('browser_observe'));
+  assert.equal(profile.modelUnavailable.status, 'continue_locally');
 });
 
 test('disconnected extension returns waiting guidance instead of ending unattended tasks', async t => {
