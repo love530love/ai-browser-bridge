@@ -16,6 +16,7 @@ Do not start Playwright, Puppeteer, Selenium, CDP, or a second browser-control b
 - Use `browser_prepare_action` and `browser_find_element` before clicks, fills, selections, uploads, or downloads.
 - For overlays, ads, dialogs, and floating assistants, use `browser_scan_overlays` and dismiss or move only the obstructing element.
 - For iframes, call `browser_frames`; route later actions to the returned frame reference.
+- For custom elements or assistants whose focus lands on a custom element (for example `doubao-ai-csui`), treat the control as Shadow DOM until `browser_shadow_tree`/ShadowRoot refs are available; never fill the page's unrelated main textarea.
 - For heavy pages, use bounded reads and diagnostics; do not solve a timeout by indefinitely increasing the timeout.
 - A `waiting` or queued result means the task is alive. Preserve the task and wait for completion; do not report failure or launch a competing browser session.
 - Never automatically replay an uncertain write or upload. Re-observe the page and verify the outcome first.
