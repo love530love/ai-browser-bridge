@@ -11,6 +11,11 @@ let reconnectTimer = null;
 let reconnectAttempt = 0;
 let connectInFlight = false;
 let connectionState = '未连接';
+function reportExtensionError(source, error, category = 'EXTENSION_ERROR') {
+  try {
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'extension-error', source, category, message: String(error?.message || error || 'unknown').slice(0, 1000), at: new Date().toISOString() }));
+  } catch { /* telemetry must never break browser control */ }
+}
 let lastAction = '';
 let connectionEpoch = 0;
 const uiRequests = new Map();
@@ -584,12 +589,13 @@ async function connect({ automatic = false } = {}) {
           const result = await execute(message.name, message.args);
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, result }));
         } catch (e) {
+          reportExtensionError(`command:${message.name}`, e, 'COMMAND_ERROR');
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, error: e.message }));
         }
       }
-    } catch { disconnect('协议错误，后台自动重连中', { automaticReconnect: true }); }
+  } catch (error) { reportExtensionError('websocket-message', error, 'PROTOCOL_ERROR'); disconnect('协议错误，后台自动重连中', { automaticReconnect: true }); }
   };
-  ws.onerror = () => { if (socket === ws) { connectionState = '本机服务不可用'; notifyStatus(); } };
+  ws.onerror = error => { reportExtensionError('websocket', error, 'WEBSOCKET_ERROR'); if (socket === ws) { connectionState = '本机服务不可用'; notifyStatus(); } };
   ws.onclose = event => {
     if (socket !== ws) return;
     // The service used to close every rejection with the same 4001, so a stale
@@ -637,6 +643,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 });
 chrome.runtime.onStartup.addListener(() => connect());
 chrome.runtime.onInstalled.addListener(() => connect());
+globalThis.addEventListener?.('error', event => reportExtensionError('worker', event.error || event.message, 'UNCAUGHT_ERROR'));
+globalThis.addEventListener?.('unhandledrejection', event => reportExtensionError('worker', event.reason, 'UNHANDLED_REJECTION'));
 // With a saved pairing key, the extension reconnects in the background.
 connect();
 

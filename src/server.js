@@ -442,6 +442,10 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
           ws.send(JSON.stringify({ type: 'ready' })); pump(); return;
         }
         if (msg.type === 'keepalive') { ws.send(JSON.stringify({ type: 'keepalive' })); return; }
+        if (msg.type === 'extension-error' && ws === extension) {
+          audit({ time: new Date().toISOString(), id: randomUUID(), tool: 'extension-error', tabId: Number.isInteger(msg.tabId) ? msg.tabId : null, agent: null, outcome: 'error', errorCategory: typeof msg.category === 'string' ? msg.category.slice(0, 80) : 'EXTENSION_ERROR', detail: typeof msg.message === 'string' ? msg.message.slice(0, 1000) : 'unknown', source: typeof msg.source === 'string' ? msg.source.slice(0, 80) : 'extension' });
+          return;
+        }
         if (msg.type === 'pause') { extensionPaused = true; return; }
         // Tab closed in Chrome (not via browser_close): drop its lease now so the
         // tab does not stay reserved until the TTL expires.

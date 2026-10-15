@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { configPath, loadConfig, ROOT, stateDir } from './config.js';
 import { request } from './client.js';
@@ -54,6 +54,20 @@ async function doctor() {
   report.ok = report.checks.every(check => check.ok);
   return report;
 }
+function upgradeDiagnosis() {
+  const log = join(stateDir, 'logs', 'audit.jsonl');
+  const rows = existsSync(log) ? readFileSync(log, 'utf8').split(/\r?\n/).filter(Boolean).slice(-500).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } }) : [];
+  const errors = rows.filter(row => row.outcome === 'error' || row.tool === 'extension-error');
+  const counts = {};
+  for (const row of errors) counts[row.errorCategory || 'UNKNOWN'] = (counts[row.errorCategory || 'UNKNOWN'] || 0) + 1;
+  const report = { generatedAt: new Date().toISOString(), log, sampled: rows.length, errors: errors.length, errorCategories: counts, recentErrors: errors.slice(-20), recommendations: [] };
+  if (counts.WEBSOCKET_ERROR || counts.CONNECTION_ERROR) report.recommendations.push('Restart the bridge once, then reload the extension and run doctor. Do not open multiple extension settings tabs.');
+  if (counts.COMMAND_ERROR || counts.EXTENSION_ERROR) report.recommendations.push('Inspect the latest command error and re-observe the tab before retrying; uncertain writes must not be replayed.');
+  if (counts.PROTOCOL_ERROR) report.recommendations.push('Check service/extension version match and reload the unpacked extension once.');
+  report.status = errors.length ? 'attention' : 'ready';
+  writeFileSync(join(stateDir, 'upgrade-analysis.json'), JSON.stringify(report, null, 2), { encoding: 'utf8' });
+  return report;
+}
 
 try {
   const [cmd, name, args] = process.argv.slice(2);
@@ -84,6 +98,7 @@ try {
     else if (name === 'remove' && args) console.log(JSON.stringify(policy.remove(args), null, 2));
     else throw new Error('Usage: node src/cli.js agent list | show NAME | set NAME [JSON|--stdin] | remove NAME');
   } else if (cmd === 'status') console.log(JSON.stringify(await request('/status'), null, 2));
+  else if (cmd === 'diagnose-upgrade') console.log(JSON.stringify(upgradeDiagnosis(), null, 2));
   else if (cmd === 'doctor') console.log(JSON.stringify(await doctor(), null, 2));
   else if (cmd === 'tools') console.log(JSON.stringify(await request('/tools'), null, 2));
   else if (cmd === 'call' || cmd === 'call-raw') {
@@ -94,6 +109,6 @@ try {
       ? await raw()
       : await callWithWaitingRecovery({ name, args: parsed, rawCall: rawToolCall, maxWaitMs: Number(process.env.AIB_AUTO_WAIT_MS || 120000) });
     console.log(JSON.stringify(result, null, 2));
-  } else throw new Error('Usage: node src/cli.js setup | doctor | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin]');
+  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin]');
 } catch (e) { console.error(e.message); process.exitCode = 1; }
 
