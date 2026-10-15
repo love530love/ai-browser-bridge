@@ -48,6 +48,31 @@ GPT、其他云端模型和本地模型都只能作为可选的规划、视觉�
 
 对抗性网页回归场景至少覆盖覆盖式透明层、不断变化的按钮位置、伪造浏览器警告、恶意提示注入、循环弹窗、自动下载、重定向链、跨源 iframe、混淆脚本、广告点击劫持和敏感信息诱导。目标是安全停止并保留检查点，而不是在不确定时强行完成。
 
+### 人类级操作与受保护界面
+
+“任意 Agent 都能操作浏览器”分为两类能力：普通网页的完整操控，以及 Chrome 内部/桌面界面的受控操控。普通 HTTP/HTTPS 页面继续由 Bridge 通过 DOM、Accessibility、iframe、Shadow DOM、Debugger、截图和坐标适配器完成；`chrome://extensions`、`chrome://settings`、`chrome://inspect`、DevTools 内部页和 `chrome-extension://` 页面不能伪装成普通网页 DOM。
+
+新增能力经纪层（capability broker）后，Agent 先提交目标和风险，再由本地策略选择执行通道：
+
+```text
+目标 → 风险评估 → 能力协商 → 预览计划 → 授权/检查点 → 单步执行 → 证据验证 → 完成/恢复
+```
+
+能力矩阵：
+
+| 等级 | 示例 | 默认策略 |
+|---|---|---|
+| L0 | 读取、截图、滚动、查找元素 | 自动 |
+| L1 | 点击、填写、选择、受限下载 | 自动并验证 |
+| L2 | 上传、表单提交、跨 origin 导航 | 白名单内自动，否则等待 |
+| L3 | 登录、外发消息、发布、删除 | 预授权或明确确认 |
+| L4 | 重载/安装扩展、开启开发者模式、修改浏览器安全设置 | 每次确认，默认禁止自动 |
+| L5 | Cookie/密钥、任意文件、系统命令、绕过安全机制 | 禁止或独立人工流程 |
+
+受保护界面适配器的优先顺序是 Computer Use/桌面 UI 自动化、专用隔离 Chrome 实例和 Native Messaging；Native Messaging 只负责受白名单约束的生命周期与诊断，不能成为任意 Shell 或绕过 Chrome 安全边界的后门。每个动作必须校验窗口标题、目标 URL、扩展 ID、截图/版本证据、一次性 nonce、Agent 身份和幂等键。
+
+新增目标工具：`browser_capabilities`（能力和限制握手）、`browser_policy_check`（风险与所需授权）、`browser_privileged_ui`（受限内部界面动作）、`browser_task_checkpoint`（长任务检查点）、`browser_verify_state`（版本/连接/下载/表单证据）和 `browser_audit_query`（解释等待、拒绝和未知状态）。保护页面不能被误报为普通 DOM 成功；不支持时必须返回 `requires_user` 或 `unsupported_with_reason`。
+
 ### 页面理解层
 
 融合 DOM、可访问性树、iframe、Shadow DOM、截图、元素几何信息、遮挡关系、网络状态、控制台错误和页面生命周期。
@@ -106,6 +131,7 @@ GPT、其他云端模型和本地模型都只能作为可选的规划、视觉�
 2. 持久化队列、检查点恢复、幂等键和跨重启任务续接。
 3. 统一动作证据与审计记录，支持按 Agent、标签页、origin 和风险级别检索。
 4. iframe、Shadow DOM、虚拟列表、滚动容器、遮挡层和下载/上传的端到端回归套件。
+5. `browser_capabilities`、`browser_policy_check` 和 `browser_verify_state`，让 Agent 在执行前知道可用通道、风险和完成证据。
 
 ### 0.7.0：组合式执行与可扩展生态（长期）
 
@@ -113,6 +139,7 @@ GPT、其他云端模型和本地模型都只能作为可选的规划、视觉�
 2. 站点适配器和成功案例库，支持隔离、版本化、回滚与人工审核。
 3. 多浏览器/多配置文件隔离，以及经过认证的远程执行网关。
 4. 基于真实场景的基准公开报告，持续与底层工具比较而不掩盖边界。
+5. 受控 `protected_ui`/Computer Use 适配器和专用 Chrome 生命周期管理；不默认杀掉用户现有 Chrome 或破坏登录状态。
 
 ## 交付门槛与衡量指标
 
