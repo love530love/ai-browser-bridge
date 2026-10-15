@@ -11,6 +11,7 @@ import { createTasks } from './tasks.js';
 import { errorCategory } from './diagnostics.js';
 import { createLeaseStore, LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
 import { createAgentPolicy } from './policy.js';
+import { protectedUiPlan } from './protected-ui.js';
 
 function equal(a, b) {
   return typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -325,6 +326,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     const tool = validateCall(name, args);
     if (name === 'browser_agent_guide') return agentGuide();
     if (name === 'browser_capabilities') return capabilities();
+    if (name === 'browser_protected_ui_plan') return protectedUiPlan(args);
     if (name === 'browser_execution_profile') return executionProfile();
     if (name === 'browser_queue_status') return queueSnapshot();
     if (name === 'browser_wait_until_ready') return waitUntilReady(args);
