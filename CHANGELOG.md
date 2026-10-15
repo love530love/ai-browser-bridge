@@ -466,3 +466,10 @@ git revert <commit>        # 或直接 git checkout <commit> -- src/server.js ex
 - 适用于客服浮窗、图标按钮和重型页面的前台聚焦/布局等待场景。
 - 发布标签：[v0.5.10](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.10)。
 
+## 0.5.11 — 2026-10-15 · 已登录会话契约
+
+- `browser_open` 对精确 URL 默认复用当前 Chrome 中已打开的标签页，并只在不存在时新建一个标签页。
+- Agent 指引明确禁止启动第二个浏览器、Playwright 新上下文或丢失登录态的替代通道。
+- Chrome 内置 AI 明确为可选规划/风险增强，不影响离线确定性执行。
+- 发布标签：[v0.5.11](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.11)。
+
