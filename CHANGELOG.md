@@ -452,3 +452,10 @@ git revert <commit>        # 或直接 git checkout <commit> -- src/server.js ex
 - Hardened protected UI planning for Chrome/Edge internal pages with risk levels and single-action user authorization semantics.
 - Added the one-shot upgrade and acceptance plan covering browser control, protected UI, Python automation, recovery, and multi-agent validation.
 
+## 0.5.9 — 2026-10-15 · 受控 UI、自动升级与 Python Worker
+
+- 增加 Protected UI 风险分级和一次性用户授权规划。
+- 升级脚本支持备份、自动 Reload 扩展、doctor 验收和失败结果记录。
+- Python Worker 增加安全的 JSON/CSV 读写适配器，继续限制路径、大小和任务范围。
+- 发布标签：[v0.5.9](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.9)。
+

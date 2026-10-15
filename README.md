@@ -2,7 +2,7 @@
 
 **默认用途：让已有 AI Agent 直接操作浏览器，无需配置模型。** 终端 Agent 可立即使用 [接入说明](AGENT-QUICKSTART.md) 和 agent.ps1；MCP 客户端使用本机生成的工具配置。插件内模型任务页只是可选功能。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前版本 **0.5.8**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前版本 **0.5.9**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 ## 能做什么
 
@@ -21,14 +21,14 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 
 ### 发布与版本管理
 
-- 当前稳定版本：[v0.5.8 Release](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.8)
+- 当前稳定版本：[v0.5.9 Release](https://github.com/love530love/ai-browser-bridge/releases/tag/v0.5.9)
 - 所有版本：[GitHub Releases](https://github.com/love530love/ai-browser-bridge/releases)
 - 版本号必须同时更新 `package.json`、`package-lock.json`、`extension/manifest.json` 和 `CHANGELOG.md`，再创建同名 Git tag 与 GitHub Release。
 - Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
 
 ### 当前版本升级指南
 
-0.5.8：在 0.5.7 稳定性基础上加入 WebSocket 指数退避与随机抖动重连、离线确定性执行能力描述 `browser_execution_profile`、对抗性广告关闭链接过滤、滚动审计日志（`.local\logs\audit.jsonl`）和服务/扩展版本统一。完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+0.5.9：在 0.5.8 稳定性基础上加入受控 Protected UI 规划、升级后扩展自动 Reload、升级失败恢复、Python Worker 安全 JSON/CSV 适配器和 doctor 验收闭环。完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 下一阶段的一次性重构与 Python 数据自动化接入方案见 [一次性升级与验收方案](docs/ONE-SHOT-UPGRADE-PLAN.md)。该文件区分已实现能力、实施批次和验收证据；计划内容不会自动视为当前版本功能。
 
