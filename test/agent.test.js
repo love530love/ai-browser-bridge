@@ -24,7 +24,13 @@ async function provider(t, reply) {
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ choices: [{ message: reply(JSON.parse(raw)) }] }));
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  // Windows can allocate low ephemeral ports forbidden by fetch (e.g. 6000).
+  for (let attempt = 0; ; attempt++) {
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    if (server.address().port >= 10000) break;
+    await new Promise(resolve => server.close(resolve));
+    if (attempt >= 30) throw new Error('Could not allocate a fetch-compatible test port');
+  }
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
   return { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: 'simulated-test-model', mode: 'tools' };
 }

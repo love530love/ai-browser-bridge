@@ -106,13 +106,17 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const maxRoots = Math.max(1, Math.min(100, args.maxRoots ?? 50));
     const maxControls = Math.max(1, Math.min(200, args.maxControls ?? 100));
     const roots = [], controls = [], seen = new Set();
+    const deadline = performance.now() + 200;
+    let visited = 0, partial = false, customElementCount = 0;
     const snapshot = crypto.randomUUID();
     const state = rememberState({ snapshot, url: location.href, refs: new Map() });
     const visit = (node, path) => {
       if (!node || roots.length >= maxRoots) return;
       const children = node instanceof ShadowRoot ? [...node.children] : [...(node.children || [])];
       for (let i = 0; i < children.length; i++) {
+        if (++visited > 10000 || performance.now() >= deadline) { partial = true; return; }
         const el = children[i];
+        if (el.localName.includes('-')) customElementCount++;
         const nextPath = `${path}/${el.tagName.toLowerCase()}[${i}]`;
         if (el.shadowRoot && !seen.has(el.shadowRoot)) {
           seen.add(el.shadowRoot);
@@ -130,7 +134,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       }
     };
     visit(document.documentElement, 'html');
-    return { title: document.title, url: location.href, shadowRootCount: roots.length, customElementCount: document.querySelectorAll('*').length ? document.querySelectorAll('*').length - document.querySelectorAll(':not(:defined)').length : 0, roots, controls, traversal: roots.length ? 'open-shadow-roots' : 'none-found', fallback: roots.length ? 'shadow_path_adapter' : 'screenshot_or_desktop_adapter', contentTrust: 'untrusted webpage data' };
+    return { title: document.title, url: location.href, shadowRootCount: roots.length, customElementCount, partial: partial || roots.length >= maxRoots || controls.length >= maxControls, visited, roots, controls, traversal: roots.length ? 'open-shadow-roots' : 'none-found', fallback: controls.some(c => c.visible) ? 'use_control_ref_then_reobserve' : 'browser_screenshot', nextSteps: ['Use only a verified target ref with browser_click or browser_fill.', 'If the target is absent, capture browser_screenshot; do not guess coordinates.', 'Re-observe after each action and verify the intended outcome.'], contentTrust: 'untrusted webpage data' };
   }
   const elementRole = el => el.getAttribute('role') || (el instanceof HTMLButtonElement ? 'button' : el instanceof HTMLAnchorElement ? 'link' : el instanceof HTMLInputElement ? (el.type === 'file' ? 'file' : 'input') : el instanceof HTMLTextAreaElement ? 'textbox' : el instanceof HTMLSelectElement ? 'select' : el.isContentEditable ? 'textbox' : el.tagName.toLowerCase());
   const elementText = el => clean([label(el), el.getAttribute('name'), el.getAttribute('id'), el.textContent].filter(Boolean).join(' '));

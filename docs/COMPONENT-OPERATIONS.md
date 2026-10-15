@@ -21,6 +21,16 @@ cannot be identified, preserve the task and report the missing observation.
   the configured port, authenticated status request and exact manifest version.
 - Hardware scheduling and universal desktop fallback: not implemented here.
 
+The installed smoke suite now requires a shadow input/button round trip and
+rejection of a click covered by a transparent overlay. On 2026-10-15 the
+installed extension failed the actionable-ref assertion; basic smoke passes
+must not be interpreted as this feature being deployed. The fixture is local
+and the test closes only its own tab, including on failure.
+
+Shadow scanning now has a 10,000-node/200ms traversal budget and reports partial
+results. Its nextSteps explicitly direct clients to screenshot when no verified
+target exists. A scan is observation, not permission to click unrelated widgets.
+
 All MCP clients discover the same tool schema through tools/list. Clients
 that cache schemas must refresh their MCP connection. No model is required
 for the deterministic ref and hit-test operations.
