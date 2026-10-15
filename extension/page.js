@@ -396,6 +396,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const closeCandidates = [];
       for (const close of [...el.querySelectorAll('button,a,[role=button],[aria-label],[title]')].filter(closeHint).slice(0, 12)) {
         if (!visible(close) || sensitive(close)) continue;
+        // A malicious ad can label an external link "close". Only expose
+        // non-navigating anchors as safe dismissal candidates.
+        if (close.matches('a[href]') && !/^(#|javascript:)/i.test(close.getAttribute('href') || '')) continue;
         closeCandidates.push({ ref: makeRef(close), ...elementSummary(close) });
       }
       overlays.push({ ref: makeRef(el), hint, areaRatio, position: style.position, zIndex: style.zIndex || 'auto', pointerEvents: style.pointerEvents, opacity: style.opacity, ...elementSummary(el), closeCandidates });
