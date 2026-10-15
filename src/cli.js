@@ -64,6 +64,10 @@ function upgradeDiagnosis() {
   if (counts.WEBSOCKET_ERROR || counts.CONNECTION_ERROR) report.recommendations.push('Restart the bridge once, then reload the extension and run doctor. Do not open multiple extension settings tabs.');
   if (counts.COMMAND_ERROR || counts.EXTENSION_ERROR) report.recommendations.push('Inspect the latest command error and re-observe the tab before retrying; uncertain writes must not be replayed.');
   if (counts.PROTOCOL_ERROR) report.recommendations.push('Check service/extension version match and reload the unpacked extension once.');
+  if (counts.EXECUTION_ERROR) report.recommendations.push('Run browser_health then browser_wait_until_ready and browser_observe. Treat SPA/loading errors as retryable reads; never replay an uncertain write automatically.');
+  if (counts.ELEMENT_COVERED) report.recommendations.push('Run browser_scan_overlays and browser_shadow_tree, then re-observe. Prefer semantic refs; use a screenshot/desktop fallback only after the target is verified.');
+  if (counts.UNCAUGHT_ERROR || counts.UNHANDLED_REJECTION) report.recommendations.push('Reload the unpacked extension once, run doctor, and inspect the extension service-worker errors before resuming queued work.');
+  if (errors.length && report.recommendations.length === 0) report.recommendations.push('Review recentErrors, run doctor, and retry only idempotent reads after readiness is confirmed.');
   report.status = errors.length ? 'attention' : 'ready';
   writeFileSync(join(stateDir, 'upgrade-analysis.json'), JSON.stringify(report, null, 2), { encoding: 'utf8' });
   return report;

@@ -12,6 +12,22 @@
 
 ---
 
+## 0.5.13 — 2026-10-15 · 扩展错误遥测与升级前自动诊断
+
+### 改动
+
+- 扩展将 WebSocket、协议、命令执行、未捕获异常和未处理 Promise 拒绝以脱敏摘要上报到本地审计日志。
+- 新增 `node src/cli.js diagnose-upgrade`，读取最近 500 条审计记录，按错误类别生成可执行的恢复建议并写入 `.local/upgrade-analysis.json`。
+- 对 SPA 执行超时、元素被遮挡、扩展异常增加分级建议：先探活/等待/重新观测，再决定是否仅重试幂等读取；未知写入结果不自动重放。
+- 版本统一为 `0.5.13`。
+
+### 验证
+
+- `node --check src/cli.js src/server.js extension/worker.js`
+- `node src/cli.js diagnose-upgrade`
+
+---
+
 ## 0.5.8 — 2026-10-15 · 连接恢复、离线执行与审计日志
 
 ### 改动
