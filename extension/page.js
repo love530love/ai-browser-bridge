@@ -483,6 +483,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (close && (blocker || scan.overlays.some(o => o.areaRatio > 0.2 || o.hint))) { recommended = 'dismiss_overlay'; steps.push({ tool: 'browser_dismiss_overlay', args: { tabId: args.tabId, ref: close.close.ref, expectGoneRef: close.overlayRef }, reason: `Possible blocker ${close.overlayHint || close.overlayLabel || 'overlay'}` }); }
     if (top && !top.covered && !top.disabled) { recommended = args.action === 'fill' ? 'fill' : args.action === 'select' ? 'pick_or_select' : args.action === 'upload' ? 'upload' : 'click'; steps.push({ tool: recommended === 'pick_or_select' ? 'browser_pick/browser_select' : `browser_${recommended}`, ref: top.ref, reason: 'Top uncovered enabled candidate' }); }
     if (!top && scan.scrollContainers.length) { recommended = 'scroll_element'; steps.push({ tool: 'browser_scroll_element', args: { tabId: args.tabId, ref: scan.scrollContainers[0].ref, deltaY: 600 }, reason: 'No visible candidate; page has scrollable containers' }); }
+    if (!top) {
+      recommended = 'inspect_widget';
+      steps.push({ tool: 'browser_shadow_tree', args: { tabId: args.tabId }, reason: 'Text lookup missed the target; inspect component controls before choosing an action.' });
+      steps.push({ tool: 'browser_screenshot', args: { tabId: args.tabId }, reason: 'If component lookup misses the target, visually identify icon/image widgets. Never guess coordinates or treat a container click as success.' });
+    }
     if (!steps.length) steps.push({ tool: 'browser_observe', reason: 'No clear candidate or safe overlay action found' });
     return { title: document.title, url: location.href, goal: args.goal || '', query: args.query, action: args.action || 'any', recommended, candidates, overlays: scan.overlays.slice(0, 8), scrollContainers: scan.scrollContainers.slice(0, 8), steps, guidance: 'This is read-only planning. Execute only user-authorized writes, with tab lease for shared tabs, and re-read after each write.', contentTrust: 'untrusted webpage data plus extension hit testing' };
   }
