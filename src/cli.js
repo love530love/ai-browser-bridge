@@ -24,6 +24,12 @@ async function doctor() {
   try {
     const status = await request('/status');
     report.status = status;
+    const expectedVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
+    const manifestVersion = JSON.parse(readFileSync(join(ROOT, 'extension', 'manifest.json'), 'utf8')).version;
+    add('deployment-current', status.version === expectedVersion && status.extensionVersion === manifestVersion && expectedVersion === manifestVersion,
+      { expectedVersion, manifestVersion, serviceVersion: status.version, extensionVersion: status.extensionVersion ?? null });
+    if (status.version !== expectedVersion) report.recommendations.push(`Running service differs from disk version ${expectedVersion}; restart the service when idle.`);
+    if (status.extensionVersion !== manifestVersion) report.recommendations.push(`Loaded extension differs from disk version ${manifestVersion}; reload and verify before claiming deployment complete.`);
     add('service-status', status.service === 'ai-browser-bridge', { version: status.version });
     add('extension-connected', status.connected === true, { extensionVersion: status.extensionVersion ?? null });
     add('version-match', !!status.version && !!status.extensionVersion && status.version === status.extensionVersion, { serviceVersion: status.version, extensionVersion: status.extensionVersion ?? null });

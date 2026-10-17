@@ -15,6 +15,9 @@ test('package.json, the extension manifest and src/version.js agree', () => {
   const manifest = readJson('extension/manifest.json');
   assert.equal(manifest.version, pkg.version, 'extension/manifest.json must match package.json');
   assert.equal(VERSION, pkg.version, 'src/version.js must report the package.json version');
+  const lock = readJson('package-lock.json');
+  assert.equal(lock.version, pkg.version);
+  assert.equal(lock.packages[''].version, pkg.version);
 });
 
 test('the version is a plain semver triplet', () => {

@@ -1,3 +1,11 @@
+## 0.5.15 — 2026-10-17（待 Chrome 部署验收）
+
+- 汇总开放 Shadow DOM 可操作引用、深层命中检测与扫描预算。
+- 调试器占用在执行前返回等待；输入需重新观测，不自动重放。
+- Reload 验证配置端口、认证和目标版本；失败返回非零状态。
+- doctor 比较磁盘目标版本与运行服务/扩展，避免旧版本双方一致被误判为更新完成。
+- 实际熊猫问答、自动 Reload 与封闭组件仍未完成验收。
+
 # Unreleased
 
 - Shadow DOM inventory exposes actionable snapshot refs; pointer checks descend open roots.
