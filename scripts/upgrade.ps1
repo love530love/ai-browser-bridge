@@ -2,7 +2,7 @@ param(
   [switch]$ApplyGitUpdate,
   [switch]$BestEffort,
   [switch]$SkipReload,
-  [int]$HealthTimeoutSec = 45
+  [ValidateRange(1, 600)][int]$HealthTimeoutSec = 45
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +24,15 @@ function Invoke-BridgeDoctor {
 function Save-Result($value) { $value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $resultPath -Encoding utf8 }
 
 try {
+  # Read before modifying dependencies or reloading: an idle observation is not
+  # a maintenance lock, so callers must also stop submitting new work.
+  $preflight = Invoke-BridgeDoctor
+  $result.preflight = $preflight
+  if ($preflight.status -and ($preflight.status.active -or $preflight.status.queued -gt 0 -or $preflight.status.taskLease -or $preflight.status.tabLeases.Count -gt 0)) {
+    $result.status = 'waiting'
+    $result.actionRequired = 'wait-for-idle'
+    throw 'Bridge has pending work or leases. Preserve agent tasks and retry upgrade after work finishes.'
+  }
   if ($ApplyGitUpdate) {
     $head = (& git -C $root rev-parse HEAD).Trim()
     New-Item -ItemType Directory -Force -Path $backupPath | Out-Null
@@ -40,6 +49,15 @@ try {
   Push-Location $root
   try { & npm ci --ignore-scripts; if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' } } finally { Pop-Location }
   & $pwsh -NoProfile -File (Join-Path $root 'start.ps1') | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Bridge startup failed; extension reload was not attempted.' }
+  $started = Invoke-BridgeDoctor
+  $deployment = $started.checks | Where-Object name -eq 'deployment-current' | Select-Object -First 1
+  if ($deployment -and $deployment.serviceVersion -ne $deployment.expectedVersion) {
+    $result.doctor = $started
+    $result.status = 'waiting'
+    $result.actionRequired = 'restart-service-when-idle'
+    throw 'Existing service is running old code. Restart it during an idle maintenance window, then rerun upgrade.'
+  }
   if (-not $SkipReload) {
     for ($attempt = 1; $attempt -le 2; $attempt++) {
       $result.reloadAttempts = $attempt
@@ -57,12 +75,14 @@ try {
   if (-not $doctor) { throw 'doctor returned no report' }
   $result.doctor = $doctor
   if (-not $doctor.ok) {
-    if ($doctor.recommendations -match 'Reload the unpacked extension') {
+    $deployment = $doctor.checks | Where-Object name -eq 'deployment-current' | Select-Object -First 1
+    if ($deployment -and $deployment.extensionVersion -ne $deployment.manifestVersion) {
       $result.actionRequired = 'manual-extension-reload'
     }
     throw 'doctor reported unhealthy bridge'
   }
   $result.ok = $true
+  $result.status = 'complete'
 } catch {
   $result.error = $_.Exception.Message
   if ($backupPath -and (Test-Path -LiteralPath $backupPath)) { $result.backup = $backupPath }
@@ -71,5 +91,5 @@ try {
   $result.finishedAt = (Get-Date).ToString('o')
   Save-Result $result
 }
-if (-not $result.ok -and -not $BestEffort) { exit 1 }
 Write-Output ($result | ConvertTo-Json -Depth 12)
+if (-not $result.ok) { exit 1 }
