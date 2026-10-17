@@ -1,5 +1,17 @@
 # Complex component operations: implementation and acceptance
 
+## Debugger contention (2026-10-17, source implementation)
+
+An attachment conflict now returns `status: waiting`, `reason: debugger_busy`
+and `dispatched: false`. Screenshots are retryable through the existing bounded
+CLI/MCP waiting recovery. Input calls return `retryable: false` and
+`requiresObservation: true`: retain the task, wait for the owner to finish,
+then re-observe and issue a fresh action. Do not replay stale coordinates.
+No competing debugger is detached. Failures after attachment remain errors
+with potentially unknown effects. Unit tests cover attachment contention,
+successful later acquisition and post-attachment failures. Live acceptance
+requires reloading the updated extension and is not yet claimed.
+
 Use the existing Chrome session. Observe the authorized page, scan overlays,
 then call `browser_shadow_tree` when ordinary element lookup misses a widget.
 Its controls now include snapshot refs for `browser_click` and `browser_fill`.

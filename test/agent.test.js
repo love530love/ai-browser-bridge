@@ -20,6 +20,7 @@ test('Open-AutoGLM literal actions adapt without code execution', () => {
 });
 async function provider(t, reply) {
   const server = http.createServer(async (req, res) => {
+    if (req.method === 'HEAD') { res.end(); return; }
     let raw = ''; for await (const chunk of req) raw += chunk;
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ choices: [{ message: reply(JSON.parse(raw)) }] }));
@@ -27,7 +28,13 @@ async function provider(t, reply) {
   // Windows can allocate low ephemeral ports forbidden by fetch (e.g. 6000).
   for (let attempt = 0; ; attempt++) {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    if (server.address().port >= 10000) break;
+    try {
+      await fetch(`http://127.0.0.1:${server.address().port}/`, { method: 'HEAD' });
+      break;
+    } catch (error) {
+      if (error.cause?.message !== 'bad port') throw error;
+    }
+    server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
     if (attempt >= 30) throw new Error('Could not allocate a fetch-compatible test port');
   }

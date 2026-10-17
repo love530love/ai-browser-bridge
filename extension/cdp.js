@@ -2,7 +2,14 @@
 // Open-AutoGLM's published phone actions. No ADB or vendor service is used.
 export async function withDebugger(tabId, fn) {
   const target = { tabId };
-  await chrome.debugger.attach(target, '1.3');
+  try {
+    await chrome.debugger.attach(target, '1.3');
+  } catch (error) {
+    if (/another debugger is already attached|already attached to the tab/i.test(error.message || '')) {
+      error.code = 'DEBUGGER_BUSY_BEFORE_DISPATCH';
+    }
+    throw error;
+  }
   try { return await fn((method, params = {}) => chrome.debugger.sendCommand(target, method, params)); }
   finally { await chrome.debugger.detach(target).catch(() => {}); }
 }

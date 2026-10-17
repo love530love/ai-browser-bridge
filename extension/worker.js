@@ -589,6 +589,16 @@ async function connect({ automatic = false } = {}) {
           const result = await execute(message.name, message.args);
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, result }));
         } catch (e) {
+          if (e.code === 'DEBUGGER_BUSY_BEFORE_DISPATCH') {
+            const result = {
+              status: 'waiting', reason: 'debugger_busy', dispatched: false,
+              retryable: message.name === 'browser_screenshot', suggestedDelayMs: 1000,
+              requiresObservation: message.name !== 'browser_screenshot',
+              recommendedNextAction: 'Keep the task pending. Do not detach another debugger. Retry screenshots after a delay; for input, re-observe the target before issuing a fresh action.'
+            };
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, result }));
+            return;
+          }
           reportExtensionError(`command:${message.name}`, e, 'COMMAND_ERROR');
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, error: e.message }));
         }
