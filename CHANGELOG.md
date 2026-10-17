@@ -10,6 +10,9 @@
 
 # Unreleased
 
+- 新增本机认证维护锁接口与 CLI；空闲时原子关闭新请求入口，等待响应明确未派发，持有令牌释放及自动到期恢复。
+- 升级脚本取得维护锁后执行，退出释放；旧服务不支持接口时停止。保护不跨服务重启，长时间依赖安装回滚仍待完善。
+
 - Shadow DOM inventory exposes actionable snapshot refs; pointer checks descend open roots.
 - Reload verification uses authenticated configured service and exact target version; failed attempts return nonzero.
 - See docs/COMPONENT-OPERATIONS.md for acceptance gaps.

@@ -110,6 +110,10 @@ try {
   } else if (cmd === 'status') console.log(JSON.stringify(await request('/status'), null, 2));
   else if (cmd === 'diagnose-upgrade') console.log(JSON.stringify(upgradeDiagnosis(), null, 2));
   else if (cmd === 'doctor') console.log(JSON.stringify(await doctor(), null, 2));
+  else if (cmd === 'maintenance') {
+    const input = name === '--stdin' ? readFileSync(0, 'utf8') : name || '{}';
+    console.log(JSON.stringify(await request('/maintenance', JSON.parse(input)), null, 2));
+  }
   else if (cmd === 'tools') console.log(JSON.stringify(await request('/tools'), null, 2));
   else if (cmd === 'call' || cmd === 'call-raw') {
     const input = args === '--stdin' ? readFileSync(0, 'utf8') : args || '{}';

@@ -61,6 +61,12 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let stopped = false;
   let lease = null;
   let extensionVersion = null;
+  let maintenance = null;
+  const maintenanceState = () => {
+    if (maintenance && maintenance.expiresAt <= Date.now()) maintenance = null;
+    return maintenance ? { expiresAt: maintenance.expiresAt } : null;
+  };
+  const maintenanceWaiting = () => ({ status: 'waiting', reason: 'maintenance', retryable: true, dispatched: false, suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000 }, recommendedNextAction: 'Preserve the task and wait for maintenance to finish. No browser action was dispatched.' });
   const queue = [];
   const clients = new Set();
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -188,6 +194,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     service: 'ai-browser-bridge',
     version: VERSION,
     extensionVersion,
+    maintenance: maintenanceState(),
     tabLeases: leases.list(),
     connected: extension?.readyState === WebSocket.OPEN,
     queued: queue.length,
@@ -213,12 +220,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   });
   const readyState = () => {
     const snapshot = queueSnapshot();
-    const ready = snapshot.connected && !snapshot.active && snapshot.queued === 0 && !snapshot.taskLease;
+    const ready = snapshot.connected && !snapshot.active && snapshot.queued === 0 && !snapshot.taskLease && !snapshot.maintenance;
     return {
       ready,
       connected: snapshot.connected,
       idle: !snapshot.active && snapshot.queued === 0,
       taskLease: snapshot.taskLease,
+      maintenance: snapshot.maintenance,
       queue: snapshot
     };
   };
@@ -227,7 +235,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     const requireIdle = args.idle ?? true;
     let state = readyState();
     while (Date.now() < deadline) {
-      const ready = state.connected && (!requireIdle || state.idle) && !state.taskLease;
+      const ready = state.connected && (!requireIdle || state.idle) && !state.taskLease && !state.maintenance;
       if (ready) return { status: 'ready', ...state };
       await sleep(Math.min(500, Math.max(50, deadline - Date.now())));
       state = readyState();
@@ -235,7 +243,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     return {
       status: 'waiting',
       retryable: true,
-      reason: state.connected ? (state.taskLease ? 'global_agent_task_lease' : 'service_busy') : 'extension_disconnected',
+      reason: state.maintenance ? 'maintenance' : state.connected ? (state.taskLease ? 'global_agent_task_lease' : 'service_busy') : 'extension_disconnected',
       suggestedDelayMs: 3000,
       nextPollTool: 'browser_wait_until_ready',
       nextPollArgs: { timeoutMs: args.timeoutMs ?? 30000, idle: requireIdle },
@@ -347,6 +355,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       if (blocked) return blocked;
     }
     // Answered locally: no queue slot, no extension round trip, no timeout path.
+    if (maintenanceState() && name !== 'browser_release_tab' && name !== 'browser_tab_lease') return maintenanceWaiting();
     if (LEASE_TOOLS.has(name)) return leaseCall(name, args, decision);
     if (!WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) leases.heartbeat(args.tabId, args.agent ?? null, name);
     if (lease && lease !== owner) {
@@ -383,12 +392,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     return result;
   }
   const tasks = createTasks({
-    acquire: id => { if (lease || current || queue.length) throw new Error('Browser is busy'); if (!extension) throw new Error('Extension not connected'); lease = id; },
+    acquire: id => { if (maintenanceState() || lease || current || queue.length) throw new Error('Browser is busy'); if (!extension) throw new Error('Extension not connected'); lease = id; },
     release: id => { if (lease === id) lease = null; }, callTool: call, modelLoader,
     notify: task => { if (extension?.readyState === WebSocket.OPEN) extension.send(JSON.stringify({ type: 'task-state', task })); }
   });
   function uiCall(name, args = {}) {
     if (name === 'agent_status') return tasks.status();
+    if (name === 'agent_start' && maintenanceState()) return maintenanceWaiting();
     if (name === 'agent_start') return tasks.start(args);
     if (name === 'agent_cancel') return tasks.cancel(args.id);
     throw new Error('Unknown agent method');
@@ -398,6 +408,23 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       if (req.headers.host !== `127.0.0.1:${server.address().port}` || req.headers.origin) return json(res, 403, { error: 'Host or Origin rejected' });
       if (!equal(req.headers.authorization, `Bearer ${config.agentToken}`)) return json(res, 401, { error: 'Authentication required' });
       if (req.method === 'GET' && req.url === '/status') return json(res, 200, status());
+      if (req.method === 'POST' && req.url === '/maintenance') {
+        if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON required' });
+        const data = await body(req);
+        maintenanceState();
+        if (data.action === 'release') {
+          if (!maintenance || !equal(data.token, maintenance.token)) return json(res, 409, { error: 'Maintenance ownership mismatch' });
+          maintenance = null;
+          return json(res, 200, { status: 'released' });
+        }
+        if (data.action !== 'acquire') throw new Error('Unknown maintenance action');
+        const ttlMs = data.ttlMs ?? 120000;
+        if (!Number.isInteger(ttlMs) || ttlMs < 1000 || ttlMs > 600000) throw new Error('ttlMs must be 1000..600000');
+        if (maintenance || current || queue.length || lease || leases.list().length) return json(res, 200, { status: 'waiting', reason: 'service_busy', retryable: true });
+        // No await between idle check and admission closure: atomic in this process.
+        maintenance = { token: randomUUID(), expiresAt: Date.now() + ttlMs };
+        return json(res, 200, { status: 'acquired', ...maintenance });
+      }
       if (req.method === 'GET' && req.url === '/tools') return json(res, 200, TOOLS);
       if (req.method === 'GET' && req.url === '/agent/status') return json(res, 200, tasks.status());
       if (req.method === 'POST' && ['/agent/start', '/agent/cancel'].includes(req.url)) {

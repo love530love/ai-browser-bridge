@@ -15,6 +15,11 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $resultPath = Join-Path $state 'last-result.json'
 $backupPath = Join-Path $state "backup-$stamp"
 $result = [ordered]@{ startedAt=(Get-Date).ToString('o'); root=$root; appliedGitUpdate=$false; reload='skipped'; reloadAttempts=0; doctor=$null; ok=$false }
+$maintenanceToken = $null
+function Invoke-Maintenance($payload) {
+  $config = Get-Content -LiteralPath (Join-Path $root '.local/config.json') -Raw | ConvertFrom-Json
+  Invoke-RestMethod -Uri "http://127.0.0.1:$($config.port)/maintenance" -Method Post -Headers @{ Authorization = "Bearer $($config.agentToken)" } -ContentType 'application/json' -Body ($payload | ConvertTo-Json -Compress) -TimeoutSec 10
+}
 
 function Invoke-BridgeDoctor {
   $out = & $node (Join-Path $root 'src\cli.js') doctor 2>&1
@@ -24,14 +29,23 @@ function Invoke-BridgeDoctor {
 function Save-Result($value) { $value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $resultPath -Encoding utf8 }
 
 try {
-  # Read before modifying dependencies or reloading: an idle observation is not
-  # a maintenance lock, so callers must also stop submitting new work.
+  # Read first, then atomically close admission on servers supporting maintenance.
   $preflight = Invoke-BridgeDoctor
   $result.preflight = $preflight
   if ($preflight.status -and ($preflight.status.active -or $preflight.status.queued -gt 0 -or $preflight.status.taskLease -or $preflight.status.tabLeases.Count -gt 0)) {
     $result.status = 'waiting'
     $result.actionRequired = 'wait-for-idle'
     throw 'Bridge has pending work or leases. Preserve agent tasks and retry upgrade after work finishes.'
+  }
+  if ($preflight.status) {
+    $gate = Invoke-Maintenance @{ action='acquire'; ttlMs=600000 }
+    if ($gate.status -ne 'acquired') {
+      $result.status = 'waiting'
+      $result.actionRequired = 'wait-for-idle'
+      throw 'Maintenance acquisition deferred; no upgrade changes applied.'
+    }
+    $maintenanceToken = $gate.token
+    $result.maintenanceExpiresAt = $gate.expiresAt
   }
   if ($ApplyGitUpdate) {
     $head = (& git -C $root rev-parse HEAD).Trim()
@@ -51,6 +65,9 @@ try {
   & $pwsh -NoProfile -File (Join-Path $root 'start.ps1') | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Bridge startup failed; extension reload was not attempted.' }
   $started = Invoke-BridgeDoctor
+  if ($maintenanceToken -and [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -ge $result.maintenanceExpiresAt) {
+    throw 'Maintenance window expired; extension reload was not attempted. Recheck tasks before continuing.'
+  }
   $deployment = $started.checks | Where-Object name -eq 'deployment-current' | Select-Object -First 1
   if ($deployment -and $deployment.serviceVersion -ne $deployment.expectedVersion) {
     $result.doctor = $started
@@ -88,6 +105,10 @@ try {
   if ($backupPath -and (Test-Path -LiteralPath $backupPath)) { $result.backup = $backupPath }
   if (-not $BestEffort) { Save-Result $result; throw }
 } finally {
+  if ($maintenanceToken) {
+    try { $null = Invoke-Maintenance @{ action='release'; token=$maintenanceToken } }
+    catch { $result.maintenanceRelease = 'not-confirmed; lock expires automatically' }
+  }
   $result.finishedAt = (Get-Date).ToString('o')
   Save-Result $result
 }
