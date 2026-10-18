@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
+Remove-Item -LiteralPath (Join-Path $projectRoot '.local/service-paused') -ErrorAction SilentlyContinue
 $nodePath = (Get-Command node.exe -ErrorAction Stop).Source
 & $nodePath (Join-Path $projectRoot 'src\cli.js') setup
 if ($LASTEXITCODE -ne 0) { throw 'Setup failed' }

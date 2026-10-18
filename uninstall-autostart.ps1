@@ -5,6 +5,8 @@
 $ErrorActionPreference = 'Stop'
 
 $root = $PSScriptRoot
+New-Item -ItemType Directory -Force -Path (Join-Path $root '.local') | Out-Null
+Set-Content -LiteralPath (Join-Path $root '.local/watchdog-disabled') -Value 'Autostart removed; supervisor exits on its next check.'
 $removed = @()
 
 # 1) Startup folder shortcut (default method).

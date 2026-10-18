@@ -4,6 +4,8 @@
 # used first as a fast path.
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+New-Item -ItemType Directory -Force -Path (Join-Path $root '.local') | Out-Null
+Set-Content -LiteralPath (Join-Path $root '.local/service-paused') -Value 'Manual stop: start.ps1 resumes service recovery.'
 $port = 19387
 $configPath = Join-Path $root '.local\config.json'
 if (Test-Path -LiteralPath $configPath) {
