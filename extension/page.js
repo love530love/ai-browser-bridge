@@ -89,7 +89,8 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const box = el.getBoundingClientRect();
     const x = box.left + box.width / 2, y = box.top + box.height / 2;
     const hit = box.width > 0 && box.height > 0 ? deepHit(Math.min(Math.max(x, 0), innerWidth - 1), Math.min(Math.max(y, 0), innerHeight - 1)) : null;
-    return { x, y, left: box.left, top: box.top, width: box.width, height: box.height, covered: !!hit && hit !== el && !el.contains(hit), hitTag: hit?.tagName?.toLowerCase() || null };
+    const inViewport = x >= 0 && y >= 0 && x < innerWidth && y < innerHeight;
+    return { x, y, left: box.left, top: box.top, width: box.width, height: box.height, covered: !inViewport || box.width <= 0 || box.height <= 0 || !hit || (hit !== el && !el.contains(hit)), hitTag: hit?.tagName?.toLowerCase() || null };
   };
   const shortSelector = el => clean([el.tagName?.toLowerCase(), el.id ? `#${el.id}` : '', el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 3).join('.') : ''].join(''));
   const overlayHint = el => {
@@ -154,7 +155,22 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const snapshot = crypto.randomUUID();
     const state = rememberState({ snapshot, url: location.href, refs: new Map() });
     const items = [];
-    for (const el of document.querySelectorAll(actionSelector)) {
+    const candidates = new Set(document.querySelectorAll(actionSelector));
+    // Portals need no special document traversal, but delegated text-only menu
+    // items are absent from semantic control selectors. Exact text is a locator,
+    // not proof that a click is meaningful; expose that distinction to callers.
+    const textCandidates = new Set();
+    if (query && !role && ['click', 'any'].includes(action)) {
+      const deadline = performance.now() + 150;
+      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
+      let node, visited = 0;
+      while ((node = walker.nextNode()) && ++visited <= 5000 && performance.now() < deadline) {
+        if (!node.matches('span,div,li') || node.children.length || sensitive(node)) continue;
+        if (clean(node.textContent).toLowerCase() !== query) continue;
+        candidates.add(node); textCandidates.add(node);
+      }
+    }
+    for (const el of candidates) {
       if (items.length >= Math.max(maxResults * 8, 80)) break;
       if (sensitive(el) || !visible(el) || !actionCompatible(el, action)) continue;
       const r = elementRole(el).toLowerCase();
@@ -169,7 +185,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const box = elementBox(el);
       if (box.covered && !includeCovered) continue;
       const score = (exact ? 100 : starts ? 80 : includes ? 60 : 0) + (box.covered ? -40 : 10) + (actionCompatible(el, action) ? 10 : 0);
-      items.push({ ref, score, covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...box });
+      items.push({ ref, score, locatorEvidence: textCandidates.has(el) ? 'exact-leaf-text; clickability-unverified' : 'semantic-control', covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...box });
     }
     return items.sort((a, b) => b.score - a.score).slice(0, maxResults);
   };
@@ -481,7 +497,12 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const steps = [];
     let recommended = 'read';
     if (close && (blocker || scan.overlays.some(o => o.areaRatio > 0.2 || o.hint))) { recommended = 'dismiss_overlay'; steps.push({ tool: 'browser_dismiss_overlay', args: { tabId: args.tabId, ref: close.close.ref, expectGoneRef: close.overlayRef }, reason: `Possible blocker ${close.overlayHint || close.overlayLabel || 'overlay'}` }); }
-    if (top && !top.covered && !top.disabled) { recommended = args.action === 'fill' ? 'fill' : args.action === 'select' ? 'pick_or_select' : args.action === 'upload' ? 'upload' : 'click'; steps.push({ tool: recommended === 'pick_or_select' ? 'browser_pick/browser_select' : `browser_${recommended}`, ref: top.ref, reason: 'Top uncovered enabled candidate' }); }
+    if (top && !top.covered && !top.disabled) {
+      if (top.locatorEvidence?.includes('clickability-unverified')) {
+        recommended = 'verify_text_target';
+        steps.push({ tool: 'browser_screenshot', args: { tabId: args.tabId }, ref: top.ref, reason: 'Exact text has a ref but no semantic control role. Verify its menu/row context and user intent before clicking; never infer success from dispatch alone.' });
+      } else { recommended = args.action === 'fill' ? 'fill' : args.action === 'select' ? 'pick_or_select' : args.action === 'upload' ? 'upload' : 'click'; steps.push({ tool: recommended === 'pick_or_select' ? 'browser_pick/browser_select' : `browser_${recommended}`, ref: top.ref, reason: 'Top uncovered enabled candidate' }); }
+    }
     if (!top && scan.scrollContainers.length) { recommended = 'scroll_element'; steps.push({ tool: 'browser_scroll_element', args: { tabId: args.tabId, ref: scan.scrollContainers[0].ref, deltaY: 600 }, reason: 'No visible candidate; page has scrollable containers' }); }
     if (!top) {
       recommended = 'inspect_widget';
