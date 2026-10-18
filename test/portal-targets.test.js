@@ -39,4 +39,15 @@ test('plain portal text receives a ref; covered clones and zero geometry stay ex
   assert.equal((await find('零尺寸')).candidates.length, 0);
   assert.equal((await find('屏外')).candidates.length, 0);
   assert.equal((await find('不存在')).candidates.length, 0);
+  const rowA = { innerText: 'instance-A running', matches: () => false, closest: () => null };
+  const rowB = { innerText: 'instance-B running', matches: () => false, closest: () => null };
+  clone.closest = selector => selector.startsWith('tr,') ? rowA : null;
+  top.closest = selector => selector.startsWith('tr,') ? rowB : null;
+  top.isConnected = true;
+  const scoped = rowText => run('browser_find_element', { query: '选择实例', action: 'click', rowText }, [], true);
+  assert.equal((await scoped('instance-A')).candidates.length, 0, 'must not substitute a foreground checkbox from another row');
+  const target = (await scoped('instance-B')).candidates[0];
+  assert.equal(target.rowText, 'instance-B running');
+  rowB.innerText = 'instance-C running';
+  assert.match((await run('browser_click', { ref: target.ref }, [], true)).__aibError, /Stale row reference/);
 });

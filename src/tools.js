@@ -54,6 +54,7 @@ export const TOOLS = [
   tool('browser_find_element', 'Find actionable elements by label/text/role/placeholder/nearby text and return ranked refs with geometry and covered state. Read-only; use before choosing click/fill/select/upload.', {
     tabId,
     query: text(1000),
+    rowText: { type: 'string', minLength: 1, maxLength: 240, description: 'Require this text in the nearest table/ARIA row. Does not infer identities across detached fixed-column copies.' },
     role: { type: 'string', maxLength: 80 },
     action: { type: 'string', enum: ['click', 'fill', 'select', 'upload', 'any'] },
     maxResults: { type: 'integer', minimum: 1, maximum: 50 },
@@ -64,6 +65,7 @@ export const TOOLS = [
     tabId,
     goal: text(2000),
     query: text(1000),
+    rowText: { type: 'string', minLength: 1, maxLength: 240 },
     action: { type: 'string', enum: ['click', 'fill', 'select', 'upload', 'read', 'any'] },
     role: { type: 'string', maxLength: 80 },
     agent,

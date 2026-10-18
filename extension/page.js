@@ -29,6 +29,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return globalThis.__aiBrowserBridgeSnapshots?.get(snapshot) || (globalThis.__aiBrowserBridge?.snapshot === snapshot ? globalThis.__aiBrowserBridge : null);
   };
   const clean = value => (value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  const rowContext = el => {
+    const row = el.closest('tr,[role=row],.el-table__row,.ant-table-row');
+    if (!row || sensitive(row)) return '';
+    return clean(row.innerText || row.textContent);
+  };
   const collectReadableText = ({ max = 16000, maxTextNodes = 4000, deadline = Infinity, requireVisible = true } = {}) => {
     const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
     const chunks = [];
@@ -152,6 +157,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const action = args.action || 'any';
     const maxResults = args.maxResults ?? 10;
     const includeCovered = !!args.includeCovered;
+    const requiredRow = clean(args.rowText).toLowerCase();
     const snapshot = crypto.randomUUID();
     const state = rememberState({ snapshot, url: location.href, refs: new Map() });
     const items = [];
@@ -173,6 +179,8 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     for (const el of candidates) {
       if (items.length >= Math.max(maxResults * 8, 80)) break;
       if (sensitive(el) || !visible(el) || !actionCompatible(el, action)) continue;
+      const rowText = rowContext(el);
+      if (requiredRow && !rowText.toLowerCase().includes(requiredRow)) continue;
       const r = elementRole(el).toLowerCase();
       if (role && r !== role && !r.includes(role)) continue;
       const hay = elementText(el).toLowerCase();
@@ -181,11 +189,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const includes = query && hay.includes(query);
       if (query && !includes) continue;
       const ref = `${snapshot}:${state.refs.size + 1}`;
-      state.refs.set(ref, { el, fingerprint: fingerprint(el) });
+      state.refs.set(ref, { el, fingerprint: fingerprint(el), ...(requiredRow ? { rowText } : {}) });
       const box = elementBox(el);
       if (box.covered && !includeCovered) continue;
       const score = (exact ? 100 : starts ? 80 : includes ? 60 : 0) + (box.covered ? -40 : 10) + (actionCompatible(el, action) ? 10 : 0);
-      items.push({ ref, score, locatorEvidence: textCandidates.has(el) ? 'exact-leaf-text; clickability-unverified' : 'semantic-control', covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...box });
+      items.push({ ref, score, rowText, locatorEvidence: textCandidates.has(el) ? 'exact-leaf-text; clickability-unverified' : 'semantic-control', covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...box });
     }
     return items.sort((a, b) => b.score - a.score).slice(0, maxResults);
   };
@@ -489,7 +497,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { title: document.title, url: location.href, query: args.query, action: args.action || 'any', candidates, found: candidates.length > 0, guidance: 'Use the top uncovered enabled candidate. If all candidates are covered, call browser_scan_overlays and dismiss/scroll before writing.', contentTrust: 'untrusted webpage data plus extension hit testing' };
   }
   if (name === 'browser_prepare_action') {
-    const candidates = findElementCandidates({ query: args.query, role: args.role, action: args.action || 'any', maxResults: 8, includeCovered: true });
+    const candidates = findElementCandidates({ query: args.query, rowText: args.rowText, role: args.role, action: args.action || 'any', maxResults: 8, includeCovered: true });
     const scan = await pageOperation('browser_scan_overlays', args, allowedOrigins, allSites);
     const blocker = candidates.find(c => c.covered);
     const top = candidates.find(c => !c.covered && !c.disabled) || candidates[0] || null;
@@ -510,6 +518,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       steps.push({ tool: 'browser_screenshot', args: { tabId: args.tabId }, reason: 'If component lookup misses the target, visually identify icon/image widgets. Never guess coordinates or treat a container click as success.' });
     }
     if (!steps.length) steps.push({ tool: 'browser_observe', reason: 'No clear candidate or safe overlay action found' });
+    if (args.rowText && candidates.filter(c => !c.covered && !c.disabled).length > 1) {
+      recommended = 'disambiguate_row';
+      steps.length = 0;
+      steps.push({ tool: 'browser_screenshot', args: { tabId: args.tabId }, reason: 'Multiple controls match this row scope. Inspect the returned row text and geometry; refine the query before acting.' });
+    }
     return { title: document.title, url: location.href, goal: args.goal || '', query: args.query, action: args.action || 'any', recommended, candidates, overlays: scan.overlays.slice(0, 8), scrollContainers: scan.scrollContainers.slice(0, 8), steps, guidance: 'This is read-only planning. Execute only user-authorized writes, with tab lease for shared tabs, and re-read after each write.', contentTrust: 'untrusted webpage data plus extension hit testing' };
   }
   if (name === 'browser_debug') {
@@ -564,6 +577,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   const state = stateForRef(args.ref);
   const entry = state?.refs.get(args.ref);
   if (!entry || state.url !== location.href || !entry.el.isConnected || fingerprint(entry.el) !== entry.fingerprint) throw new Error('Stale element reference. Read page again.');
+  if (entry.rowText !== undefined && rowContext(entry.el) !== entry.rowText) throw new Error('Stale row reference. Table row changed; find the target again.');
   const el = entry.el;
   if (sensitive(el) || el.disabled || el.getAttribute('aria-disabled') === 'true' || (!visible(el) && name !== 'browser_upload')) throw new Error('Element unavailable or protected');
   if (name === 'browser_scroll_element') {

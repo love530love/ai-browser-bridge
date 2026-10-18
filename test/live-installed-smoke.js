@@ -19,6 +19,14 @@ const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>自
 const widgetScript = `<script>
 const host=document.createElement('test-chat');document.body.prepend(host);
 const root=host.attachShadow({mode:'open'});
+const table=document.createElement('table');
+table.innerHTML='<tr><td>fixture-instance-A</td><td><input type="checkbox" aria-label="Select fixture instance"></td></tr><tr><td>fixture-instance-B</td><td><input type="checkbox" aria-label="Select fixture instance"></td></tr>';
+document.body.prepend(table);
+table.onchange=e=>document.getElementById('reply').textContent='Row selected: '+e.target.closest('tr').innerText;
+const portal=document.createElement('div');
+portal.innerHTML='<span>Fixture portal action</span>';
+portal.onclick=e=>{if(e.target.tagName==='SPAN')document.getElementById('reply').textContent='Portal action confirmed'};
+document.body.prepend(portal);
 root.innerHTML='<input aria-label="Widget message"><button>Widget send</button><button>Widget block</button>';
 root.querySelector('button').onclick=()=>document.getElementById('reply').textContent='Widget reply: '+root.querySelector('input').value;
 root.querySelectorAll('button')[1].onclick=()=>{const mask=document.createElement('div');mask.style='position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.01)';document.body.append(mask)};
@@ -102,6 +110,17 @@ try {
   await call('browser_click', { tabId, ref: control('Widget send').ref });
   await readReady(firstUrl, 'Widget reply: shadow roundtrip');
   mark('shadow input fill, shadow button click and response readback');
+  if (process.env.AIB_TEST_PORTAL_TARGETS === '1') {
+    const found = await call('browser_find_element', { tabId, query: 'Fixture portal action', action: 'click' });
+    assert.equal(found.candidates.length, 1);
+    await call('browser_click', { tabId, ref: found.candidates[0].ref });
+    await readReady(firstUrl, 'Portal action confirmed');
+    const row = await call('browser_find_element', { tabId, query: 'Select fixture instance', rowText: 'fixture-instance-B', action: 'click' });
+    assert.equal(row.candidates.length, 1);
+    await call('browser_click', { tabId, ref: row.candidates[0].ref });
+    await readReady(firstUrl, 'Row selected: fixture-instance-B');
+    mark('portal delegated click and row-scoped checkbox readback');
+  }
   await call('browser_click', { tabId, ref: control('Widget block').ref });
   await assert.rejects(call('browser_click', { tabId, ref: control('Widget send').ref }), /covered/i);
   mark('transparent overlay prevents shadow click rather than dispatching blindly');

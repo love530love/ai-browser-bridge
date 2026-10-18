@@ -6,4 +6,8 @@
 
 固定列重复控件按真实命中分别筛选，覆盖副本、零尺寸或屏外控件不能伪装成可点击控件。不会跨行转移引用，不会强制点穿遮罩。若多行复选框没有可区分名称，仍需核对目标行和截图；当前没有通用的固定列语义映射算法。
 
+`browser_find_element` 和 `browser_prepare_action` 支持 `rowText`，按最近的 tr、ARIA row 或常见表格行文本过滤。例如 `{query:"选择", rowText:"实例名称", action:"click"}`。返回候选附带行文本；多候选时 planner 要求消歧。通过 rowText 生成的 ref 在使用时重新验证行文本，虚拟表格复用节点或行变化会使引用失效。行文本最多取 240 字符，不映射缺乏行信息的独立固定列副本。
+
+安装新版后，可设置 `$env:AIB_TEST_PORTAL_TARGETS='1'` 再执行 `node test/live-installed-smoke.js`，在本地测试标签验证委托事件的 portal 文本点击和第二行复选框回读。该用例不会访问真实实例或执行关机；本次只新增场景，尚未执行新版 Chrome 验收。
+
 测试：`node --test test/portal-targets.test.js test/version.test.js` 通过，覆盖纯文本引用、前景/覆盖副本、零尺寸、屏外和缺失目标。此为模拟 DOM 回归，不等于 HiDevLab 实际页面验收。扩展需要加载 0.5.16 后才使用新代码；没有执行实际关机。
