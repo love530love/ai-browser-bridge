@@ -11,6 +11,7 @@ test('Windows upgrade preserves active work and records waiting even in best-eff
     mkdirSync(join(root, 'scripts'));
     mkdirSync(join(root, 'src'));
     copyFileSync(new URL('../scripts/upgrade.ps1', import.meta.url), join(root, 'scripts', 'upgrade.ps1'));
+    copyFileSync(new URL('../scripts/bounded-process.ps1', import.meta.url), join(root, 'scripts', 'bounded-process.ps1'));
     for (const status of [{ active: { id: 'inflight' } }, { queued: 1 }, { taskLease: 'agent-a' }, { tabLeases: [{ owner: 'agent-a' }] }]) {
       writeFileSync(join(root, 'src', 'cli.js'), `console.log(${JSON.stringify(JSON.stringify({ ok: true, status }))});`);
       const run = spawnSync('pwsh.exe', ['-NoProfile', '-File', join(root, 'scripts', 'upgrade.ps1'), '-BestEffort', '-SkipReload'], { encoding: 'utf8', timeout: 20000 });

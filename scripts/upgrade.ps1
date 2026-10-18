@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
+. (Join-Path $PSScriptRoot 'bounded-process.ps1')
 $state = Join-Path $root '.local\upgrade'
 New-Item -ItemType Directory -Force -Path $state | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -60,8 +61,10 @@ try {
     $result.previousHead = $head
   }
 
-  Push-Location $root
-  try { & npm ci --ignore-scripts; if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' } } finally { Pop-Location }
+  if ($maintenanceToken -and [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 300000 -ge $result.maintenanceExpiresAt) {
+    throw 'Not enough maintenance time remains to install dependencies safely; retry upgrade in a new window.'
+  }
+  Invoke-BoundedProcess -FilePath $pwsh -ArgumentList @('-NoProfile', '-Command', '& npm ci --ignore-scripts; exit $LASTEXITCODE') -WorkingDirectory $root -TimeoutSec 240
   & $pwsh -NoProfile -File (Join-Path $root 'start.ps1') | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Bridge startup failed; extension reload was not attempted.' }
   $started = Invoke-BridgeDoctor

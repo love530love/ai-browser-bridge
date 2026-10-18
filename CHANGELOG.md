@@ -10,8 +10,11 @@
 
 # Unreleased
 
+- 2026-10-18：维护锁同步持久化，重启保留持有状态；损坏状态拒绝启动，写入失败不确认取得。
+- 依赖安装增加 4 分钟超时及本次子进程树终止，维护窗口不足时不开始安装；依赖自动回滚仍未实现。
+
 - 新增本机认证维护锁接口与 CLI；空闲时原子关闭新请求入口，等待响应明确未派发，持有令牌释放及自动到期恢复。
-- 升级脚本取得维护锁后执行，退出释放；旧服务不支持接口时停止。保护不跨服务重启，长时间依赖安装回滚仍待完善。
+- 升级脚本取得维护锁后执行，退出释放；旧服务不支持接口时停止。维护锁现可跨服务重启恢复，长时间依赖安装回滚仍待完善。
 
 - Shadow DOM inventory exposes actionable snapshot refs; pointer checks descend open roots.
 - Reload verification uses authenticated configured service and exact target version; failed attempts return nonzero.

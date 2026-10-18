@@ -12,6 +12,7 @@ import { errorCategory } from './diagnostics.js';
 import { createLeaseStore, LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
 import { createAgentPolicy } from './policy.js';
 import { protectedUiPlan } from './protected-ui.js';
+import { createMaintenanceStore } from './maintenance.js';
 
 function equal(a, b) {
   return typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -52,7 +53,7 @@ function withContentBoundaries(result) {
   }
   return next;
 }
-export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), requireAgentIdentity = false } = {}) {
+export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false } = {}) {
   config = { ...config, uploadRoots: config.uploadRoots ?? [] };
   let extension = null;
   let current = null;
@@ -61,11 +62,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let stopped = false;
   let lease = null;
   let extensionVersion = null;
-  let maintenance = null;
-  const maintenanceState = () => {
-    if (maintenance && maintenance.expiresAt <= Date.now()) maintenance = null;
-    return maintenance ? { expiresAt: maintenance.expiresAt } : null;
-  };
+  const maintenance = createMaintenanceStore({ file: maintenanceStateFile });
+  const maintenanceState = maintenance.status;
   const maintenanceWaiting = () => ({ status: 'waiting', reason: 'maintenance', retryable: true, dispatched: false, suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000 }, recommendedNextAction: 'Preserve the task and wait for maintenance to finish. No browser action was dispatched.' });
   const queue = [];
   const clients = new Set();
@@ -413,17 +411,16 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         const data = await body(req);
         maintenanceState();
         if (data.action === 'release') {
-          if (!maintenance || !equal(data.token, maintenance.token)) return json(res, 409, { error: 'Maintenance ownership mismatch' });
-          maintenance = null;
+          if (!maintenance.release(data.token)) return json(res, 409, { error: 'Maintenance ownership mismatch' });
           return json(res, 200, { status: 'released' });
         }
         if (data.action !== 'acquire') throw new Error('Unknown maintenance action');
         const ttlMs = data.ttlMs ?? 120000;
         if (!Number.isInteger(ttlMs) || ttlMs < 1000 || ttlMs > 600000) throw new Error('ttlMs must be 1000..600000');
-        if (maintenance || current || queue.length || lease || leases.list().length) return json(res, 200, { status: 'waiting', reason: 'service_busy', retryable: true });
+        if (maintenanceState() || current || queue.length || lease || leases.list().length) return json(res, 200, { status: 'waiting', reason: 'service_busy', retryable: true });
         // No await between idle check and admission closure: atomic in this process.
-        maintenance = { token: randomUUID(), expiresAt: Date.now() + ttlMs };
-        return json(res, 200, { status: 'acquired', ...maintenance });
+        const acquired = maintenance.acquire(ttlMs);
+        return json(res, 200, { status: 'acquired', ...acquired });
       }
       if (req.method === 'GET' && req.url === '/tools') return json(res, 200, TOOLS);
       if (req.method === 'GET' && req.url === '/agent/status') return json(res, 200, tasks.status());
@@ -511,7 +508,7 @@ function appendAuditLog(row) {
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const config = loadConfig();
-  const bridge = createBridge(config, { audit: appendAuditLog });
+  const bridge = createBridge(config, { audit: appendAuditLog, maintenanceStateFile: join(stateDir, 'maintenance.json') });
   await bridge.listen();
   console.log(`AI Browser Bridge listening on 127.0.0.1:${config.port}`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => bridge.close().then(() => process.exit(0)));
