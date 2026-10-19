@@ -1,2 +1,2 @@
 @echo off
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -Command "& '%~dp0agent.ps1' doctor"
+pwsh.exe -NoProfile -File "%~dp0agent.ps1" -Action doctor
