@@ -3,7 +3,7 @@
 import http from 'node:http';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -11,9 +11,11 @@ import { ROOT } from '../src/config.js';
 import { request } from '../src/client.js';
 import { TOOLS } from '../src/tools.js';
 
-const output = join(ROOT, 'output', 'live-installed');
+const outputRoot = join(ROOT, 'output', 'live-installed');
+const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
+const output = join(outputRoot, 'runs', runId);
 mkdirSync(output, { recursive: true });
-const report = { time: new Date().toISOString(), environment: 'currently connected user Chrome extension', checks: [], completed: false };
+const report = { time: new Date().toISOString(), runId, artifactsDirectory: output, environment: 'currently connected user Chrome extension', checks: [], completed: false };
 const mark = name => { report.checks.push(name); console.log(`PASS ${name}`); };
 const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>自主浏览器 · 实际安装验收</title><style>body{margin:60px;font:20px 'Microsoft YaHei',sans-serif;background:#11221e;color:#d9f5e8}h1{color:#9fe3c5}input,button{padding:14px;font:inherit}#upload{display:none}#reply{margin-top:24px;padding:20px;background:#254137;border-radius:10px}</style><h1>自主浏览器 · 实际安装验收</h1><p>本页仅用于本机测试，不发送消息到外部服务。</p><label for="draft">测试消息</label><input id="draft"><button id="send">本地回显</button><label for="upload">测试文件</label><input id="upload" type="file" accept=".zip"><p id="reply">等待测试</p><div style="height:1200px"></div><script>document.getElementById('send').onclick=()=>{document.getElementById('reply').textContent='测试成功：'+document.getElementById('draft').value};document.getElementById('upload').onchange=e=>{const f=e.target.files[0];document.getElementById('reply').textContent='文件选择成功：'+f.name+':'+f.size}</script></html>`;
 const widgetScript = `<script>
@@ -31,7 +33,10 @@ root.innerHTML='<input aria-label="Widget message"><button>Widget send</button><
 root.querySelector('button').onclick=()=>document.getElementById('reply').textContent='Widget reply: '+root.querySelector('input').value;
 root.querySelectorAll('button')[1].onclick=()=>{const mask=document.createElement('div');mask.style='position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.01)';document.body.append(mask)};
 </script>`;
-const fixture = () => http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(html + widgetScript); });
+const forcedOverlay = process.env.AIB_TEST_FORCE_OVERLAY === '1'
+  ? '<div id="fixture-forced-overlay" style="position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.01)"></div>' : '';
+report.faultInjection = forcedOverlay ? 'transparent-overlay-on-local-fixture' : null;
+const fixture = () => http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(html + widgetScript + forcedOverlay); });
 const first = fixture(), second = fixture();
 for (const server of [first, second]) await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const firstUrl = `http://127.0.0.1:${first.address().port}/live-check`;
@@ -57,6 +62,7 @@ async function readReady(url, expectedText) {
 }
 try {
   const status = await request('/status');
+  report.versions = { service: status.version, extension: status.extensionVersion };
   assert.equal(status.connected, true); mark('installed extension connected to local bridge');
   client = new Client({ name: 'installed-extension-smoke', version: '1.0' });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')] }));
@@ -127,6 +133,18 @@ try {
   report.completed = true;
 } catch (error) {
   report.error = error.message; console.error(`FAIL ${error.message}`); process.exitCode = 1;
+  if (tabId && client) {
+    // Collect only read-only evidence from our fixture before closing it.
+    report.failureDiagnostics = {};
+    for (const name of ['browser_observe', 'browser_scan_overlays']) {
+      try { report.failureDiagnostics[name] = await call(name, { tabId }); }
+      catch (diagnosticError) { report.failureDiagnostics[name] = { error: diagnosticError.message }; }
+    }
+    try {
+      const shot = await call('browser_screenshot', { tabId });
+      if (shot.type === 'image' && shot.data) writeFileSync(join(output, 'failure.png'), Buffer.from(shot.data, 'base64'));
+    } catch (diagnosticError) { report.failureDiagnostics.screenshot = { error: diagnosticError.message }; }
+  }
 } finally {
   if (tabId && client) {
     try { await call('browser_close', { tabId }); mark('closed only the tab created for this test'); }
@@ -135,5 +153,6 @@ try {
   await client?.close();
   for (const server of [first, second]) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
   writeFileSync(join(output, 'report.json'), JSON.stringify(report, null, 2));
-  console.log(`Report saved: output/live-installed/report.json; completed=${report.completed}`);
+  writeFileSync(join(outputRoot, 'report.json'), JSON.stringify(report, null, 2));
+  console.log(`Report saved: ${join(output, 'report.json')}; completed=${report.completed}`);
 }

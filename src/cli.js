@@ -4,6 +4,7 @@ import { configPath, loadConfig, ROOT, stateDir } from './config.js';
 import { request } from './client.js';
 import { callWithWaitingRecovery } from './auto-recovery.js';
 import { createAgentPolicy } from './policy.js';
+import { regressionSummary } from './regression-summary.js';
 
 async function rawToolCall(name, args) {
   return await request('/call', { name, arguments: args });
@@ -74,7 +75,10 @@ function upgradeDiagnosis() {
   if (counts.ELEMENT_COVERED) report.recommendations.push('Run browser_scan_overlays and browser_shadow_tree, then re-observe. Prefer semantic refs; use a screenshot/desktop fallback only after the target is verified.');
   if (counts.UNCAUGHT_ERROR || counts.UNHANDLED_REJECTION) report.recommendations.push('Reload the unpacked extension once, run doctor, and inspect the extension service-worker errors before resuming queued work.');
   if (errors.length && report.recommendations.length === 0) report.recommendations.push('Review recentErrors, run doctor, and retry only idempotent reads after readiness is confirmed.');
-  report.status = errors.length ? 'attention' : 'ready';
+  report.regressions = regressionSummary(join(ROOT, 'output', 'live-installed', 'runs'));
+  if (report.regressions.unexpectedFailures) report.recommendations.push('Review preserved local regression runs before upgrading. Injected fault runs are counted separately; do not replay failed writes.');
+  if (report.regressions.unreadable) report.recommendations.push('Some regression reports were missing, malformed or too large to summarize; inspect them locally.');
+  report.status = errors.length || report.regressions.unexpectedFailures || report.regressions.unreadable ? 'attention' : 'ready';
   writeFileSync(join(stateDir, 'upgrade-analysis.json'), JSON.stringify(report, null, 2), { encoding: 'utf8' });
   return report;
 }

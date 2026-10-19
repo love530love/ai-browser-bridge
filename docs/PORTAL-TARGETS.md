@@ -14,4 +14,10 @@
 
 2026-10-19 全量 `npm test` 为 86/86 通过。后续已部署服务与扩展 0.5.16，开启 `AIB_TEST_PORTAL_TARGETS=1` 的实际 Chrome 回归完整通过：portal 委托点击、第二行复选框回读、Shadow DOM 操作与透明遮罩保护。报告在 `output/live-installed/report.json`。首次测试因维护锁等待超过 MCP 请求时限而失败，释放本次锁后重新执行通过。HiDevLab 实际页面尚未验收，未执行关机。
 
+后续一次回归在本地回显按钮处遇到遮挡，再次执行同一测试完整通过，尚未确认偶发遮挡的根因。现加入失败后的 observe、overlay scan 和截图采集，只针对测试标签，不自动重放失败点击。每次结果保存到 `output/live-installed/runs/<runId>/`，包含运行版本和独立截图；根目录 report.json 仅作为最新结果索引，不再覆盖各次运行的证据。
+
+故障采集验证：设置 `AIB_TEST_FORCE_OVERLAY=1` 会仅在本地测试页添加透明遮罩，预期测试以非零退出并保存诊断，不能当作普通通过。已验证它产生 covered 错误、observe/overlay 记录和 failure.png；取消该变量后正常回归再次通过。
+
+`node src/cli.js diagnose-upgrade` 会汇总最近 20 个独立运行目录，加入 regressions 字段，分别统计通过、非预期失败、故障注入、不可读记录。只输出类别统计，不复制页面内容、截图或原始错误；原始报告留在本机。汇总不是自动修复，也不能证明安全软件告警为误报。
+
 测试：`node --test test/portal-targets.test.js test/version.test.js` 通过，覆盖纯文本引用、前景/覆盖副本、零尺寸、屏外和缺失目标。此为模拟 DOM 回归，不等于 HiDevLab 实际页面验收。扩展需要加载 0.5.16 后才使用新代码；没有执行实际关机。
