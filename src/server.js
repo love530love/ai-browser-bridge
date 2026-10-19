@@ -13,6 +13,7 @@ import { createLeaseStore, LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
 import { createAgentPolicy } from './policy.js';
 import { protectedUiPlan } from './protected-ui.js';
 import { createMaintenanceStore } from './maintenance.js';
+import { failureHelp } from './failure-help.js';
 
 function equal(a, b) {
   return typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -345,6 +346,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       audit({ time: new Date().toISOString(), id: randomUUID(), tool: name, tabId: args.tabId ?? null, agent: decision.agent ?? null, outcome: 'denied', errorCategory: decision.reason, durationMs: 0 });
       return decision;
     }
+    if (name === 'browser_failure_help') return failureHelp(args, { readOnly: TOOLS.find(item => item.name === args.attemptedAction)?.annotations?.readOnlyHint === true });
     // The on-device model gate is answered here too: a write that has not been
     // judged never reaches the queue, so a blocked agent cannot burn slots
     // retrying a call that will always be refused.
