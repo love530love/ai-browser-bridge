@@ -72,11 +72,12 @@ try {
     throw 'Maintenance window expired; extension reload was not attempted. Recheck tasks before continuing.'
   }
   $deployment = $started.checks | Where-Object name -eq 'deployment-current' | Select-Object -First 1
-  if ($deployment -and $deployment.serviceVersion -ne $deployment.expectedVersion) {
+  $build = $started.checks | Where-Object name -eq 'service-build-current' | Select-Object -First 1
+  if (($deployment -and $deployment.serviceVersion -ne $deployment.expectedVersion) -or ($build -and -not $build.ok)) {
     $result.doctor = $started
     $result.status = 'waiting'
     $result.actionRequired = 'restart-service-when-idle'
-    throw 'Existing service is running old code. Restart it during an idle maintenance window, then rerun upgrade.'
+    throw 'Existing service version or source identity is stale/unverified. Restart it during an idle maintenance window, then rerun upgrade.'
   }
   if (-not $SkipReload) {
     for ($attempt = 1; $attempt -le 2; $attempt++) {

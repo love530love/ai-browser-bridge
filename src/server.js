@@ -14,6 +14,7 @@ import { createAgentPolicy } from './policy.js';
 import { protectedUiPlan } from './protected-ui.js';
 import { createMaintenanceStore } from './maintenance.js';
 import { failureHelp } from './failure-help.js';
+import { BUILD_ID } from './build-identity.js';
 
 function equal(a, b) {
   return typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -192,6 +193,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const queueSnapshot = () => ({
     service: 'ai-browser-bridge',
     version: VERSION,
+    buildId: BUILD_ID,
     extensionVersion,
     maintenance: maintenanceState(),
     tabLeases: leases.list(),

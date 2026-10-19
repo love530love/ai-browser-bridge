@@ -5,6 +5,7 @@ import { request } from './client.js';
 import { callWithWaitingRecovery } from './auto-recovery.js';
 import { createAgentPolicy } from './policy.js';
 import { regressionSummary } from './regression-summary.js';
+import { computeBuildIdentity } from './build-identity.js';
 
 async function rawToolCall(name, args) {
   return await request('/call', { name, arguments: args });
@@ -27,6 +28,9 @@ async function doctor() {
     report.status = status;
     const expectedVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
     const manifestVersion = JSON.parse(readFileSync(join(ROOT, 'extension', 'manifest.json'), 'utf8')).version;
+    const expectedBuildId = computeBuildIdentity(ROOT);
+    add('service-build-current', status.buildId === expectedBuildId, { expectedBuildId, runningBuildId: status.buildId ?? null });
+    if (status.buildId !== expectedBuildId) report.recommendations.push('Service source identity differs or is unavailable. Arrange an idle service restart and verify again; matching version numbers alone do not prove current code is loaded.');
     add('deployment-current', status.version === expectedVersion && status.extensionVersion === manifestVersion && expectedVersion === manifestVersion,
       { expectedVersion, manifestVersion, serviceVersion: status.version, extensionVersion: status.extensionVersion ?? null });
     if (status.version !== expectedVersion) report.recommendations.push(`Running service differs from disk version ${expectedVersion}; restart the service when idle.`);
