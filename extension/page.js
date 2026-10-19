@@ -161,6 +161,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const snapshot = crypto.randomUUID();
     const state = rememberState({ snapshot, url: location.href, refs: new Map() });
     const items = [];
+    const diagnostics = { textNodesVisited: 0, controlCandidatesVisited: 0, textScanPartial: false, controlScanPartial: false };
     const candidates = new Set(document.querySelectorAll(actionSelector));
     // Portals need no special document traversal, but delegated text-only menu
     // items are absent from semantic control selectors. Exact text is a locator,
@@ -169,15 +170,19 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (query && !role && ['click', 'any'].includes(action)) {
       const deadline = performance.now() + 150;
       const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
-      let node, visited = 0;
-      while ((node = walker.nextNode()) && ++visited <= 5000 && performance.now() < deadline) {
+      let node;
+      while ((node = walker.nextNode())) {
+        if (diagnostics.textNodesVisited >= 5000 || performance.now() >= deadline) { diagnostics.textScanPartial = true; break; }
+        diagnostics.textNodesVisited++;
         if (!node.matches('span,div,li') || node.children.length || sensitive(node)) continue;
         if (clean(node.textContent).toLowerCase() !== query) continue;
         candidates.add(node); textCandidates.add(node);
       }
     }
+    const controlDeadline = performance.now() + 250;
     for (const el of candidates) {
-      if (items.length >= Math.max(maxResults * 8, 80)) break;
+      if (items.length >= Math.max(maxResults * 8, 80) || diagnostics.controlCandidatesVisited >= 5000 || performance.now() >= controlDeadline) { diagnostics.controlScanPartial = true; break; }
+      diagnostics.controlCandidatesVisited++;
       if (sensitive(el) || !visible(el) || !actionCompatible(el, action)) continue;
       const rowText = rowContext(el);
       if (requiredRow && !rowText.toLowerCase().includes(requiredRow)) continue;
@@ -195,7 +200,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const score = (exact ? 100 : starts ? 80 : includes ? 60 : 0) + (box.covered ? -40 : 10) + (actionCompatible(el, action) ? 10 : 0);
       items.push({ ref, score, rowText, locatorEvidence: textCandidates.has(el) ? 'exact-leaf-text; clickability-unverified' : 'semantic-control', covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...box });
     }
-    return items.sort((a, b) => b.score - a.score).slice(0, maxResults);
+    return { candidates: items.sort((a, b) => b.score - a.score).slice(0, maxResults), partial: diagnostics.textScanPartial || diagnostics.controlScanPartial, diagnostics };
   };
   const elementSummary = (el, extra = {}) => ({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: clean(label(el) || el.textContent), selector: shortSelector(el), ...elementBox(el), ...extra });
   const waitGone = async (ref, timeoutMs = 3000) => {
@@ -493,11 +498,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { title: document.title, url: location.href, viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY }, overlays: overlays.slice(0, 50), scrollContainers, hitTest, guidance: 'Use closeCandidates refs with browser_dismiss_overlay only when label/hint clearly identifies a blocker. Use scrollContainers refs with browser_scroll_element for nested panes.', contentTrust: 'untrusted webpage data plus extension hit testing' };
   }
   if (name === 'browser_find_element') {
-    const candidates = findElementCandidates(args);
-    return { title: document.title, url: location.href, query: args.query, action: args.action || 'any', candidates, found: candidates.length > 0, guidance: 'Use the top uncovered enabled candidate. If all candidates are covered, call browser_scan_overlays and dismiss/scroll before writing.', contentTrust: 'untrusted webpage data plus extension hit testing' };
+    const { candidates, partial, diagnostics } = findElementCandidates(args);
+    return { title: document.title, url: location.href, query: args.query, action: args.action || 'any', partial, diagnostics, searchStatus: partial ? 'partial' : 'complete', candidates, found: candidates.length > 0, guidance: partial ? 'Search is incomplete. Do not infer that the target is absent or unique; inspect a screenshot and refine the scope.' : 'Verify the intended target and row before using an uncovered enabled candidate. If covered, inspect overlays before writing.', contentTrust: 'untrusted webpage data plus extension hit testing' };
   }
   if (name === 'browser_prepare_action') {
-    const candidates = findElementCandidates({ query: args.query, rowText: args.rowText, role: args.role, action: args.action || 'any', maxResults: 8, includeCovered: true });
+    const { candidates, partial, diagnostics } = findElementCandidates({ query: args.query, rowText: args.rowText, role: args.role, action: args.action || 'any', maxResults: 8, includeCovered: true });
     const scan = await pageOperation('browser_scan_overlays', args, allowedOrigins, allSites);
     const blocker = candidates.find(c => c.covered);
     const top = candidates.find(c => !c.covered && !c.disabled) || candidates[0] || null;
@@ -518,12 +523,17 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       steps.push({ tool: 'browser_screenshot', args: { tabId: args.tabId }, reason: 'If component lookup misses the target, visually identify icon/image widgets. Never guess coordinates or treat a container click as success.' });
     }
     if (!steps.length) steps.push({ tool: 'browser_observe', reason: 'No clear candidate or safe overlay action found' });
+    if (partial) {
+      recommended = 'inspect_partial_search';
+      steps.length = 0;
+      steps.push({ tool: 'browser_screenshot', args: { tabId: args.tabId }, reason: 'Search budget reached; candidates may be incomplete. Do not infer absence or uniqueness. Inspect the visible target before acting.' });
+    }
     if (args.rowText && candidates.filter(c => !c.covered && !c.disabled).length > 1) {
       recommended = 'disambiguate_row';
       steps.length = 0;
       steps.push({ tool: 'browser_screenshot', args: { tabId: args.tabId }, reason: 'Multiple controls match this row scope. Inspect the returned row text and geometry; refine the query before acting.' });
     }
-    return { title: document.title, url: location.href, goal: args.goal || '', query: args.query, action: args.action || 'any', recommended, candidates, overlays: scan.overlays.slice(0, 8), scrollContainers: scan.scrollContainers.slice(0, 8), steps, guidance: 'This is read-only planning. Execute only user-authorized writes, with tab lease for shared tabs, and re-read after each write.', contentTrust: 'untrusted webpage data plus extension hit testing' };
+    return { title: document.title, url: location.href, goal: args.goal || '', query: args.query, action: args.action || 'any', recommended, partial, diagnostics, candidates, overlays: scan.overlays.slice(0, 8), scrollContainers: scan.scrollContainers.slice(0, 8), steps, guidance: 'This is read-only planning. Execute only user-authorized writes, with tab lease for shared tabs, and re-read after each write.', contentTrust: 'untrusted webpage data plus extension hit testing' };
   }
   if (name === 'browser_debug') {
     const describe = el => !el ? null : ({

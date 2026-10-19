@@ -50,4 +50,15 @@ test('plain portal text receives a ref; covered clones and zero geometry stay ex
   assert.equal(target.rowText, 'instance-B running');
   rowB.innerText = 'instance-C running';
   assert.match((await run('browser_click', { ref: target.ref }, [], true)).__aibError, /Stale row reference/);
+  assert.equal(found.partial, false);
+  // A budget cutoff is not proof of absence. Force the desired node beyond it.
+  context.document.createTreeWalker = () => {
+    let i = 0;
+    return { nextNode: () => ++i <= 5001 ? element('span', 'other', 10) : i === 5002 ? portal : null };
+  };
+  const partial = await find('关机');
+  assert.equal(partial.found, false);
+  assert.equal(partial.partial, true);
+  assert.equal(partial.diagnostics.textScanPartial, true);
+  assert.match(partial.guidance, /incomplete/);
 });

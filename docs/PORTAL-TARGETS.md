@@ -10,4 +10,8 @@
 
 安装新版后，可设置 `$env:AIB_TEST_PORTAL_TARGETS='1'` 再执行 `node test/live-installed-smoke.js`，在本地测试标签验证委托事件的 portal 文本点击和第二行复选框回读。该用例不会访问真实实例或执行关机；本次只新增场景，尚未执行新版 Chrome 验收。
 
+重网页查找返回 `partial` 和 `diagnostics`，区分文本扫描与控件筛选是否触及预算。`found:false, partial:true` 不代表目标不存在；找到一个候选但扫描不完整也不代表唯一。规划工具此时返回 `inspect_partial_search`，建议截图核对，避免直接建议点击。文本扫描限制为 5000 节点/150ms，控件筛选限制为 5000 候选/250ms；单次 DOM API 调用本身不能被这些预算抢占。
+
+2026-10-19 全量 `npm test` 为 86/86 通过。常驻服务和扩展最近一次核验仍为 0.5.15；0.5.16 的真实页面验收仍待部署后执行。
+
 测试：`node --test test/portal-targets.test.js test/version.test.js` 通过，覆盖纯文本引用、前景/覆盖副本、零尺寸、屏外和缺失目标。此为模拟 DOM 回归，不等于 HiDevLab 实际页面验收。扩展需要加载 0.5.16 后才使用新代码；没有执行实际关机。
