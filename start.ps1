@@ -9,6 +9,12 @@ try {
     $status = Invoke-RestMethod -Uri "http://127.0.0.1:$($config.port)/status" -Headers @{ Authorization = "Bearer $($config.agentToken)" } -TimeoutSec 2
     if ($status.service -eq 'ai-browser-bridge') { Write-Host 'Bridge is already running.'; exit 0 }
 } catch { }
+try {
+    & (Join-Path $projectRoot 'scripts/preserve-service-logs.ps1') -StateDirectory (Join-Path $projectRoot '.local')
+} catch {
+    # A locked log or full disk must not disable recovery. Surface the evidence gap.
+    Write-Warning "Could not preserve previous service logs: $($_.Exception.Message)"
+}
 $process = Start-Process -FilePath $nodePath -ArgumentList ('"' + (Join-Path $projectRoot 'src\server.js') + '"') -WorkingDirectory $projectRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $projectRoot '.local\server.log') -RedirectStandardError (Join-Path $projectRoot '.local\server-error.log') -PassThru
 $process.Id | Set-Content -LiteralPath (Join-Path $projectRoot '.local\server.pid')
 $lastError = $null
