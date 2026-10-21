@@ -1,0 +1,30 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+test('MCP exits after client EOF even with an outstanding bridge request', { timeout: 10000 }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'bridge-mcp-eof-'));
+  const server = http.createServer();
+  t.after(() => { server.closeAllConnections(); server.close(); rmSync(dir, { recursive: true, force: true }); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ port: server.address().port, agentToken: 'a'.repeat(64), extensionToken: 'b'.repeat(64) }));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/mcp.js', import.meta.url))], { env: { ...process.env, AIB_STATE_DIR: dir }, stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  child.stdout.resume(); child.stderr.resume();
+  const exited = once(child, 'exit');
+  const received = once(server, 'request');
+  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'browser_tabs', arguments: {} } }) + '\n');
+  await received;
+  child.stdin.end();
+  let timer;
+  const outcome = await Promise.race([exited, new Promise(resolve => { timer = setTimeout(() => resolve('still-running'), 2500); })]);
+  clearTimeout(timer);
+  assert.notEqual(outcome, 'still-running');
+  assert.equal(outcome[0], 0);
+});

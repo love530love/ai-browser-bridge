@@ -16,4 +16,21 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
       (name, args) => recoverRead(name, () => request('/call', { name, arguments: args })));
   } catch (e) { return { isError: true, content: [{ type: 'text', text: e.message }] }; }
 });
+// This stdio adapter belongs to one client, not to the shared bridge service.
+// EOF means its owner is gone. Outstanding HTTP sockets must not keep it alive.
+let closing = false;
+function closeClient() {
+  if (closing) return;
+  closing = true;
+  const deadline = setTimeout(() => process.exit(0), 1000);
+  server.close().catch(() => {}).finally(() => {
+    clearTimeout(deadline);
+    process.exit(0);
+  });
+}
+process.stdin.once('end', closeClient);
+process.stdin.once('close', closeClient);
+process.stdout.on('error', error => {
+  if (error.code === 'EPIPE' || error.code === 'ERR_STREAM_DESTROYED') closeClient();
+});
 await server.connect(new StdioServerTransport());
