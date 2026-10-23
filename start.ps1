@@ -1,5 +1,12 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
+$rootKey = [IO.Path]::GetFullPath($projectRoot).ToLowerInvariant()
+$lockKey = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($rootKey))).Substring(0,24)
+$startupMutex = [Threading.Mutex]::new($false, "Local\AIBridgeStart-$lockKey")
+$startupOwned = $false
+try {
+try { $startupOwned = $startupMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $startupOwned = $true }
+if (-not $startupOwned) { Write-Host 'Bridge startup is already in progress. Check doctor after it completes.'; exit 0 }
 Remove-Item -LiteralPath (Join-Path $projectRoot '.local/service-paused') -ErrorAction SilentlyContinue
 $nodePath = (Get-Command node.exe -ErrorAction Stop).Source
 & $nodePath (Join-Path $projectRoot 'src\cli.js') setup
@@ -32,3 +39,7 @@ for ($i = 0; $i -lt 30; $i++) {
     }
 }
 throw "Service status check failed after waiting. Last error: $lastError"
+} finally {
+    if ($startupOwned) { $startupMutex.ReleaseMutex() }
+    $startupMutex.Dispose()
+}

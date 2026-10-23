@@ -23,6 +23,12 @@ test('real MCP transport returns screenshot waiting without image schema errors 
   const client = new Client({ name: 'waiting-regression', version: '1' });
   t.after(async () => { await client.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); rmSync(dir, { recursive: true, force: true }); });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/mcp.js', import.meta.url))], env: { ...process.env, AIB_STATE_DIR: dir } }));
+  assert.match(client.getInstructions(), /requested result is already visible/);
+  const resources = await client.listResources();
+  assert.ok(resources.resources.some(r => r.uri === 'bridge://skills/ai-browser-bridge'));
+  const skill = await client.readResource({ uri: 'bridge://skills/ai-browser-bridge' });
+  assert.match(skill.contents[0].text, /Unknown write outcomes require observation/);
+  await assert.rejects(client.readResource({ uri: 'bridge://skills/nonexistent' }), /Unknown contract resource/);
   const response = await client.callTool({ name: 'browser_screenshot', arguments: { tabId: 1 } }, undefined, { timeout: 5000 });
   assert.equal(response.isError, undefined);
   assert.equal(response.content[0].type, 'text');

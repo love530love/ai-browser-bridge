@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 export function computeBuildIdentity(root) {
   const hash = createHash('sha256');
   const files = ['package.json', 'package-lock.json'];
+  const contract = 'skills/ai-browser-bridge/SKILL.md';
+  if (existsSync(join(root, contract))) files.push(contract);
   function walk(relative) {
     for (const item of readdirSync(join(root, relative), { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
       const name = `${relative}/${item.name}`;
