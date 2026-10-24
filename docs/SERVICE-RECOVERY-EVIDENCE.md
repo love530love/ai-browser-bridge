@@ -1,5 +1,17 @@
 # Service recovery evidence
 
+`node src/cli.js diagnose-upgrade` includes a `usage` section for the last 48
+hours. It separates command errors from extension-error records (which can
+mirror the same failure), counts watchdog starts and connected transitions,
+and reports missing, oversized or malformed evidence. Three or more starts
+trigger an advisory investigation recommendation, never an automatic restart.
+The legacy top-level error counts remain raw, mixed event counts.
+
+Only current audit/watchdog files are sampled, not rotated files. Therefore
+these counts are observed records, not a complete uptime history or an
+end-to-end success rate. Connected transitions are not matched recovery pairs;
+exit causes remain unknown. The summary does not include raw page/error text.
+
 The watchdog can restore an absent service, but recovery alone does not identify
 why the previous process stopped. A disconnected notification can occur before
 the next watchdog health check succeeds.

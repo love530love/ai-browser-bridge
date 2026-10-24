@@ -6,6 +6,7 @@ import { callWithWaitingRecovery } from './auto-recovery.js';
 import { createAgentPolicy } from './policy.js';
 import { regressionSummary } from './regression-summary.js';
 import { computeBuildIdentity } from './build-identity.js';
+import { usageSummary } from './usage-summary.js';
 
 async function rawToolCall(name, args) {
   return await request('/call', { name, arguments: args });
@@ -80,9 +81,12 @@ function upgradeDiagnosis() {
   if (counts.UNCAUGHT_ERROR || counts.UNHANDLED_REJECTION) report.recommendations.push('Reload the unpacked extension once, run doctor, and inspect the extension service-worker errors before resuming queued work.');
   if (errors.length && report.recommendations.length === 0) report.recommendations.push('Review recentErrors, run doctor, and retry only idempotent reads after readiness is confirmed.');
   report.regressions = regressionSummary(join(ROOT, 'output', 'live-installed', 'runs'));
+  report.usage = usageSummary(stateDir);
+  if (report.usage.frequentRestarts) report.recommendations.push('Frequent service starts in the last 48 hours: investigate process termination and cleanup schedules. Recovery does not establish the exit cause; do not kill processes by name.');
+  if (report.usage.unreadableFiles || report.usage.malformedRows || report.usage.missingFiles) report.recommendations.push('Usage evidence is incomplete. Missing or malformed logs must not be interpreted as zero failures.');
   if (report.regressions.unexpectedFailures) report.recommendations.push('Review preserved local regression runs before upgrading. Injected fault runs are counted separately; do not replay failed writes.');
   if (report.regressions.unreadable) report.recommendations.push('Some regression reports were missing, malformed or too large to summarize; inspect them locally.');
-  report.status = errors.length || report.regressions.unexpectedFailures || report.regressions.unreadable ? 'attention' : 'ready';
+  report.status = errors.length || report.regressions.unexpectedFailures || report.regressions.unreadable || report.usage.frequentRestarts || report.usage.unreadableFiles || report.usage.malformedRows || report.usage.missingFiles ? 'attention' : 'ready';
   writeFileSync(join(stateDir, 'upgrade-analysis.json'), JSON.stringify(report, null, 2), { encoding: 'utf8' });
   return report;
 }
