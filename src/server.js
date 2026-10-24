@@ -475,7 +475,11 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         }
         if (msg.type === 'keepalive') { ws.send(JSON.stringify({ type: 'keepalive' })); return; }
         if (msg.type === 'extension-error' && ws === extension) {
-          audit({ time: new Date().toISOString(), id: randomUUID(), tool: 'extension-error', tabId: Number.isInteger(msg.tabId) ? msg.tabId : null, agent: null, outcome: 'error', errorCategory: typeof msg.category === 'string' ? msg.category.slice(0, 80) : 'EXTENSION_ERROR', detail: typeof msg.message === 'string' ? msg.message.slice(0, 1000) : 'unknown', source: typeof msg.source === 'string' ? msg.source.slice(0, 80) : 'extension' });
+          const eventId = typeof msg.eventId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(msg.eventId) ? msg.eventId : null;
+          try {
+            audit({ time: new Date().toISOString(), id: randomUUID(), eventId, occurredAt: typeof msg.at === 'string' ? msg.at.slice(0, 40) : null, droppedBeforeSend: Number.isSafeInteger(msg.droppedBeforeSend) ? Math.max(0, msg.droppedBeforeSend) : 0, tool: 'extension-error', tabId: Number.isInteger(msg.tabId) ? msg.tabId : null, agent: null, outcome: 'error', errorCategory: typeof msg.category === 'string' ? msg.category.slice(0, 80) : 'EXTENSION_ERROR', detail: typeof msg.message === 'string' ? msg.message.slice(0, 1000) : 'unknown', source: typeof msg.source === 'string' ? msg.source.slice(0, 80) : 'extension' });
+            if (eventId) ws.send(JSON.stringify({ type: 'extension-error-ack', eventId }));
+          } catch { /* No acknowledgement if persistence fails; extension retains evidence. */ }
           return;
         }
         if (msg.type === 'pause') { extensionPaused = true; return; }

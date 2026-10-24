@@ -4,7 +4,7 @@ import { join } from 'node:path';
 // Diagnostic evidence, not a task-success metric or a claim about exit causes.
 export function usageSummary(directory, now = Date.now()) {
   const result = { windowHours: 48, commandRecords: 0, commandErrors: 0,
-    extensionErrorRecords: 0, errorCategories: {}, serviceStarts: 0,
+    extensionErrorRecords: 0, extensionErrorCategories: {}, duplicateExtensionRecords: 0, extensionDroppedRecords: 0, errorCategories: {}, serviceStarts: 0,
     recoveryConnections: 0, unreadableFiles: 0, malformedRows: 0,
     missingFiles: 0, frequentRestarts: false, exitCause: 'unknown' };
   const cutoff = now - 48 * 3600000;
@@ -24,8 +24,17 @@ export function usageSummary(directory, now = Date.now()) {
       return [];
     }
   }
+  const seen = new Set();
   for (const row of rows('logs/audit.jsonl')) {
-    if (row.tool === 'extension-error') { result.extensionErrorRecords++; continue; }
+    if (row.tool === 'extension-error') {
+      if (row.eventId && seen.has(row.eventId)) { result.duplicateExtensionRecords++; continue; }
+      if (row.eventId) seen.add(row.eventId);
+      result.extensionErrorRecords++;
+      const category = typeof row.errorCategory === 'string' && /^[A-Z_]{1,80}$/.test(row.errorCategory) ? row.errorCategory : 'UNKNOWN';
+      result.extensionErrorCategories[category] = (result.extensionErrorCategories[category] ?? 0) + 1;
+      result.extensionDroppedRecords = Math.max(result.extensionDroppedRecords, Number.isSafeInteger(row.droppedBeforeSend) ? row.droppedBeforeSend : 0);
+      continue;
+    }
     result.commandRecords++;
     if (row.outcome === 'error') {
       result.commandErrors++;

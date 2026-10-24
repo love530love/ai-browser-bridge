@@ -1,5 +1,6 @@
 import { pageOperation } from './page.js';
 import { withDebugger, pointer, key } from './cdp.js';
+import { createErrorJournal } from './error-journal.js';
 let socket = null;
 let keepalive = null;
 let connectDeadline = null;
@@ -11,10 +12,12 @@ let reconnectTimer = null;
 let reconnectAttempt = 0;
 let connectInFlight = false;
 let connectionState = '未连接';
+const errorJournal = createErrorJournal(chrome.storage.local, message => {
+  if (socket?.readyState !== WebSocket.OPEN || connectionState !== '已连接') return false;
+  socket.send(JSON.stringify(message)); return true;
+});
 function reportExtensionError(source, error, category = 'EXTENSION_ERROR') {
-  try {
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'extension-error', source, category, message: String(error?.message || error || 'unknown').slice(0, 1000), at: new Date().toISOString() }));
-  } catch { /* telemetry must never break browser control */ }
+  void errorJournal.record(source, category).then(() => errorJournal.flush()).catch(() => {});
 }
 let lastAction = '';
 let connectionEpoch = 0;
@@ -204,8 +207,8 @@ const BADGE_STATES = [
 ];
 function applyBadge() {
   const state = BADGE_STATES.find(item => item.match(connectionState)) || { text: '!', color: '#E24B4A' };
-  chrome.action.setBadgeBackgroundColor({ color: state.color });
-  chrome.action.setBadgeText({ text: state.text });
+  chrome.action.setBadgeBackgroundColor({ color: state.color }).catch(error => reportExtensionError('badge-color', error, 'UI_API_ERROR'));
+  chrome.action.setBadgeText({ text: state.text }).catch(error => reportExtensionError('badge-text', error, 'UI_API_ERROR'));
 }
 // After we've been connected once, a small system notification when something
 // goes wrong replaces the user's "I just stare at a blank badge" feeling. Throttled
@@ -233,14 +236,14 @@ function maybeNotify(state) {
     message: match[1][0],
     contextMessage: match[1][1],
     silent: true
-  });
+  }).catch(error => reportExtensionError('notification', error, 'UI_API_ERROR'));
 }
 function notifyStatus() {
   applyBadge();
   maybeNotify(connectionState);
   chrome.runtime.sendMessage({ type: 'connection-status', connectionState, lastAction }).catch(() => {});
 }
-chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
+chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(error => reportExtensionError('storage-access', error, 'STORAGE_ERROR'));
 function validConnectionConfig(config) {
   return config.enabled && /^[a-f0-9]{64}$/.test(config.token) && Number.isInteger(config.port) && config.port >= 1024 && config.port <= 65535;
 }
@@ -509,10 +512,13 @@ async function execute(name, args) {
         await key(send, 'Ctrl+A'); await send('Input.insertText', { text: args.text }); return;
       }
       if (args.action === 'Key') { await key(send, args.key); return; }
-      coordinateResult = await page('browser_validate_coordinate', args);
+      coordinateResult = await page('browser_validate_coordinate', { ...args, consume: args.action === 'Hover' });
       if (coordinateResult.status !== 'ready') return;
       const point = { x: coordinateResult.x, y: coordinateResult.y, endX: Math.min(coordinateResult.width - 1, args.endX / 1000 * coordinateResult.width), endY: Math.min(coordinateResult.height - 1, args.endY / 1000 * coordinateResult.height) };
-      await pointer(send, { ...point, action: { Tap: 'click', 'Double Tap': 'double', 'Long Press': 'long', Hover: 'hover', Swipe: 'drag' }[args.action] });
+      await pointer(send, { ...point, action: { Tap: 'click', 'Double Tap': 'double', 'Long Press': 'long', Hover: 'hover', Swipe: 'drag' }[args.action], beforePress: async () => {
+        coordinateResult = await page('browser_validate_coordinate', args);
+        return coordinateResult.status === 'ready';
+      } });
     });
     if (coordinateResult && coordinateResult.status !== 'ready') return coordinateResult;
     return { dispatched: args.action, inspectOutcome: true };
@@ -574,6 +580,7 @@ async function connect({ automatic = false } = {}) {
     if (ws !== socket) return;
     try {
       const message = JSON.parse(event.data);
+      if (message.type === 'extension-error-ack') { await errorJournal.acknowledge(message.eventId); return; }
       if (message.type === 'ui-result') {
         const pending = uiRequests.get(message.id);
         if (pending) { clearTimeout(pending.timer); uiRequests.delete(message.id); message.error ? pending.reject(new Error(message.error)) : pending.resolve(message.result); }
@@ -584,9 +591,10 @@ async function connect({ automatic = false } = {}) {
         clearTimeout(connectDeadline); connectDeadline = null;
         reconnectAttempt = 0;
         connectionState = '已连接';
+        void errorJournal.flush().catch(() => {});
         notifyStatus();
         // Transport keepalive only: no model, no task polling, no cloud requests.
-        keepalive = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'keepalive' })); }, 20000);
+        keepalive = setInterval(() => { if (ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: 'keepalive' })); void errorJournal.flush().catch(() => {}); } }, 20000);
       } else if (message.type === 'command') {
         lastAction = `${new Date().toLocaleTimeString()} · ${message.name}`;
         notifyStatus();

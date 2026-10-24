@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.5.17**（Chrome 部署需重新加载并验收），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.5.18**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.5.18 增加断线错误暂存、重连补传和落盘确认，以及鼠标移入后的再次校验、弹窗表单值变化检测。日志保留范围与错误清理流程见 [扩展错误维护](docs/EXTENSION-ERROR-MAINTENANCE.md)。
 
 0.5.17 坐标指针动作新增必需步骤：`browser_prepare_coordinate` → 核对返回目标 → 使用一次性 `coordinateToken` 调用 `browser_action`。旧客户端需刷新工具列表；服务与扩展需配套升级。
 

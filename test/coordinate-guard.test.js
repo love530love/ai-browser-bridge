@@ -45,3 +45,10 @@ test('unknown extension version cannot bypass coordinate preflight through older
   assert.equal(result.dispatched, false);
   assert.equal(bridge.status().queued, 0);
 });
+test('dialog form value changes invalidate a target even if all text remains identical', async () => {
+  const f = fixture();
+  const quantity = { tagName: 'INPUT', value: '1', matches: () => false, closest: () => null, getAttribute: () => null };
+  f.dialog.querySelectorAll = () => [quantity];
+  const p = await f.prepare(); quantity.value = '2';
+  assert.equal((await f.validate(p.coordinateToken)).dispatched, false);
+});

@@ -13,10 +13,11 @@ export async function withDebugger(tabId, fn) {
   try { return await fn((method, params = {}) => chrome.debugger.sendCommand(target, method, params)); }
   finally { await chrome.debugger.detach(target).catch(() => {}); }
 }
-export async function pointer(send, { x, y, action = 'click', endX, endY }) {
+export async function pointer(send, { x, y, action = 'click', endX, endY, beforePress }) {
   const button = action === 'right' ? 'right' : 'left';
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
   if (action === 'hover') return;
+  if (beforePress && !(await beforePress())) return;
   const count = action === 'double' ? 2 : 1;
   let pressed = false;
   try {

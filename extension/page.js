@@ -315,16 +315,21 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const describeTarget = el => {
       const rect = el.getBoundingClientRect();
       const dialog = el.closest('dialog,[role=dialog],[aria-modal=true],.ant-modal,.el-dialog');
+      const fields = [...(dialog?.querySelectorAll?.('input,select,textarea,[aria-checked],[aria-selected]') || [])];
+      if (fields.length > 200) throw new Error('Dialog too complex for coordinate verification; use scoped element tools.');
+      const values = fields.filter(field => !sensitive(field)).map(field => [field.tagName, field.getAttribute('name'),
+        String(field.value ?? '').slice(0, 2000), field.checked, field.getAttribute('aria-checked'), field.getAttribute('aria-selected')]);
       return JSON.stringify([fingerprint(el), rowContext(el), rect.left, rect.top, rect.width, rect.height,
-        dialog?.textContent?.slice(0, 8000) || '']);
+        dialog?.textContent?.slice(0, 8000) || '', values]);
     };
     if (name === 'browser_validate_coordinate') {
       const record = tokens.get(args.coordinateToken);
-      tokens.delete(args.coordinateToken); // Consume even on mismatch; never replay an uncertain write.
+      if (args.consume !== false) tokens.delete(args.coordinateToken);
       if (!record || record.stamp !== stamp() || record.nx !== args.x || record.ny !== args.y ||
           !record.el.isConnected || sensitive(record.el) || !visible(record.el) || record.el.disabled ||
           record.el.getAttribute('aria-disabled') === 'true' || deepHit(record.x, record.y) !== record.el ||
           describeTarget(record.el) !== record.signature) {
+        tokens.delete(args.coordinateToken);
         return { status: 'waiting', reason: 'coordinate_target_changed', dispatched: false,
           nextPollTool: 'browser_prepare_coordinate', recommendedNextAction: 'Inspect a fresh screenshot and prepare the intended target again. No pointer action dispatched.' };
       }
