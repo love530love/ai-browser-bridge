@@ -126,9 +126,12 @@ export const TOOLS = [
   tool('browser_tab_lease', 'Read enforced tab write lease state.', { tabId, agent }, ['tabId'], true),
   tool('browser_history', 'Back, forward, reload or activate a tab. If the tab is leased, pass the matching agent.', { tabId, action: { type: 'string', enum: ['back', 'forward', 'reload', 'activate'] }, agent }, ['tabId', 'action']),
   tool('browser_wait', 'Wait for visible main-frame text using DOM events, up to 10 seconds. No model polling.', { tabId, text: text(1000), timeoutMs: timeoutMs(10000), agent }, ['tabId', 'text'], true),
-  tool('browser_action', 'Open-AutoGLM-style browser actions. Coordinates are normalized 0..1000 in current viewport. Supply expectedUrl from latest observation. Supported subset only; no phone app launch or OS commands. Observe after every action.', {
+  tool('browser_prepare_coordinate', 'Read-only coordinate preflight after inspecting a fresh screenshot. Returns the topmost target and a single-use 15-second token. Inspect the returned target before acting. Coordinates use 0..1000 viewport units. Repeat preparation after layout changes.', {
+    tabId, x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 }, agent
+  }, ['tabId', 'x', 'y'], true),
+  tool('browser_action', 'Open-AutoGLM-style browser actions. Pointer actions require a fresh browser_prepare_coordinate token and matching x/y. Coordinates are normalized 0..1000 in current viewport. Supply expectedUrl from latest observation. Observe after every action.', {
     tabId, action: { type: 'string', enum: ['Tap', 'Double Tap', 'Long Press', 'Hover', 'Swipe', 'Type', 'Key', 'Back', 'Wait'] },
-    expectedUrl: text(8000), x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 },
+    expectedUrl: text(8000), coordinateToken: text(100), x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 },
     endX: { type: 'number', minimum: 0, maximum: 1000 }, endY: { type: 'number', minimum: 0, maximum: 1000 },
     text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }, agent
   }, ['tabId', 'action', 'expectedUrl'])
@@ -209,7 +212,7 @@ export function validateCall(name, args) {
   }
   if (name === 'browser_action') {
     const action = args.action;
-    const required = { Tap: ['x', 'y'], 'Double Tap': ['x', 'y'], 'Long Press': ['x', 'y'], Hover: ['x', 'y'], Swipe: ['x', 'y', 'endX', 'endY'], Type: ['text'], Key: ['key'], Wait: ['durationMs'] }[action] || [];
+    const required = { Tap: ['x', 'y', 'coordinateToken'], 'Double Tap': ['x', 'y', 'coordinateToken'], 'Long Press': ['x', 'y', 'coordinateToken'], Hover: ['x', 'y', 'coordinateToken'], Swipe: ['x', 'y', 'endX', 'endY', 'coordinateToken'], Type: ['text'], Key: ['key'], Wait: ['durationMs'] }[action] || [];
     for (const field of required) if (!Object.hasOwn(args, field)) throw new Error(`Missing action argument: ${field} for action "${action}". ${argSummary(name, s)}`);
   }
   if (args.url) {

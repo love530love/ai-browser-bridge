@@ -349,6 +349,10 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       return decision;
     }
     if (name === 'browser_failure_help') return failureHelp(args, { readOnly: TOOLS.find(item => item.name === args.attemptedAction)?.annotations?.readOnlyHint === true });
+    if ((name === 'browser_prepare_coordinate' || (name === 'browser_action' && Object.hasOwn(args, 'x'))) && extensionVersion !== VERSION) {
+      return { status: 'waiting', reason: 'coordinate_guard_version_mismatch', dispatched: false,
+        serviceVersion: VERSION, extensionVersion, recommendedNextAction: 'Load the matching extension before using coordinate actions. Preserve the task; do not replay an earlier write.' };
+    }
     // The on-device model gate is answered here too: a write that has not been
     // judged never reaches the queue, so a blocked agent cannot burn slots
     // retrying a call that will always be refused.

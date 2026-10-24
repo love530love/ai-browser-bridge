@@ -55,6 +55,7 @@ export function toBrowserAction(input, { tabId, expectedUrl }) {
   const action = data.action === 'Type_Name' ? 'Type' : data.action;
   if (!['Tap', 'Double Tap', 'Long Press', 'Hover', 'Swipe', 'Type', 'Key', 'Back', 'Wait'].includes(action)) throw new Error(`Unsupported browser action: ${action}`);
   const args = { tabId, action, expectedUrl };
+  if (typeof data.coordinateToken === 'string') args.coordinateToken = data.coordinateToken;
   function point(name, pair) {
     if (!Array.isArray(pair) || pair.length !== 2 || pair.some(n => typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > 1000)) throw new Error('Coordinates must be a pair in 0..1000');
     if (name === 'end') { args.endX = pair[0]; args.endY = pair[1]; } else { args.x = pair[0]; args.y = pair[1]; }

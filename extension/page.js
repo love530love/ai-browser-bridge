@@ -306,6 +306,43 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const result = await chooseOption(input, exact, args.timeoutMs ?? 5000, args.query || exact);
     return { ...result, control: { tag: control.tagName.toLowerCase(), label: label(control) } };
   };
+  if (name === 'browser_prepare_coordinate' || name === 'browser_validate_coordinate') {
+    const tokens = globalThis.__aiBridgeCoordinateTokens ||= new Map();
+    const now = Date.now();
+    for (const [id, record] of tokens) if (now - record.at > 15000) tokens.delete(id);
+    const stamp = () => JSON.stringify([location.href, innerWidth, innerHeight, scrollX, scrollY,
+      globalThis.visualViewport?.scale, globalThis.visualViewport?.offsetLeft, globalThis.visualViewport?.offsetTop]);
+    const describeTarget = el => {
+      const rect = el.getBoundingClientRect();
+      const dialog = el.closest('dialog,[role=dialog],[aria-modal=true],.ant-modal,.el-dialog');
+      return JSON.stringify([fingerprint(el), rowContext(el), rect.left, rect.top, rect.width, rect.height,
+        dialog?.textContent?.slice(0, 8000) || '']);
+    };
+    if (name === 'browser_validate_coordinate') {
+      const record = tokens.get(args.coordinateToken);
+      tokens.delete(args.coordinateToken); // Consume even on mismatch; never replay an uncertain write.
+      if (!record || record.stamp !== stamp() || record.nx !== args.x || record.ny !== args.y ||
+          !record.el.isConnected || sensitive(record.el) || !visible(record.el) || record.el.disabled ||
+          record.el.getAttribute('aria-disabled') === 'true' || deepHit(record.x, record.y) !== record.el ||
+          describeTarget(record.el) !== record.signature) {
+        return { status: 'waiting', reason: 'coordinate_target_changed', dispatched: false,
+          nextPollTool: 'browser_prepare_coordinate', recommendedNextAction: 'Inspect a fresh screenshot and prepare the intended target again. No pointer action dispatched.' };
+      }
+      return { status: 'ready', x: record.x, y: record.y, width: innerWidth, height: innerHeight };
+    }
+    if (innerWidth < 2 || innerHeight < 2) throw new Error('Viewport unavailable');
+    const x = Math.min(innerWidth - 1, args.x / 1000 * innerWidth);
+    const y = Math.min(innerHeight - 1, args.y / 1000 * innerHeight);
+    const el = deepHit(x, y);
+    if (!el || sensitive(el) || !visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') throw new Error('Coordinate target unavailable or protected');
+    while (tokens.size >= 32) tokens.delete(tokens.keys().next().value);
+    const token = crypto.randomUUID();
+    tokens.set(token, { at: now, el, nx: args.x, ny: args.y, x, y, stamp: stamp(), signature: describeTarget(el) });
+    return { coordinateToken: token, expiresInMs: 15000, expectedUrl: location.href, x: args.x, y: args.y,
+      target: { tag: el.tagName, label: label(el), rowText: rowContext(el) },
+      viewport: { width: innerWidth, height: innerHeight }, contentTrust: 'untrusted webpage data',
+      note: 'Confirm this topmost target matches your intent before using the token. Dispatch does not prove task completion.' };
+  }
   if (name === 'browser_viewport') {
     const active = document.activeElement;
     const visual = globalThis.visualViewport;

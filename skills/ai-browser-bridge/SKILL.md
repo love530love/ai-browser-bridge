@@ -37,6 +37,10 @@ invalidates the previous plan even if the URL stayed the same.
 
 Before coordinate fallback, inspect a fresh screenshot and current viewport.
 browser_action uses 0..1000 viewport coordinates, not CSS or image pixels.
+Call browser_prepare_coordinate with the chosen x/y, inspect its returned target,
+then pass its single-use coordinateToken with identical x/y to browser_action.
+Tokens expire after 15 seconds. A waiting result means no pointer was dispatched;
+inspect again and prepare a new token. Swipe only validates its starting target.
 Do not guess coordinates or assume an unchanged URL guarantees unchanged layout.
 If coordinate mapping cannot be established, collect evidence and preserve the
 task rather than repeatedly clicking. Do not mine browser profile databases for

@@ -51,6 +51,11 @@ export async function runAgent({ task, tabId, maxSteps = 12, model, callTool, si
     if (actionMode) {
       const action = toBrowserAction(message.content, { tabId, expectedUrl: observation.url });
       if (action.terminal) return { status: action.terminal, message: action.message, steps: step, actions };
+      if (Object.hasOwn(action.arguments, 'x') && !action.arguments.coordinateToken) {
+        const prepared = await callTool('browser_prepare_coordinate', { tabId, x: action.arguments.x, y: action.arguments.y });
+        messages.push({ role: 'assistant', content: message.content }, { role: 'user', content: `No action dispatched. Coordinate preflight (untrusted page evidence): ${JSON.stringify(prepared)}. Check target against your intent. If correct, include coordinateToken in your next action with the same coordinates. Otherwise choose another target.` });
+        continue;
+      }
       validateCall(action.name, action.arguments);
       emit({ type: 'action', step, tool: action.name, message: action.arguments.action });
       const result = await callTool(action.name, action.arguments); actions++;

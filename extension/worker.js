@@ -492,6 +492,7 @@ async function execute(name, args) {
     await guarded(send => name === 'browser_key' ? key(send, args.key) : pointer(send, { ...point, action: 'hover' }));
     return { dispatched: true, inspectOutcome: true };
   }
+  if (name === 'browser_prepare_coordinate') return await page(name);
   if (name === 'browser_action') {
     if (args.expectedUrl !== tab.url) throw new Error('Observation URL is stale. Read page again.');
     const viewport = await page('browser_viewport');
@@ -501,15 +502,19 @@ async function execute(name, args) {
     }
     if (args.action === 'Wait') { await new Promise(resolve => setTimeout(resolve, args.durationMs)); return { waited: args.durationMs }; }
     if (args.action === 'Back') { await chrome.tabs.goBack(tab.id); return { dispatched: 'back' }; }
+    let coordinateResult;
     await guarded(async send => {
       if (args.action === 'Type') {
         if (!viewport.editable) throw new Error('Focus an editable non-password field before Type');
         await key(send, 'Ctrl+A'); await send('Input.insertText', { text: args.text }); return;
       }
       if (args.action === 'Key') { await key(send, args.key); return; }
-      const point = { x: Math.min(viewport.width - 1, args.x / 1000 * viewport.width), y: Math.min(viewport.height - 1, args.y / 1000 * viewport.height), endX: Math.min(viewport.width - 1, args.endX / 1000 * viewport.width), endY: Math.min(viewport.height - 1, args.endY / 1000 * viewport.height) };
+      coordinateResult = await page('browser_validate_coordinate', args);
+      if (coordinateResult.status !== 'ready') return;
+      const point = { x: coordinateResult.x, y: coordinateResult.y, endX: Math.min(coordinateResult.width - 1, args.endX / 1000 * coordinateResult.width), endY: Math.min(coordinateResult.height - 1, args.endY / 1000 * coordinateResult.height) };
       await pointer(send, { ...point, action: { Tap: 'click', 'Double Tap': 'double', 'Long Press': 'long', Hover: 'hover', Swipe: 'drag' }[args.action] });
     });
+    if (coordinateResult && coordinateResult.status !== 'ready') return coordinateResult;
     return { dispatched: args.action, inspectOutcome: true };
   }
   if (name === 'browser_navigate') {

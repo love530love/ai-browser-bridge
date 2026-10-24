@@ -317,11 +317,12 @@ try {
   assert.equal((await call('browser_wait', { tabId, text: '异步结果已出现', timeoutMs: 3000 })).matched, true); mark('DOM-event wait observes delayed page changes');
   const inputBox = await page.locator('#draft').boundingBox();
   const viewport = (await call('browser_read', { tabId })).viewport;
-  await call('browser_action', { tabId, action: 'Tap', expectedUrl: `${origin}/second`, x: (inputBox.x + inputBox.width / 2) / viewport.width * 1000, y: (inputBox.y + inputBox.height / 2) / viewport.height * 1000 });
+  const coordinate = await call('browser_prepare_coordinate', { tabId, x: (inputBox.x + inputBox.width / 2) / viewport.width * 1000, y: (inputBox.y + inputBox.height / 2) / viewport.height * 1000 });
+  await call('browser_action', { tabId, action: 'Tap', expectedUrl: `${origin}/second`, x: coordinate.x, y: coordinate.y, coordinateToken: coordinate.coordinateToken });
   await call('browser_action', { tabId, action: 'Type', expectedUrl: `${origin}/second`, text: '归一化动作验证' });
   await call('browser_action', { tabId, action: 'Key', expectedUrl: `${origin}/second`, key: 'Enter' });
   assert.ok((await call('browser_read', { tabId })).text.includes('可信按键=true：归一化动作验证'));
-  await assert.rejects(call('browser_action', { tabId, action: 'Tap', expectedUrl: `${origin}/old`, x: 20, y: 20 }), /stale/); mark('Open-AutoGLM coordinate Type and Key adapter with stale URL rejection');
+  await assert.rejects(call('browser_action', { tabId, action: 'Tap', expectedUrl: `${origin}/old`, x: 20, y: 20, coordinateToken: coordinate.coordinateToken }), /stale/); mark('Open-AutoGLM coordinate Type and Key adapter with stale URL rejection');
   const assistant = await context.newPage(); await assistant.goto(`chrome-extension://${extensionId}/assistant.html`);
   await assistant.locator('#target').selectOption(String(tabId)); await assistant.locator('#task').fill('本地模拟验收：填写测试消息并按 Enter。');
   await assistant.locator('#run').click();

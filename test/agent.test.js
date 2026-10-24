@@ -9,7 +9,9 @@ test('Open-AutoGLM literal actions adapt without code execution', () => {
   const parsed = parseAction('do(action="Tap", element=[250, 700])');
   const result = toBrowserAction(parsed, { tabId: 5, expectedUrl: 'https://example.com/' });
   assert.deepEqual(result.arguments, { tabId: 5, action: 'Tap', expectedUrl: 'https://example.com/', x: 250, y: 700 });
-  validateCall(result.name, result.arguments);
+  assert.throws(() => validateCall(result.name, result.arguments), /coordinateToken/);
+  validateCall(result.name, { ...result.arguments, coordinateToken: 'prepared-token' });
+  assert.equal(toBrowserAction('do(action="Tap", element=[250,700], coordinateToken="prepared-token")', {}).arguments.coordinateToken, 'prepared-token');
   assert.equal(parseAction("do(action='Type', text='hello\\nworld')").text, 'hello\nworld');
   assert.equal(toBrowserAction('finish(message="done")', {}).terminal, 'reported_complete');
   assert.equal(toBrowserAction('do(action="Take_over", message="login")', {}).terminal, 'needs_user');
@@ -65,6 +67,20 @@ test('native AutoGLM mode supports handoff and never executes a handoff action',
   const calls = [];
   const result = await runAgent({ task: 'Test', tabId: 1, model, callTool: async name => { calls.push(name); return name === 'browser_read' ? observation : { data: 'test-image' }; } });
   assert.equal(result.status, 'needs_user'); assert.deepEqual(calls, ['browser_read', 'browser_screenshot']);
+});
+test('AutoGLM pointer action first returns preflight evidence before dispatch', async t => {
+  let turn = 0;
+  const model = { ...await provider(t, () => ({ role: 'assistant', content: ++turn === 1
+    ? 'do(action="Tap", element=[50,50])' : 'do(action="Tap", element=[50,50], coordinateToken="test-token")' })), mode: 'autoglm' };
+  const calls = [];
+  await runAgent({ task: 'Test', tabId: 1, maxSteps: 2, model, callTool: async (name, args) => {
+    calls.push({ name, args });
+    if (name === 'browser_read') return observation;
+    if (name === 'browser_prepare_coordinate') return { coordinateToken: 'test-token', target: { label: 'Test' } };
+    return { data: 'fixture', dispatched: true };
+  } });
+  assert.deepEqual(calls.filter(c => ['browser_prepare_coordinate', 'browser_action'].includes(c.name)).map(c => c.name), ['browser_prepare_coordinate', 'browser_action']);
+  assert.equal(calls.find(c => c.name === 'browser_action').args.coordinateToken, 'test-token');
 });
 test('step budget stops a loop and cancellation stops before any browser access', async t => {
   const model = await provider(t, () => ({ role: 'assistant', tool_calls: [{ id: 'one', type: 'function', function: { name: 'browser_scroll', arguments: '{"tabId":1,"deltaY":1}' } }] }));
