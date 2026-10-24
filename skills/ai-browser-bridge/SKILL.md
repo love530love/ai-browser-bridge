@@ -27,6 +27,28 @@ Re-observe after actions. Dispatch success alone does not prove task completion.
 Distinguish reading an SSH command from establishing SSH, and clicking Send from
 receiving a reply. Keep passwords and temporary credentials out of shared logs.
 
+For covered controls, distinguish a visible topmost blocker from an invisible
+mounted dialog. browser_click checks coverage; it is not a bypass.
+browser_dismiss_overlay clicks an identified close control; it does not delete
+backdrops. After dismissing, reacquire the intended control and its container.
+Do not pair labels and geometry by list order. Duplicate table columns, hidden
+dialogs and rerenders can change that order. A changed dialog or wrong product
+invalidates the previous plan even if the URL stayed the same.
+
+Before coordinate fallback, inspect a fresh screenshot and current viewport.
+browser_action uses 0..1000 viewport coordinates, not CSS or image pixels.
+Do not guess coordinates or assume an unchanged URL guarantees unchanged layout.
+If coordinate mapping cannot be established, collect evidence and preserve the
+task rather than repeatedly clicking. Do not mine browser profile databases for
+credentials to work around a locator failure.
+
+For rentals, purchases and other commits, verify the active dialog's exact
+product, quantity, billing mode and price against the authorized request.
+Dispatch is not completion. Verify an account-specific order or instance and its
+status. Stock changes, balance changes or a closed modal alone are insufficient.
+An uncertain outcome requires reconciliation before any retry, never a duplicate
+order. Existing user authorization remains valid within its original scope.
+
 Use a stable agent identity and claim/renew/release the tab for multi-step shared
 workflows. On status=waiting preserve task context, follow nextPollTool and
 nextPollArgs when provided, and resume after checking current state. Do not open
