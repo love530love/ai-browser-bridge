@@ -280,13 +280,21 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   }
   function finish(job, error, result) {
     clearTimeout(job.timer);
-    audit({ time: new Date().toISOString(), id: job.id, tool: job.name, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : 'ok', errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
+    const status = ['success', 'uncertain', 'failed', 'waiting', 'ready', 'denied', 'not_dispatched'].includes(result?.status) ? result.status : null;
+    audit({ time: new Date().toISOString(), id: job.id, tool: job.name, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : status === 'uncertain' ? 'uncertain' : 'ok', resultStatus: status, dispatched: typeof result?.dispatched === 'boolean' ? result.dispatched : null, errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
     if (error) job.reject(new Error(error)); else job.resolve(result);
   }
   function drop(reason, { keepQueued = false } = {}) {
     extension = null;
     extensionVersion = null;
-    if (current) { finish(current, reason); current = null; }
+    if (current) {
+      // A disconnected or stopped extension may have accepted a write before its
+      // result was lost. Preserve the transport error while separately recording
+      // the action outcome as uncertain; never infer a safe retry from rejection.
+      const possiblyDispatchedWrite = !current.tool.annotations?.readOnlyHint;
+      finish(current, reason, possiblyDispatchedWrite ? { status: 'uncertain' } : undefined);
+      current = null;
+    }
     clearTimeout(requeueGrace); requeueGrace = null;
     // One uncertain write must not fail everyone else's queued work. Keep the
     // backlog and give the extension a bounded window to come back; queued jobs

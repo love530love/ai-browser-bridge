@@ -220,31 +220,40 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { status: (!target.isConnected || !visible(target)) ? 'gone' : 'still-present', elapsedMs: Date.now() - started };
   };
   const pageText = () => document.body?.innerText || '';
+  const expectationState = (expect = {}, context = {}) => {
+    const checks = {};
+    if (typeof expect.textAppears === 'string') checks.textAppears = pageText().includes(expect.textAppears);
+    if (typeof expect.urlContains === 'string') checks.urlContains = location.href.includes(expect.urlContains);
+    if (typeof expect.elementLabelAppears === 'string') {
+      const needle = expect.elementLabelAppears.replace(/\s+/g, ' ').trim();
+      checks.elementLabelAppears = [...document.querySelectorAll('a,button,input,textarea,select,[role=button],[role=option],[role=combobox],[contenteditable=true]')]
+        .some(el => visible(el) && label(el).replace(/\s+/g, ' ').trim().includes(needle));
+    }
+    if (typeof expect.valueMatches === 'string') checks.valueMatches = (typeof context.getValue === 'function' ? context.getValue() : context.value) === expect.valueMatches;
+    if (typeof expect.fileNameAppears === 'string') checks.fileNameAppears = pageText().includes(expect.fileNameAppears) || context.fileName === expect.fileNameAppears;
+    return { checks, satisfied: Object.keys(checks).length > 0 && Object.values(checks).every(Boolean) };
+  };
   const verify = async (expect = {}, timeoutMs = 3000, context = {}) => {
     const started = Date.now();
-    const checks = {};
-    const run = () => {
-      if (typeof expect.textAppears === 'string') checks.textAppears = pageText().includes(expect.textAppears);
-      if (typeof expect.urlContains === 'string') checks.urlContains = location.href.includes(expect.urlContains);
-      if (typeof expect.elementLabelAppears === 'string') {
-        const needle = expect.elementLabelAppears.replace(/\s+/g, ' ').trim();
-        checks.elementLabelAppears = [...document.querySelectorAll('a[href],button,input,textarea,select,[role=button],[role=option],[role=combobox],[contenteditable=true]')]
-          .some(el => visible(el) && label(el).replace(/\s+/g, ' ').trim().includes(needle));
-      }
-      if (typeof expect.valueMatches === 'string') checks.valueMatches = context.value === expect.valueMatches;
-      if (typeof expect.fileNameAppears === 'string') checks.fileNameAppears = pageText().includes(expect.fileNameAppears) || context.fileName === expect.fileNameAppears;
-      return Object.values(checks).length > 0 && Object.values(checks).every(Boolean);
-    };
-    if (run()) return { status: 'success', checks, elapsedMs: Date.now() - started };
+    const run = () => expectationState(expect, context);
+    let initial = run();
+    // A controlled framework input can synchronously reflect the fill and roll
+    // it back on its next scheduled render. Give that commit one short settle
+    // window, then read the live element value rather than the fill-time snapshot.
+    if (initial.satisfied && typeof context.getValue === 'function') {
+      await new Promise(resolve => setTimeout(resolve, Math.min(50, timeoutMs)));
+      initial = run();
+    }
+    if (initial.satisfied) return { status: 'success', checks: initial.checks, elapsedMs: Date.now() - started };
     return await new Promise(resolve => {
       const finish = () => {
-        const ok = run();
+        const result = run();
         observer.disconnect();
         clearTimeout(timer);
-        resolve({ status: ok ? 'success' : 'failed', checks: { ...checks }, elapsedMs: Date.now() - started });
+        resolve({ status: result.satisfied ? 'success' : 'failed', checks: result.checks, elapsedMs: Date.now() - started });
       };
-      const observer = new MutationObserver(() => { if (run()) finish(); });
-      const timer = setTimeout(finish, timeoutMs);
+      const observer = new MutationObserver(() => { if (run().satisfied) finish(); });
+      const timer = setTimeout(finish, Math.max(0, timeoutMs - (Date.now() - started)));
       observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true });
     });
   };
@@ -734,9 +743,27 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { clicked: true, note: 'Click dispatched; read page to verify outcome.' };
   }
   if (name === 'browser_click_verified') {
+    const baseline = expectationState(args.expect || {});
+    if (baseline.satisfied) {
+      return { status: 'not_dispatched', reason: 'expected_condition_already_satisfied', dispatched: false, retryable: false,
+        verification: { status: 'already_satisfied_before_action', checks: baseline.checks, elapsedMs: 0 },
+        recommendedNextAction: 'Re-observe the page and choose a condition that distinguishes this click from the existing state. No click was dispatched.' };
+    }
     const clicked = await pageOperation('browser_click', args, allowedOrigins, allSites);
-    const result = await verify(args.expect || {}, args.timeoutMs ?? 3000);
-    return { clicked, verification: result, status: result.status };
+    if (clicked?.__aibError) throw new Error(clicked.__aibError);
+    let result;
+    try {
+      result = await verify(args.expect || {}, args.timeoutMs ?? 3000);
+    } catch {
+      return { status: 'uncertain', reason: 'verification_interrupted_after_dispatch', dispatched: true, retryable: false,
+        recommendedNextAction: 'The click was dispatched but page verification was interrupted. Re-observe and independently verify the outcome before any new action; do not click again automatically.' };
+    }
+    if (result.status !== 'success') {
+      return { clicked, verification: { ...result, status: 'not_observed' }, status: 'uncertain',
+        reason: 'expected_outcome_not_observed', dispatched: true, retryable: false,
+        recommendedNextAction: 'The click was dispatched, but its expected outcome was not observed before the deadline. Re-observe and independently verify whether it completed; do not click again automatically.' };
+    }
+    return { clicked, verification: result, status: 'success', dispatched: true, retryable: false };
   }
   if (name === 'browser_fill') {
     if (typeof args.text !== 'string' || args.text.length > 20000 || el.readOnly) throw new Error('Invalid text or readonly field');
@@ -755,8 +782,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   if (name === 'browser_fill_verified') {
     const filled = await pageOperation('browser_fill', args, allowedOrigins, allSites);
     const current = el.isContentEditable ? el.textContent : el.value;
-    const result = await verify(args.expect || { valueMatches: args.text }, args.timeoutMs ?? 3000, { value: current });
-    return { filled, verification: result, status: result.status };
+    const result = await verify(args.expect || { valueMatches: args.text }, args.timeoutMs ?? 3000, { value: current, getValue: () => el.isConnected ? (el.isContentEditable ? el.textContent : el.value) : undefined });
+    if (result.status !== 'success') return { filled, verification: { ...result, status: 'not_observed' }, status: 'uncertain',
+      reason: 'filled_value_not_observed', dispatched: true, retryable: false,
+      recommendedNextAction: 'The fill events were dispatched, but the expected value was not observed. Re-read the field and application state before any further write; do not refill automatically.' };
+    return { filled, verification: result, status: 'success', dispatched: true, retryable: false };
   }
   throw new Error('Unsupported page operation');
   } catch (error) {

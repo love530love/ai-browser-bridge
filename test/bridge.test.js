@@ -85,6 +85,12 @@ test('strict validation denies unsupported actions and unsafe URL schemes', () =
   assert.throws(() => validateCall('browser_read', { tabId: 1, mode: 'expensive' }));
   assert.throws(() => validateCall('browser_find_text', { tabId: 1, query: '', maxMatches: 5 }));
   assert.throws(() => validateCall('browser_upload', { tabId: 1, ref: 'a', filePath: 'C:/a.zip', sha256: 'bad' }));
+  assert.throws(() => validateCall('browser_click_verified', { tabId: 1, ref: 'a', expect: {} }), /non-empty/);
+  assert.throws(() => validateCall('browser_click_verified', { tabId: 1, ref: 'a', expect: { valueMatches: 'done' } }), /expect condition/);
+  assert.throws(() => validateCall('browser_click_verified', { tabId: 1, ref: 'a', expect: { textAppears: '' } }), /expect condition/);
+  assert.throws(() => validateCall('browser_fill_verified', { tabId: 1, ref: 'a', text: '', expect: { urlContains: '/done' } }), /expect condition/);
+  validateCall('browser_fill_verified', { tabId: 1, ref: 'a', text: '', expect: { valueMatches: '' } });
+  validateCall('browser_click_verified', { tabId: 1, ref: 'a', expect: { textAppears: 'Done' } });
 });
 test('execution profile is available offline without an extension or model', async t => {
   const { b } = await setup(t);
@@ -146,17 +152,39 @@ test('two clients serialize; response ids match and audit omits typed content', 
   assert.equal(received.length, 2); assert.notEqual(received[0].id, received[1].id);
   assert.equal(audit.length, 2); assert.ok(!JSON.stringify(audit).includes('SECRET'));
 });
+test('audit distinguishes uncertain dispatched writes without recording expectation text', async t => {
+  const audit = []; const { b, wsUrl } = await setup(t, { audit: row => audit.push(row) });
+  const ws = await extension(wsUrl);
+  ws.on('message', raw => {
+    const msg = JSON.parse(raw);
+    if (msg.type === 'command') ws.send(JSON.stringify({ type: 'result', id: msg.id, result: { status: 'uncertain', reason: 'expected_outcome_not_observed', dispatched: true, retryable: false } }));
+  });
+  const expectation = 'PRIVATE_EXPECTATION_TEXT';
+  const result = await b.call('browser_click_verified', { tabId: 1, ref: 'safe-ref', expect: { textAppears: expectation } });
+  assert.equal(result.status, 'uncertain');
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].outcome, 'uncertain');
+  assert.equal(audit[0].resultStatus, 'uncertain');
+  assert.equal(audit[0].dispatched, true);
+  assert.ok(!JSON.stringify(audit).includes(expectation));
+  ws.close();
+});
 test('disconnect fails active and queued requests without replay', async t => {
   const { b, wsUrl } = await setup(t); const ws = await extension(wsUrl);
   const first = assert.rejects(b.call('browser_click', { tabId: 1, ref: 'one' }), /unknown/);
   const second = assert.rejects(b.call('browser_click', { tabId: 1, ref: 'two' }), /Not executed/);
   ws.close(); await Promise.all([first, second]); assert.equal(b.status().queued, 0);
 });
-test('timeout stops queue and reports uncertain outcome instead of retrying a write', async t => {
-  const { b, wsUrl } = await setup(t, { timeoutMs: 60 }); await extension(wsUrl);
+test('timeout stops queue and audits the write result as uncertain instead of retrying', async t => {
+  const audit = [];
+  const { b, wsUrl } = await setup(t, { timeoutMs: 60, audit: row => audit.push(row) }); await extension(wsUrl);
   const first = assert.rejects(b.call('browser_click', { tabId: 1, ref: 'one' }), /unknown/);
   const second = assert.rejects(b.call('browser_click', { tabId: 1, ref: 'two' }), /Not executed/);
   await Promise.all([first, second]); assert.equal(b.status().connected, false);
+  const timedOut = audit.find(row => row.tool === 'browser_click');
+  assert.equal(timedOut.outcome, 'error');
+  assert.equal(timedOut.resultStatus, 'uncertain');
+  assert.equal(timedOut.dispatched, null);
 });
 
 test('read-only timeout returns waiting and keeps the bridge connected', async t => {

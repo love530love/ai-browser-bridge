@@ -1,7 +1,18 @@
 const tabId = { type: 'integer', minimum: 1 };
 const text = (maxLength = 20000) => ({ type: 'string', minLength: 1, maxLength });
 const ref = text(100);
-const expect = { type: 'object' };
+const clickExpectation = {
+  type: 'object', minProperties: 1, additionalProperties: false,
+  properties: { textAppears: text(1000), urlContains: text(1000), elementLabelAppears: text(1000) }
+};
+const fillExpectation = {
+  type: 'object', minProperties: 1, additionalProperties: false,
+  properties: { valueMatches: { type: 'string', maxLength: 20000 }, textAppears: text(1000) }
+};
+const uploadExpectation = {
+  type: 'object', minProperties: 1, additionalProperties: false,
+  properties: { fileNameAppears: text(255), textAppears: text(1000) }
+};
 const agent = text(120);
 const wait = { type: 'boolean' };
 const timeoutMs = (maximum = 60000) => ({ type: 'integer', minimum: 100, maximum });
@@ -98,10 +109,10 @@ export const TOOLS = [
   tool('browser_upload', 'Attach one local file to a current file-input ref without opening the OS dialog. The file must be under a locally allowlisted upload root and match the caller-provided SHA256. This selects the file only; it never clicks submit.', {
     tabId, ref, filePath: text(32767), sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, agent
   }, ['tabId', 'ref', 'filePath', 'sha256']),
-  tool('browser_click_verified', 'Click a current element ref once, then verify a bounded expected outcome such as textAppears, urlContains, or elementLabelAppears. Returns success/uncertain/failed; never retries. If the tab is leased, pass the matching agent.', { tabId, ref, expect, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'expect']),
-  tool('browser_fill_verified', 'Fill a current text ref, then verify valueMatches and optional textAppears. Returns success/uncertain/failed; never presses Enter. If the tab is leased, pass the matching agent.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, expect, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'text', 'expect']),
+  tool('browser_click_verified', 'Click a current element ref once, then verify a bounded expected outcome. If that condition is already true before the click, returns not_dispatched. After dispatch, an unobserved outcome is uncertain and non-retryable; re-observe and independently verify before any new action. Never retries. If the tab is leased, pass the matching agent.', { tabId, ref, expect: clickExpectation, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'expect']),
+  tool('browser_fill_verified', 'Fill a current text ref, then verify valueMatches and optional textAppears. Returns success/uncertain/failed; never presses Enter. If the tab is leased, pass the matching agent.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, expect: fillExpectation, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'text', 'expect']),
   tool('browser_upload_verified', 'Attach one allowlisted local file to a current file-input ref, then verify selected filename and optional page text. Never clicks submit.', {
-    tabId, ref, filePath: text(32767), sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, expect, timeoutMs: timeoutMs(10000), agent
+    tabId, ref, filePath: text(32767), sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, expect: uploadExpectation, timeoutMs: timeoutMs(10000), agent
   }, ['tabId', 'ref', 'filePath', 'sha256', 'expect']),
   tool('browser_scroll', 'Scroll main frame by a bounded pixel offset. If the tab is leased, pass the matching agent.', { tabId, deltaY: { type: 'integer', minimum: -5000, maximum: 5000 }, agent }, ['tabId', 'deltaY']),
   tool('browser_scroll_element', 'Scroll a current scrollable container ref from browser_scan_overlays or browser_read. Use for nested panes, modal bodies, virtualized lists, and dropdown menus. If the tab is leased, pass the matching agent.', { tabId, ref, deltaY: { type: 'integer', minimum: -5000, maximum: 5000 }, agent }, ['tabId', 'ref', 'deltaY']),
@@ -214,6 +225,19 @@ export function validateCall(name, args) {
     const action = args.action;
     const required = { Tap: ['x', 'y', 'coordinateToken'], 'Double Tap': ['x', 'y', 'coordinateToken'], 'Long Press': ['x', 'y', 'coordinateToken'], Hover: ['x', 'y', 'coordinateToken'], Swipe: ['x', 'y', 'endX', 'endY', 'coordinateToken'], Type: ['text'], Key: ['key'], Wait: ['durationMs'] }[action] || [];
     for (const field of required) if (!Object.hasOwn(args, field)) throw new Error(`Missing action argument: ${field} for action "${action}". ${argSummary(name, s)}`);
+  }
+  if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'].includes(name)) {
+    const expectation = args.expect;
+    const expectationSchema = s.properties.expect;
+    if (!expectation || typeof expectation !== 'object' || Array.isArray(expectation) || Object.keys(expectation).length < (expectationSchema.minProperties ?? 0)) {
+      throw new Error('expect must be a non-empty object with supported string conditions');
+    }
+    for (const [key, value] of Object.entries(expectation)) {
+      const field = Object.hasOwn(expectationSchema.properties, key) ? expectationSchema.properties[key] : null;
+      if (!field || typeof value !== 'string' || value.length > field.maxLength || value.length < (field.minLength ?? 0) || (key !== 'valueMatches' && !value.trim())) {
+        throw new Error(`Invalid expect condition: ${key}`);
+      }
+    }
   }
   if (args.url) {
     const u = new URL(args.url);

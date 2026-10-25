@@ -45,7 +45,8 @@ export async function key(send, chord) {
     if (!bit) throw new Error('Unsupported key modifier'); modifiers |= bit;
   }
   const named = { Enter: ['Enter', 13, '\r'], Tab: ['Tab', 9], Escape: ['Escape', 27], Backspace: ['Backspace', 8], Delete: ['Delete', 46], ArrowLeft: ['ArrowLeft', 37], ArrowRight: ['ArrowRight', 39], ArrowUp: ['ArrowUp', 38], ArrowDown: ['ArrowDown', 40], Home: ['Home', 36], End: ['End', 35], PageUp: ['PageUp', 33], PageDown: ['PageDown', 34], Space: ['Space', 32, ' '] };
-  const def = named[name] || (/^[a-zA-Z0-9]$/.test(name) ? [/^[0-9]$/.test(name) ? `Digit${name}` : `Key${name.toUpperCase()}`, name.toUpperCase().charCodeAt(0), name] : null);
+  const functionKey = /^F([1-9]|1[0-2])$/.exec(name);
+  const def = named[name] || (functionKey ? [name, 111 + Number(functionKey[1])] : null) || (/^[a-zA-Z0-9]$/.test(name) ? [/^[0-9]$/.test(name) ? `Digit${name}` : `Key${name.toUpperCase()}`, name.toUpperCase().charCodeAt(0), name] : null);
   if (!def) throw new Error('Unsupported key');
   const args = { key: name === 'Space' ? ' ' : name, code: def[0], windowsVirtualKeyCode: def[1], modifiers };
   await send('Input.dispatchKeyEvent', { type: 'keyDown', ...args, ...(def[2] && !(modifiers & 7) ? { text: def[2] } : {}) });

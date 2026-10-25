@@ -57,3 +57,13 @@
 - 滚动 API 单次 delta 上限为 5000，且滚动会令前次扫描 ref 变 stale；测试据此分段滚动、每次刷新容器 ref，并验证旧 ref 拒绝，未提高工具上限或放宽校验。Shadow DOM 控件移至遍历早期以免测试 fixture 的大 DOM 抢占其 200ms 扫描预算。
 - 最终 `browser-stress.js` 10 项通过。并发过载记录 24 个调用中的 8 个 `queue_full`、16 个完成；16 个完成请求均找到目标（报告分列 `completedOverloadReads` 与 `overloadReadsFindingTarget`）。`multi-agent-stress.js` 6 项通过，36 个并发读/查任务约 1.1 秒完成；测试输出版本标签改为动态读取 package 版本，确认实际为 0.5.20。完整 Node 测试 120/120 通过，`git diff --check` 无空白错误（仅 Git 的 LF→CRLF 提示）。
 - 边界：全部为临时 Playwright Chromium profile 与本机 localhost fixture；本地 fixture 审计可独立核对 Bridge 之外的业务副作用，但不是第三方站点验收。尚未真实 Chrome/目标站点登录页验证，不能据此声称线上导出问题解决或下载成功。
+
+## 0.5.21 verified click 结果语义（2026-10-25）
+
+- 风险：`browser_click_verified` 原先先点击、后检查条件。期待条件如果点击前已满足，会被误报为本次动作成功；条件等到期仍不满足则返回 `failed`，但 click 已派发，调用方可能把它误当成“肯定没发生”并重复触发。
+- 修复：点击前同步检查有限的 text/url/element-label 条件。若已经满足则返回 `not_dispatched`、`dispatched:false`、`retryable:false`。点击一次后观察成功返回 `success`；等待截止或验证被中断则返回 `uncertain`、`dispatched:true`、`retryable:false`，要求重新观察与独立核验，不自动重试。`elementLabelAppears` 也扫描无 `href` 的 anchor，覆盖先前发现/后置条件选择器不一致的问题。
+- Fill 观察：`browser_fill_verified` 在条件初始满足时用短 settle window（最多 50ms）再读取实时控件值；等待期间持续读取当前值，不再依赖填充后的静态快照。若前端回滚导致预期值未观察到，返回 `uncertain`、`dispatched:true`、`retryable:false`，提示先重读而非自动重填。
+- 参数契约：click/fill/upload verified 的条件对象现要求非空，只允许各自工具支持的字符串字段；值有长度限制。这样可避免空/无效 expectation 在副作用派发后才变成无意义的验证失败。
+- 审计：受限记录结果状态（白名单）及布尔 `dispatched`，明确 `uncertain`；不记录 expectation 文本或页面正文。扩展断连/写操作超时会保留 `outcome:error` 与错误分类，同时记录 `resultStatus:uncertain`、`dispatched:null`，表示调用结果丢失且页面事件派发无法确认。
+- 验证：本机 Chromium fixture 的 HTTP `/audit` 独立记录表明，点击前条件已满足时没有请求；“请求已成功但预期 UI 文案不出现”时 Bridge 返回 `uncertain` 且服务端副作用正好一次。成功分支仍由精确行文本期待值与服务端记录交叉验证。
+- 边界：这改善的是操作结果分类与不重放契约，不证明真实业务成功，也不证明文件已下载/落盘。Chrome/第三方页面验收和真实下载事件观察仍待单独实现与授权评估。

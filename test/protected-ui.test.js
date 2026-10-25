@@ -12,13 +12,33 @@ test('protected UI classifier covers Chrome-owned and DevTools pages', () => {
 });
 
 test('high risk protected UI requires fresh explicit approval', () => {
-  assert.equal(protectedUiRisk('reload_extension', 'extension abc'), 'high');
-  const plan = protectedUiPlan({ url: 'chrome://extensions', action: 'reload_extension', target: 'extension abc' });
+  assert.equal(protectedUiRisk('install_extension', 'extension abc'), 'high');
+  const plan = protectedUiPlan({ url: 'chrome://extensions', action: 'install_extension', target: 'extension abc' });
   assert.equal(plan.status, 'requires_user');
   assert.equal(plan.confirmation.required, true);
   assert.equal(plan.confirmation.singleUse, true);
   assert.match(plan.authorization, /explicit user approval/);
   assert.match(plan.guarantees.join(' '), /not bypassed/);
+});
+
+test('ordinary extension maintenance respects task authorization but never claims execution', () => {
+  const plan = protectedUiPlan({ url: 'chrome://extensions/', action: 'reload_extension', target: 'extensions: exact-id' });
+  assert.equal(plan.status, 'desktop_adapter_required');
+  assert.equal(plan.confirmation, null);
+  assert.equal(plan.workflow.surface, 'extension_manager');
+  assert.equal(plan.execution.dispatched, false);
+  assert.equal(plan.execution.adapterAvailability, 'not_probed');
+  assert.match(plan.authorization, /existing user-authorized/);
+});
+
+test('DevTools and source viewer have explicit routes rather than ordinary DOM claims', () => {
+  const devtools = protectedUiPlan({ url: 'devtools://devtools/bundled/inspector.html', action: 'inspect' });
+  assert.equal(devtools.workflow.surface, 'devtools');
+  assert.match(devtools.workflow.steps.join(' '), /F12 is a toggle/);
+  assert.equal(protectedUiPlan({ url: 'view-source:https://example.test/' }).workflow.surface, 'source_viewer');
+  assert.equal(protectedUiPlan({ url: 'chrome://downloads/' }).workflow.surface, 'download_manager');
+  assert.equal(protectedUiPlan({ url: 'chrome://settings/security', action: 'observe', target: 'security' }).confirmation, null);
+  assert.equal(protectedUiPlan({ url: 'chrome://settings/security', action: 'change_security_setting' }).confirmation.required, true);
 });
 
 test('low risk protected UI still requires a desktop adapter', () => {

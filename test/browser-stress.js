@@ -42,13 +42,13 @@ const stressRows = Array.from({ length: 1000 }, (_, i) => {
 const virtualRows = `<div id="vwindow" style="position:absolute;inset:0 auto auto 0;width:100%"></div><div style="height:40000px"></div>`;
 const chaosPage = `<!doctype html><html lang="en"><meta charset="utf-8"><title>Bridge adversarial fixture</title>
 <style>body{font:14px sans-serif}#vscroll{height:240px;overflow:auto;position:relative;border:1px solid #444}#vwindow [role=listitem]{height:32px}.records{height:220px;overflow:auto}.records [role=row]{display:flex;gap:12px;padding:4px}#cover{position:fixed;inset:0;background:rgba(255,255,255,.01);z-index:99999}</style>
-<h1>Adversarial local fixture</h1><test-widget></test-widget><div id="deep"></div><section class="records">${stressRows}</section><div id="vscroll">${virtualRows}</div>
+<h1>Adversarial local fixture</h1><button id="unconfirmed-export">Export with no page confirmation</button><a id="unlinked-export">Export billing report</a><input id="verified-input" value=""><span id="value-state">empty</span><test-widget></test-widget><div id="deep"></div><section class="records">${stressRows}</section><div id="vscroll">${virtualRows}</div>
 <iframe title="same-origin-frame" src="/frame"></iframe><div id="cover" hidden></div>
 <script>
 const deep=document.querySelector('#deep');let parent=deep;for(let i=0;i<400;i++){const next=document.createElement('div');next.dataset.depth=i;parent.append(next);parent=next}parent.textContent='DEEP_SENTINEL_6f02d5';
 const vwindow=document.querySelector('#vwindow');function render(){const start=Math.floor(document.querySelector('#vscroll').scrollTop/32);vwindow.style.transform='translateY('+start*32+'px)';vwindow.innerHTML=Array.from({length:30},(_,i)=>{const n=start+i;return '<div role="listitem">Virtual row '+n+(n===940?' VIRTUAL_TARGET_940':'')+'</div>'}).join('')}document.querySelector('#vscroll').addEventListener('scroll',render);render();
 class TestWidget extends HTMLElement{constructor(){super();const root=this.attachShadow({mode:'open'});root.innerHTML='<button aria-label="Shadow sentinel action">Shadow sentinel action</button>'}}customElements.define('test-widget',TestWidget);
-document.querySelectorAll('[role=row] button').forEach(button=>button.addEventListener('click',async()=>{const row=button.closest('[role=row]');const record=row.dataset.record;row.querySelector('.row-status').textContent='Exported '+record;await fetch('/audit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({record,action:'export'})})}));
+document.querySelectorAll('[role=row] button').forEach(button=>button.addEventListener('click',async()=>{const row=button.closest('[role=row]');const record=row.dataset.record;row.querySelector('.row-status').textContent='Exported '+record;await fetch('/audit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({record,action:'export'})})}));document.querySelector('#unconfirmed-export').addEventListener('click',()=>{fetch('/audit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({record:'unconfirmed-record',action:'unconfirmed-export'})})});document.querySelector('#unlinked-export').addEventListener('click',event=>{event.currentTarget.setAttribute('aria-label','Report export queued');fetch('/audit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({record:'unlinked-record',action:'unlinked-export'})})});document.querySelector('#verified-input').addEventListener('input',event=>{const target=event.currentTarget;if(target.value==='transient'){setTimeout(()=>{target.value='';document.querySelector('#value-state').textContent='reverted'},40)}else document.querySelector('#value-state').textContent='committed'});
 </script></html>`;
 const framePage = '<!doctype html><html><body><main>FRAME_SENTINEL_48ac31</main></body></html>';
 const fixture = http.createServer(async (req, res) => {
@@ -248,12 +248,45 @@ try {
     for (let i = 0; i < 40 && !externalActions.some(item => item.record === 'record-0719'); i++) await new Promise(resolve => setTimeout(resolve, 25));
     assert.deepEqual(externalActions.filter(item => item.action === 'export'), [{ record: 'record-0719', action: 'export' }]);
 
+    const noConfirmationTarget = await call('browser_find_element', { tabId, query: 'Export with no page confirmation', action: 'click', maxResults: 2 });
+    assert.equal(noConfirmationTarget.candidates.length, 1);
+    const alreadySatisfied = await call('browser_click_verified', { tabId, ref: noConfirmationTarget.candidates[0].ref, expect: { textAppears: 'Adversarial local fixture' }, timeoutMs: 150 });
+    assert.equal(alreadySatisfied.status, 'not_dispatched');
+    assert.equal(alreadySatisfied.dispatched, false);
+    assert.equal(externalActions.some(item => item.action === 'unconfirmed-export'), false);
+
+    const unconfirmed = await call('browser_click_verified', { tabId, ref: noConfirmationTarget.candidates[0].ref, expect: { textAppears: 'EXPECTATION_NEVER_VISIBLE_6f02d5' }, timeoutMs: 150 });
+    assert.equal(unconfirmed.status, 'uncertain');
+    assert.equal(unconfirmed.dispatched, true);
+    assert.equal(unconfirmed.retryable, false);
+    for (let i = 0; i < 40 && !externalActions.some(item => item.action === 'unconfirmed-export'); i++) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.deepEqual(externalActions.filter(item => item.action === 'unconfirmed-export'), [{ record: 'unconfirmed-record', action: 'unconfirmed-export' }]);
+
+    const unlinkedTarget = await call('browser_find_element', { tabId, query: 'Export billing report', action: 'click', maxResults: 2 });
+    assert.equal(unlinkedTarget.candidates.length, 1);
+    assert.equal(unlinkedTarget.candidates[0].tag, 'a');
+    assert.equal(unlinkedTarget.candidates[0].clickability, 'unverified');
+    const unlinkedResult = await call('browser_click_verified', { tabId, ref: unlinkedTarget.candidates[0].ref, expect: { elementLabelAppears: 'Report export queued' }, timeoutMs: 500 });
+    assert.equal(unlinkedResult.status, 'success');
+    for (let i = 0; i < 40 && !externalActions.some(item => item.action === 'unlinked-export'); i++) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.deepEqual(externalActions.filter(item => item.action === 'unlinked-export'), [{ record: 'unlinked-record', action: 'unlinked-export' }]);
+
+    const inputTarget = await call('browser_find_element', { tabId, query: 'verified-input', action: 'fill', maxResults: 2 });
+    assert.equal(inputTarget.candidates.length, 1);
+    const revertedFill = await call('browser_fill_verified', { tabId, ref: inputTarget.candidates[0].ref, text: 'transient', expect: { valueMatches: 'transient' }, timeoutMs: 300 });
+    assert.equal(revertedFill.status, 'uncertain');
+    assert.equal(revertedFill.dispatched, true);
+    assert.equal(revertedFill.retryable, false);
+    assert.equal(revertedFill.verification.status, 'not_observed');
+    assert.equal(revertedFill.verification.checks.valueMatches, false);
+    assert.equal(revertedFill.verification.checks.textAppears, undefined);
+
     const staleTarget = await call('browser_find_element', { tabId, query: 'Export report', rowText: 'Order 0720', action: 'click', maxResults: 3 });
     assert.equal(staleTarget.candidates.length, 1);
     await page.locator('#order-0720').evaluate(el => { el.textContent = 'Order 9999'; });
     await assert.rejects(rawCall('browser_click', { tabId, ref: staleTarget.candidates[0].ref }), /Stale row reference/);
     assert.deepEqual(externalActions.filter(item => item.action === 'export'), [{ record: 'record-0719', action: 'export' }]);
-    mark('adversarial fixture verified deep text, iframe and Shadow DOM, virtualized row reveal, exact row targeting, blocked click refusal, one audited external write, and stale-row rejection');
+    mark('adversarial fixture verified deep DOM, iframe, Shadow DOM, virtual rows, unlinked-anchor label changes, live fill rollback detection, verified-click preconditions, uncertain no-replay outcome, independent audit, and stale-row rejection');
   };
 
   const writerPersona = async () => {

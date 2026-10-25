@@ -1,3 +1,13 @@
+## 0.5.21 — 2026-10-25（源码更新，Chrome 现场验收待完成）
+
+- `browser_click_verified` 先验证后置条件是否已经成立；旧状态已满足时返回 `not_dispatched`，不派发点击，避免把先前状态误认作本次点击结果。
+- 点击派发后未观察到期待状态时返回 `uncertain`、`dispatched: true`、`retryable: false`，提示重新观察而非重复点击；`browser_fill_verified` 也会短暂等待并重读实时控件值，派发后值未观察到时返回不可重试的 `uncertain`。
+- `elementLabelAppears` 覆盖无 `href` 的 anchor；这只验证可见标签变化，不代表下载完成或第三方业务副作用已完成。
+- 约束 verified 工具的 expectation 字段，拒绝空条件、无效字段及无效类型；服务审计只记录白名单状态与布尔派发标记，不保存 expectation 文本或页面内容。
+- 隔离 HTTP oracle 验证预先满足条件零派发、无 UI 确认时副作用仅一次但结果 uncertain，以及审计准确记录不泄露条件文本。相关回归结果以本次测试运行结果为准。
+- 修复 verified expectation 对象可通过 `constructor` 等继承属性绕过白名单的问题；升级诊断现把 uncertain 写操作纳入 `attention` 并建议逐项复核。扩展断连/写操作超时也会保留传输错误，同时将可能已派发的写结果单独记为 `uncertain`（派发到页面状态未知），并计入复核统计。
+- CDP 键事件构造新增 F1–F12（含修饰键）；protected-UI 路由/操作计划补充 DevTools、扩展管理、下载页与源码查看器流程。仅支持计划和事件构造，不代表桌面适配器、DevTools 面板或下载记录已实现。
+
 ## 0.5.20 — 2026-10-25（源码更新，Chrome 现场验收待完成）
 
 - 坐标预检与指针输入要求目标文档可见且聚焦、Chrome 标签页 active、窗口 focused；失焦/隐藏时返回结构化 waiting，不发出坐标事件，不自动抢焦点。

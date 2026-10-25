@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 // Diagnostic evidence, not a task-success metric or a claim about exit causes.
 export function usageSummary(directory, now = Date.now()) {
-  const result = { windowHours: 48, commandRecords: 0, commandErrors: 0,
+  const result = { windowHours: 48, commandRecords: 0, commandErrors: 0, uncertainCommands: 0,
     extensionErrorRecords: 0, extensionErrorCategories: {}, duplicateExtensionRecords: 0, extensionDroppedRecords: 0, errorCategories: {}, serviceStarts: 0,
     recoveryConnections: 0, unreadableFiles: 0, malformedRows: 0,
     missingFiles: 0, frequentRestarts: false, exitCause: 'unknown' };
@@ -36,6 +36,7 @@ export function usageSummary(directory, now = Date.now()) {
       continue;
     }
     result.commandRecords++;
+    if (row.outcome === 'uncertain' || row.resultStatus === 'uncertain') result.uncertainCommands++;
     if (row.outcome === 'error') {
       result.commandErrors++;
       const category = typeof row.errorCategory === 'string' && /^[A-Z_]{1,64}$/.test(row.errorCategory) ? row.errorCategory : 'UNKNOWN';
