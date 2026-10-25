@@ -34,9 +34,34 @@ const bridge = createBridge(config, { timeoutMs: 10000 });
 const address = await bridge.listen();
 config.port = address.port;
 
-const fixture = http.createServer((req, res) => {
-  const key = new URL(req.url, 'http://127.0.0.1').pathname.replace('/heavy-', '') || 'a';
+const externalActions = [];
+const stressRows = Array.from({ length: 1000 }, (_, i) => {
+  const id = String(i).padStart(4, '0');
+  return `<div role="row" data-record="record-${id}"><span id="order-${id}">Order ${id}</span><button aria-label="Export report">Export report</button><span class="row-status">pending</span></div>`;
+}).join('');
+const virtualRows = `<div id="vwindow" style="position:absolute;inset:0 auto auto 0;width:100%"></div><div style="height:40000px"></div>`;
+const chaosPage = `<!doctype html><html lang="en"><meta charset="utf-8"><title>Bridge adversarial fixture</title>
+<style>body{font:14px sans-serif}#vscroll{height:240px;overflow:auto;position:relative;border:1px solid #444}#vwindow [role=listitem]{height:32px}.records{height:220px;overflow:auto}.records [role=row]{display:flex;gap:12px;padding:4px}#cover{position:fixed;inset:0;background:rgba(255,255,255,.01);z-index:99999}</style>
+<h1>Adversarial local fixture</h1><test-widget></test-widget><div id="deep"></div><section class="records">${stressRows}</section><div id="vscroll">${virtualRows}</div>
+<iframe title="same-origin-frame" src="/frame"></iframe><div id="cover" hidden></div>
+<script>
+const deep=document.querySelector('#deep');let parent=deep;for(let i=0;i<400;i++){const next=document.createElement('div');next.dataset.depth=i;parent.append(next);parent=next}parent.textContent='DEEP_SENTINEL_6f02d5';
+const vwindow=document.querySelector('#vwindow');function render(){const start=Math.floor(document.querySelector('#vscroll').scrollTop/32);vwindow.style.transform='translateY('+start*32+'px)';vwindow.innerHTML=Array.from({length:30},(_,i)=>{const n=start+i;return '<div role="listitem">Virtual row '+n+(n===940?' VIRTUAL_TARGET_940':'')+'</div>'}).join('')}document.querySelector('#vscroll').addEventListener('scroll',render);render();
+class TestWidget extends HTMLElement{constructor(){super();const root=this.attachShadow({mode:'open'});root.innerHTML='<button aria-label="Shadow sentinel action">Shadow sentinel action</button>'}}customElements.define('test-widget',TestWidget);
+document.querySelectorAll('[role=row] button').forEach(button=>button.addEventListener('click',async()=>{const row=button.closest('[role=row]');const record=row.dataset.record;row.querySelector('.row-status').textContent='Exported '+record;await fetch('/audit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({record,action:'export'})})}));
+</script></html>`;
+const framePage = '<!doctype html><html><body><main>FRAME_SENTINEL_48ac31</main></body></html>';
+const fixture = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://127.0.0.1');
+  if (req.method === 'POST' && url.pathname === '/audit') {
+    let body = ''; for await (const chunk of req) body += chunk;
+    externalActions.push(JSON.parse(body));
+    res.writeHead(204); res.end(); return;
+  }
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  if (url.pathname === '/frame') { res.end(framePage); return; }
+  if (url.pathname === '/chaos') { res.end(chaosPage); return; }
+  const key = url.pathname.replace('/heavy-', '') || 'a';
   res.end(heavyPage(key));
 });
 await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
@@ -156,6 +181,81 @@ try {
     mark('diagnostics persona inspected health debug and observe during load');
   };
 
+  const adversarialPersona = async () => {
+    const opened = await call('browser_open', { url: `${origin}/chaos` });
+    const tabId = opened.tabId;
+    await waitTabReady(tabId);
+    const page = context.pages().find(candidate => candidate.url().includes('/chaos'));
+    assert.ok(page, 'isolated Chromium fixture page must be attached');
+
+    const deep = await call('browser_find_text', { tabId, query: 'DEEP_SENTINEL_6f02d5', maxMatches: 2, contextChars: 40, budgetMs: 3000 });
+    assert.equal(deep.found, true);
+    assert.equal(deep.matches[0].match, 'DEEP_SENTINEL_6f02d5');
+
+    const frameRead = await call('browser_read', { tabId, frame: 'all', maxChars: 2000, maxElements: 40, maxTextNodes: 500, budgetMs: 3000 });
+    assert.ok(frameRead.frameResults.some(item => item.result?.text?.includes('FRAME_SENTINEL_48ac31')));
+    const shadow = await call('browser_shadow_tree', { tabId, maxRoots: 20, maxControls: 30 });
+    assert.ok(shadow.controls.some(item => item.label === 'Shadow sentinel action'));
+
+    const virtualBefore = await call('browser_find_text', { tabId, query: 'VIRTUAL_TARGET_940', maxMatches: 1, contextChars: 30, budgetMs: 2000 });
+    assert.equal(virtualBefore.found, false, 'unmounted virtual row is outside current DOM observation');
+    const scan = await call('browser_scan_overlays', { tabId });
+    const virtualPane = scan.scrollContainers.find(item => item.selector.includes('#vscroll'));
+    assert.ok(virtualPane?.ref);
+    let remainingScroll = 30080;
+    let scrollRef = virtualPane.ref;
+    let scrolled;
+    let staleScrollRefChecked = false;
+    while (remainingScroll > 0) {
+      const deltaY = Math.min(5000, remainingScroll);
+      scrolled = await call('browser_scroll_element', { tabId, ref: scrollRef, deltaY });
+      assert.equal(scrolled.changed, true);
+      remainingScroll -= deltaY;
+      if (remainingScroll > 0) {
+        if (!staleScrollRefChecked) {
+          await assert.rejects(rawCall('browser_scroll_element', { tabId, ref: scrollRef, deltaY: 1 }), /Stale element reference/);
+          staleScrollRefChecked = true;
+        }
+        const refreshedScan = await call('browser_scan_overlays', { tabId });
+        const refreshedPane = refreshedScan.scrollContainers.find(item => item.selector.includes('#vscroll'));
+        assert.ok(refreshedPane?.ref);
+        scrollRef = refreshedPane.ref;
+      }
+    }
+    const virtualAfter = await call('browser_find_text', { tabId, query: 'VIRTUAL_TARGET_940', maxMatches: 1, contextChars: 30, budgetMs: 2000 });
+    assert.equal(virtualAfter.found, true);
+    assert.equal(virtualAfter.matches[0].match, 'VIRTUAL_TARGET_940');
+
+    await page.locator('[data-record="record-0719"]').scrollIntoViewIfNeeded();
+    const overlayCandidate = await call('browser_find_element', { tabId, query: 'Export report', rowText: 'Order 0719', action: 'click', maxResults: 3 });
+    assert.equal(overlayCandidate.found, true);
+    assert.equal(overlayCandidate.candidates.length, 1);
+    assert.match(overlayCandidate.candidates[0].rowText, /Order 0719/);
+    assert.equal(overlayCandidate.candidates[0].covered, false);
+
+    await page.locator('#cover').evaluate(el => { el.hidden = false; });
+    const covered = await call('browser_find_element', { tabId, query: 'Export report', rowText: 'Order 0719', action: 'click', includeCovered: true, maxResults: 3 });
+    assert.equal(covered.candidates.length, 1);
+    assert.equal(covered.candidates[0].covered, true);
+    await assert.rejects(rawCall('browser_click', { tabId, ref: covered.candidates[0].ref }), /Element is covered/);
+    await page.locator('#cover').evaluate(el => { el.hidden = true; });
+
+    const fresh = await call('browser_find_element', { tabId, query: 'Export report', rowText: 'Order 0719', action: 'click', maxResults: 3 });
+    assert.equal(fresh.candidates.length, 1);
+    assert.equal(fresh.candidates[0].rowText.includes('Order 0719'), true);
+    const clicked = await call('browser_click_verified', { tabId, ref: fresh.candidates[0].ref, expect: { textAppears: 'Exported record-0719' }, timeoutMs: 3000 });
+    assert.equal(clicked.status, 'success');
+    for (let i = 0; i < 40 && !externalActions.some(item => item.record === 'record-0719'); i++) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.deepEqual(externalActions.filter(item => item.action === 'export'), [{ record: 'record-0719', action: 'export' }]);
+
+    const staleTarget = await call('browser_find_element', { tabId, query: 'Export report', rowText: 'Order 0720', action: 'click', maxResults: 3 });
+    assert.equal(staleTarget.candidates.length, 1);
+    await page.locator('#order-0720').evaluate(el => { el.textContent = 'Order 9999'; });
+    await assert.rejects(rawCall('browser_click', { tabId, ref: staleTarget.candidates[0].ref }), /Stale row reference/);
+    assert.deepEqual(externalActions.filter(item => item.action === 'export'), [{ record: 'record-0719', action: 'export' }]);
+    mark('adversarial fixture verified deep text, iframe and Shadow DOM, virtualized row reveal, exact row targeting, blocked click refusal, one audited external write, and stale-row rejection');
+  };
+
   const writerPersona = async () => {
     let input;
     for (let i = 0; i < 20 && !input?.ref; i++) {
@@ -190,6 +290,7 @@ try {
     mark('crowd persona completed twelve simultaneous bounded read-only requests');
   };
 
+  await adversarialPersona();
   await Promise.all([findPersona(), readerPersona(), diagnosticsPersona(), crowdPersona()]);
   mark('read-only personas completed under concurrent heavy-page pressure');
   await writerPersona();
@@ -198,7 +299,8 @@ try {
   await new Promise(resolve => setTimeout(resolve, 100));
   const overload = await Promise.all(Array.from({ length: 24 }, (_, i) => rawCall('browser_find_text', { tabId: tabIds[i % tabIds.length], query: 'Task 114', mode: 'cheap', maxMatches: 1, contextChars: 40 })));
   const full = overload.filter(result => result.status === 'waiting' && result.reason === 'queue_full');
-  const found = overload.filter(result => result.found === true);
+  const completed = overload.filter(result => result.status !== 'waiting' && !result.error);
+  const found = completed.filter(result => result.found === true);
   assert.ok(full.length >= 1, `expected queue_full, got ${JSON.stringify(overload.map(result => result.reason || result.found).slice(0, 30))}`);
   assert.ok(found.length >= 1);
   await slow;
@@ -209,7 +311,8 @@ try {
     checks,
     tabs: tabIds.length,
     queueFullResponses: full.length,
-    completedOverloadReads: found.length,
+    completedOverloadReads: completed.length,
+    overloadReadsFindingTarget: found.length,
     status: 'passed'
   }, null, 2));
   console.log(`All ${checks.length} stress checks passed. Artifacts: output/stress/`);

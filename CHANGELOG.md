@@ -1,3 +1,21 @@
+## 0.5.20 — 2026-10-25（源码更新，Chrome 现场验收待完成）
+
+- 坐标预检与指针输入要求目标文档可见且聚焦、Chrome 标签页 active、窗口 focused；失焦/隐藏时返回结构化 waiting，不发出坐标事件，不自动抢焦点。
+- 鼠标移动前和每次按下前再次验证前台状态与坐标目标；Double Tap 第一次点击后若目标改变、暂停或断连则取消第二击，部分派发返回 uncertain，明确禁止盲重放。目标变化回传签发时预期与实际命中摘要、标签、角色、文案、行上下文及失败原因，继续 fail-closed；一次动作结束后销毁 token。暂停/断连会阻止后续 CDP 输入及新的页面写操作/导航，同时允许 keyUp/mouseReleased 清理已按下状态。
+- 精确文本查找可发现无 href 的锚点；候选角色不误报为 link，并标记 `clickability: unverified`，规划器仍要求先检查截图/上下文。
+- `browser_health` 并列 Chrome tab.active、window.focused 与 document visibilityState/hasFocus；`browser_debug` 说明只代表文档层状态。
+- 回归覆盖隐藏/失焦、token 失效、目标命中变化、无 href 锚点发现、移动前阻断及双击中途暂停/断连取消第二击；单元测试结果见本次修复记录。真实业务页面部署验收仍待完成。
+- 修复 worker 中受控指针按下计数器作用域错误，补正显式暂停返回 `extension_paused` 的 E2E 预期。扩展 E2E 35/35、全量 Node 120/120 通过。
+- 新增隔离对抗 stress：深层 DOM、虚拟滚动、千行表格精确定位、同源 iframe、Open Shadow DOM、遮挡拒绝、stale row 与独立服务端副作用计数。压力测试 10 项、36 并发多 Agent 测试 6 项通过；完整范围与非现场验收边界见修复记录。
+- 详细根因、改动文件、测试和残余边界见 `docs/BROWSER-REMEDIATION-2026-10-25.md`。
+
+## 0.5.19 — 2026-10-25（源码更新，现场部署待验收）
+
+- 修复 network_summary 和性能诊断的 CDP 返回值层级错误，不再把已有资源误报为空。
+- 网络摘要标明来源、页面就绪状态、缓冲限制并去除 URL query/fragment/用户信息；诊断失败与合法空数据分开。
+- fill 明确返回派发事件及应用状态未验证；capabilities 显示采集工具的真实实现边界。
+- 业务后台处置记录见 `docs/BROWSER-REMEDIATION-2026-10-25.md`；网络响应体、任意 evaluate、page_source 仍未实现。
+
 ## 0.5.18 — 2026-10-24
 
 - 扩展错误在 Chrome local storage 暂存最多 100 条，连接恢复后补传；服务 audit 写入成功才确认移除。保留事件 ID，分析去重并报告溢出数量，不保存原始网页错误内容。
@@ -461,7 +479,7 @@ fetch failed            → Bridge service is not listening or refused the conne
   - 同时第三方 C 持续读取另一个标签页 T2；
   - 结果：**C 读取 12/12 全部成功，全程无 `fetch failed`**，扩展保持连接；
   - 修复前同一场景：B 超时 20s → 扩展断开 → C 全部 `fetch failed`。
-- 复现脚本：`K:\PythonProjects5\FlagGems-sglang\competition\coordination\probes\probe_browser_bridge.py`（跨项目，路径按实际调整）。
+- 复现脚本：跨项目的协调探针脚本（具体位置按本机工作区布局确定）；公开记录不包含本机绝对路径。
 
 ### 生效条件
 

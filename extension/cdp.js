@@ -13,15 +13,16 @@ export async function withDebugger(tabId, fn) {
   try { return await fn((method, params = {}) => chrome.debugger.sendCommand(target, method, params)); }
   finally { await chrome.debugger.detach(target).catch(() => {}); }
 }
-export async function pointer(send, { x, y, action = 'click', endX, endY, beforePress }) {
+export async function pointer(send, { x, y, action = 'click', endX, endY, beforeMove, beforePress }) {
   const button = action === 'right' ? 'right' : 'left';
+  if (beforeMove && !(await beforeMove())) return false;
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-  if (action === 'hover') return;
-  if (beforePress && !(await beforePress())) return;
+  if (action === 'hover') return true;
   const count = action === 'double' ? 2 : 1;
   let pressed = false;
   try {
     for (let i = 1; i <= count; i++) {
+      if (beforePress && !(await beforePress(i))) return false;
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons: button === 'right' ? 2 : 1, clickCount: i });
       pressed = true;
       if (action === 'long') await new Promise(resolve => setTimeout(resolve, 600));
@@ -34,6 +35,7 @@ export async function pointer(send, { x, y, action = 'click', endX, endY, before
   } finally {
     if (pressed) await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0 }).catch(() => {});
   }
+  return true;
 }
 export async function key(send, chord) {
   const parts = chord.split('+'); const name = parts.pop();

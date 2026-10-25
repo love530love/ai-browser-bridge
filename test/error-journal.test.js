@@ -21,10 +21,29 @@ test('outbox bounds storage and records loss instead of growing forever', async 
   await Promise.all([journal.record('worker', 'UNCAUGHT_ERROR'), journal.record('worker', 'UNCAUGHT_ERROR'), journal.record('worker', 'UNCAUGHT_ERROR')]);
   assert.equal(saved.errorOutboxV1.records.length, 2); assert.equal(saved.errorOutboxV1.dropped, 1);
 });
+test('foreground preflight can cancel before mouse movement', async () => {
+  const events = [];
+  const dispatched = await pointer(async (method, args) => { events.push(args.type); }, { x: 10, y: 10, beforeMove: async () => false });
+  assert.equal(dispatched, false);
+  assert.deepEqual(events, []);
+});
 test('hover-induced target change cancels mouse press', async () => {
   const events = [];
   await pointer(async (method, args) => { events.push(args.type); }, { x: 10, y: 10, beforePress: async () => false });
   assert.deepEqual(events, ['mouseMoved']);
   await pointer(async (method, args) => { events.push(args.type); }, { x: 10, y: 10, beforePress: async () => true });
   assert.deepEqual(events.slice(1), ['mouseMoved', 'mousePressed', 'mouseReleased']);
+});
+test('a pause or disconnect after first double-click release cancels the second press', async () => {
+  const events = [];
+  let presses = 0, bridgeConnected = true;
+  const dispatched = await pointer(async (method, args) => {
+    events.push(args.type);
+    if (args.type === 'mouseReleased') bridgeConnected = false;
+  }, {
+    x: 10, y: 10, action: 'double', beforePress: async () => { presses++; return bridgeConnected; }
+  });
+  assert.equal(dispatched, false);
+  assert.equal(presses, 2);
+  assert.deepEqual(events, ['mouseMoved', 'mousePressed', 'mouseReleased']);
 });

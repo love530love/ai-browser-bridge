@@ -146,6 +146,15 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     ordinaryPage: { status: 'available', channels: ['extension_dom', 'accessibility', 'debugger', 'screenshot', 'coordinate_fallback'], modelRequired: false },
     protectedUi: { status: 'requires_user_or_desktop_adapter', channels: ['computer_use', 'isolated_chrome'], pages: ['chrome://extensions', 'chrome://settings', 'chrome://inspect', 'chrome-extension://*'], modelRequired: false },
     nativeMessaging: { status: 'not_configured', purpose: ['lifecycle', 'health', 'diagnostics'], arbitraryShell: false },
+    collection: {
+      networkSummary: { source: 'current main-frame Resource Timing buffer', responseBodies: false, includesPreAttachmentEntries: 'if retained', emptyIsProofOfNoTraffic: false },
+      evaluate: { status: 'not_implemented', note: 'Debugger availability is not arbitrary script execution support.' },
+      networkBodyCapture: { status: 'not_implemented' },
+      pageSource: { status: 'not_implemented', note: 'Live DOM serialization would not equal original HTTP response HTML.' },
+      fill: { events: ['input', 'change'], nativeSetter: true, clearingSearchModeGuaranteed: false },
+      keys: { tool: 'browser_key', examples: ['Escape', 'Enter', 'Tab'] },
+      readiness: { browser_wait_until_ready: 'service connection and queue readiness, not DOM or network idle' }
+    },
     policy: { installOrRemoveExtension: 'requires_user', developerMode: 'requires_user', browserSecuritySettings: 'requires_user', cookiesAndSecrets: 'blocked' },
     fallback: ['ordinary_page', 'protected_ui', 'requires_user'],
     guarantees: ['Protected pages are never misreported as ordinary DOM success.', 'Model outage does not remove deterministic ordinary-page control.', 'High-risk UI changes require a fresh user confirmation and an auditable checkpoint.']

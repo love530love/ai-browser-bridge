@@ -51,7 +51,7 @@ try {
   await panel.waitForFunction(async () => (await chrome.runtime.sendMessage({ type: 'status' })).connectionState === '已连接');
   for (let i = 0; i < 100 && (!bridge.status().connected || bridge.status().extensionVersion !== pkg.version); i++) await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(TOOLS.some(t => t.name === 'browser_find_text'), true);
-  mark('0.4.11 extension connected in isolated stress browser');
+  mark(`${pkg.version} extension connected in isolated stress browser`);
 
   async function rawCall(name, args = {}) {
     const res = await fetch(`http://127.0.0.1:${config.port}/call`, { method: 'POST', headers: { Authorization: `Bearer ${config.agentToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ name, arguments: args }) });

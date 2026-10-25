@@ -1,6 +1,6 @@
 {
   "name": "ai-browser-bridge",
-  "version": "0.5.18",
+  "version": "0.5.20",
   "license": "MIT",
   "private": true,
   "type": "module",

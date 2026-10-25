@@ -51,7 +51,7 @@ export const TOOLS = [
     mode: { type: 'string', enum: ['normal', 'cheap'] },
     agent,
   }, ['tabId', 'query'], true),
-  tool('browser_find_element', 'Find actionable elements by label/text/role/placeholder/nearby text and return ranked refs with geometry and covered state. Read-only; use before choosing click/fill/select/upload.', {
+  tool('browser_find_element', 'Find elements by label/text/role/placeholder/nearby text and return ranked refs with geometry, coverage, and clickability evidence. Exact-text anchors without href may be surfaced as unverified text targets, not guaranteed links or buttons. Read-only; verify row/context before choosing an action.', {
     tabId,
     query: text(1000),
     rowText: { type: 'string', minLength: 1, maxLength: 240, description: 'Require this text in the nearest table/ARIA row. Does not infer identities across detached fixed-column copies.' },
@@ -70,11 +70,11 @@ export const TOOLS = [
     role: { type: 'string', maxLength: 80 },
     agent,
   }, ['tabId', 'query'], true),
-  tool('browser_debug', 'Read-only developer diagnostics for the current page: readiness, focus, scroll, visible combobox options, file inputs, dialogs, iframe count, and element role counts. Use this before guessing coordinates when a page automation step is unclear.', { tabId, agent }, ['tabId'], true),
+  tool('browser_debug', 'Read-only document diagnostics: readyState, document visibilityState and hasFocus, viewport/scroll, visible combobox options, file inputs, dialogs, iframe count, and role counts. Use browser_health to compare these with Chrome tab.active and window.focused before any coordinate input.', { tabId, agent }, ['tabId'], true),
   tool('browser_performance', 'Read-only Chrome DevTools performance snapshot: navigation timing, layout metrics, long-task hints, and page readiness. Use to diagnose heavy SPA pages before choosing a read budget or screenshot.', { tabId, agent }, ['tabId'], true),
-  tool('browser_network_summary', 'Read-only network resource summary from the page performance buffer. Returns sanitized URL, type, duration, transfer size, and failed timing hints; never returns headers, cookies, or response bodies.', { tabId, maxEntries: { type: 'integer', minimum: 1, maximum: 200 }, agent }, ['tabId'], true),
+  tool('browser_network_summary', 'Read current main-frame Resource Timing buffer, including entries from before extension attachment if still retained. Empty does not prove no requests occurred. Omits query strings, credentials, headers and bodies. Not a network capture; other frames/workers and evicted records are excluded.', { tabId, maxEntries: { type: 'integer', minimum: 1, maximum: 200 }, agent }, ['tabId'], true),
   tool('browser_scan_overlays', 'Read-only scan for dialogs, ads, cookie banners, guide overlays, chat widgets, transparent blockers, close buttons, hit-test blockers, and scrollable containers. Use before clicking through complex or ad-heavy pages.', { tabId, agent }, ['tabId'], true),
-  tool('browser_health', 'Layered health check for service, extension, tab permission, content-script injection, debugger availability hints, page readiness, and tool version. Use before diagnosing blank reads or failed automation.', { tabId, agent }, [], true),
+  tool('browser_health', 'Layered health check for service/extension, permissions, Chrome tab.active, Chrome window.focused, document.visibilityState/hasFocus, viewport, page readiness, and tool version. These are separate states; use before coordinate input.', { tabId, agent }, [], true),
   tool('browser_bridge_modes', 'Read available browser-control modes and their fallback order: DOM, verified transactions, picker/upload bridges, CDP keyboard/pointer, screenshot, and coordinate adapter. Use to choose the least fragile mode.', { tabId, agent }, [], true),
   tool('browser_failure_help', 'Read-only retry guidance after a failed browser action. Classifies the failure, recommends the next safest bridge mode, and states whether retry is allowed or human confirmation is required.', {
     tabId,
@@ -126,10 +126,10 @@ export const TOOLS = [
   tool('browser_tab_lease', 'Read enforced tab write lease state.', { tabId, agent }, ['tabId'], true),
   tool('browser_history', 'Back, forward, reload or activate a tab. If the tab is leased, pass the matching agent.', { tabId, action: { type: 'string', enum: ['back', 'forward', 'reload', 'activate'] }, agent }, ['tabId', 'action']),
   tool('browser_wait', 'Wait for visible main-frame text using DOM events, up to 10 seconds. No model polling.', { tabId, text: text(1000), timeoutMs: timeoutMs(10000), agent }, ['tabId', 'text'], true),
-  tool('browser_prepare_coordinate', 'Read-only coordinate preflight after inspecting a fresh screenshot. Returns the topmost target and a single-use 15-second token. Inspect the returned target before acting. Coordinates use 0..1000 viewport units. Repeat preparation after layout changes.', {
+  tool('browser_prepare_coordinate', 'Read-only coordinate preflight after inspecting a fresh screenshot. Requires the target document visible/focused, active Chrome tab, and focused Chrome window; otherwise returns waiting without a token. Returns the topmost target and a single-use 15-second token. Inspect the returned target before acting. Coordinates use 0..1000 viewport units. Repeat preparation after layout changes.', {
     tabId, x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 }, agent
   }, ['tabId', 'x', 'y'], true),
-  tool('browser_action', 'Open-AutoGLM-style browser actions. Pointer actions require a fresh browser_prepare_coordinate token and matching x/y. Coordinates are normalized 0..1000 in current viewport. Supply expectedUrl from latest observation. Observe after every action.', {
+  tool('browser_action', 'Open-AutoGLM-style browser actions. Pointer actions require a fresh browser_prepare_coordinate token and matching x/y, and recheck active tab/window focus/document visibility before movement and press. A changed hit target fails closed with expected-vs-actual diagnostics. Coordinates are normalized 0..1000 in current viewport. Supply expectedUrl from latest observation. Observe after every action.', {
     tabId, action: { type: 'string', enum: ['Tap', 'Double Tap', 'Long Press', 'Hover', 'Swipe', 'Type', 'Key', 'Back', 'Wait'] },
     expectedUrl: text(8000), coordinateToken: text(100), x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 },
     endX: { type: 'number', minimum: 0, maximum: 1000 }, endY: { type: 'number', minimum: 0, maximum: 1000 },

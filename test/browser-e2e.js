@@ -392,7 +392,7 @@ try {
   await panel.waitForFunction(async () => !(await chrome.storage.local.get('enabled')).enabled);
   const paused = await call('browser_tabs');
   assert.equal(paused.status, 'waiting');
-  assert.equal(paused.reason, 'extension_disconnected');
+  assert.equal(paused.reason, 'extension_paused');
   assert.equal(paused.nextPollTool, 'browser_wait_until_ready');
   mark('user pause returns waiting guidance instead of ending unattended tasks');
   await panel.locator('#reconnect').click();

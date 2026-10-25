@@ -142,7 +142,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     visit(document.documentElement, 'html');
     return { title: document.title, url: location.href, shadowRootCount: roots.length, customElementCount, partial: partial || roots.length >= maxRoots || controls.length >= maxControls, visited, roots, controls, traversal: roots.length ? 'open-shadow-roots' : 'none-found', fallback: controls.some(c => c.visible) ? 'use_control_ref_then_reobserve' : 'browser_screenshot', nextSteps: ['Use only a verified target ref with browser_click or browser_fill.', 'If the target is absent, capture browser_screenshot; do not guess coordinates.', 'Re-observe after each action and verify the intended outcome.'], contentTrust: 'untrusted webpage data' };
   }
-  const elementRole = el => el.getAttribute('role') || (el instanceof HTMLButtonElement ? 'button' : el instanceof HTMLAnchorElement ? 'link' : el instanceof HTMLInputElement ? (el.type === 'file' ? 'file' : 'input') : el instanceof HTMLTextAreaElement ? 'textbox' : el instanceof HTMLSelectElement ? 'select' : el.isContentEditable ? 'textbox' : el.tagName.toLowerCase());
+  const elementRole = el => el.getAttribute('role') || (el instanceof HTMLButtonElement ? 'button' : el instanceof HTMLAnchorElement ? (el.hasAttribute('href') ? 'link' : 'generic') : el instanceof HTMLInputElement ? (el.type === 'file' ? 'file' : 'input') : el instanceof HTMLTextAreaElement ? 'textbox' : el instanceof HTMLSelectElement ? 'select' : el.isContentEditable ? 'textbox' : el.tagName.toLowerCase());
   const elementText = el => clean([label(el), el.getAttribute('name'), el.getAttribute('id'), el.textContent].filter(Boolean).join(' '));
   const actionCompatible = (el, action = 'any') => {
     if (action === 'any' || action === 'click') return true;
@@ -174,7 +174,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       while ((node = walker.nextNode())) {
         if (diagnostics.textNodesVisited >= 5000 || performance.now() >= deadline) { diagnostics.textScanPartial = true; break; }
         diagnostics.textNodesVisited++;
-        if (!node.matches('span,div,li') || node.children.length || sensitive(node)) continue;
+        const unlinkedAnchor = node.matches('a:not([href])');
+        const exactLeafText = node.matches('span,div,li') && node.children.length === 0;
+        if ((!unlinkedAnchor && !exactLeafText) || sensitive(node)) continue;
+        const ownerAnchor = !unlinkedAnchor ? node.closest('a:not([href])') : null;
+        if (ownerAnchor && clean(ownerAnchor.textContent).toLowerCase() === query) continue;
         if (clean(node.textContent).toLowerCase() !== query) continue;
         candidates.add(node); textCandidates.add(node);
       }
@@ -198,7 +202,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const box = elementBox(el);
       if (box.covered && !includeCovered) continue;
       const score = (exact ? 100 : starts ? 80 : includes ? 60 : 0) + (box.covered ? -40 : 10) + (actionCompatible(el, action) ? 10 : 0);
-      items.push({ ref, score, rowText, locatorEvidence: textCandidates.has(el) ? 'exact-leaf-text; clickability-unverified' : 'semantic-control', covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...box });
+      items.push({ ref, score, rowText, locatorEvidence: textCandidates.has(el) ? 'exact-visible-text; clickability-unverified' : 'semantic-control', clickability: textCandidates.has(el) ? 'unverified' : 'semantic-control', covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...box });
     }
     return { candidates: items.sort((a, b) => b.score - a.score).slice(0, maxResults), partial: diagnostics.textScanPartial || diagnostics.controlScanPartial, diagnostics };
   };
@@ -322,18 +326,43 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       return JSON.stringify([fingerprint(el), rowContext(el), rect.left, rect.top, rect.width, rect.height,
         dialog?.textContent?.slice(0, 8000) || '', values]);
     };
+    const pageForeground = () => ({ visibilityState: document.visibilityState, focused: document.hasFocus() });
+    const targetEvidence = el => !el ? null : ({ tag: el.tagName?.toLowerCase() || null, role: el.getAttribute?.('role') || null,
+      label: clean(label(el) || el.textContent), rowText: rowContext(el) || null });
     if (name === 'browser_validate_coordinate') {
+      const pageState = pageForeground();
+      if (pageState.visibilityState !== 'visible' || !pageState.focused) {
+        tokens.delete(args.coordinateToken);
+        return { status: 'waiting', retryable: true, reason: 'page_not_foreground', dispatched: false, pageState,
+          nextPollTool: 'browser_health', recommendedNextAction: 'Bring the authorized Chrome window and target tab to the foreground manually, then recheck browser_health and prepare a fresh coordinate. No pointer event dispatched.' };
+      }
       const record = tokens.get(args.coordinateToken);
       if (args.consume !== false) tokens.delete(args.coordinateToken);
-      if (!record || record.stamp !== stamp() || record.nx !== args.x || record.ny !== args.y ||
-          !record.el.isConnected || sensitive(record.el) || !visible(record.el) || record.el.disabled ||
-          record.el.getAttribute('aria-disabled') === 'true' || deepHit(record.x, record.y) !== record.el ||
-          describeTarget(record.el) !== record.signature) {
-        tokens.delete(args.coordinateToken);
-        return { status: 'waiting', reason: 'coordinate_target_changed', dispatched: false,
-          nextPollTool: 'browser_prepare_coordinate', recommendedNextAction: 'Inspect a fresh screenshot and prepare the intended target again. No pointer action dispatched.' };
+      const currentHit = record ? deepHit(record.x, record.y) : null;
+      const connected = !!record?.el?.isConnected;
+      const failures = [];
+      if (!record) failures.push('coordinate_token_missing_or_expired');
+      else {
+        if (record.stamp !== stamp()) failures.push('page_or_viewport_changed');
+        if (record.nx !== args.x || record.ny !== args.y) failures.push('coordinate_mismatch');
+        if (!connected) failures.push('prepared_target_disconnected');
+        if (connected && (sensitive(record.el) || !visible(record.el) || record.el.disabled || record.el.getAttribute('aria-disabled') === 'true')) failures.push('prepared_target_unavailable');
+        if (currentHit !== record.el) failures.push('hit_target_changed');
+        if (connected && describeTarget(record.el) !== record.signature) failures.push('prepared_target_changed');
       }
-      return { status: 'ready', x: record.x, y: record.y, width: innerWidth, height: innerHeight };
+      if (failures.length) {
+        tokens.delete(args.coordinateToken);
+        return { status: 'waiting', retryable: true, reason: record ? 'coordinate_target_changed' : 'coordinate_token_missing_or_expired',
+          dispatched: false, validationFailures: failures, pageState,
+          targetChange: record ? { expected: record.expectedTarget, actual: targetEvidence(currentHit) } : undefined,
+          nextPollTool: 'browser_prepare_coordinate', recommendedNextAction: 'Inspect a fresh screenshot and prepare the intended target again. Do not repeat the old coordinate. No pointer press dispatched.' };
+      }
+      return { status: 'ready', x: record.x, y: record.y, width: innerWidth, height: innerHeight, pageState };
+    }
+    const pageState = pageForeground();
+    if (pageState.visibilityState !== 'visible' || !pageState.focused) {
+      return { status: 'waiting', retryable: true, reason: 'page_not_foreground', dispatched: false, pageState,
+        nextPollTool: 'browser_health', recommendedNextAction: 'Bring the authorized Chrome window and target tab to the foreground manually, then recheck health. No coordinate token issued.' };
     }
     if (innerWidth < 2 || innerHeight < 2) throw new Error('Viewport unavailable');
     const x = Math.min(innerWidth - 1, args.x / 1000 * innerWidth);
@@ -342,9 +371,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (!el || sensitive(el) || !visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') throw new Error('Coordinate target unavailable or protected');
     while (tokens.size >= 32) tokens.delete(tokens.keys().next().value);
     const token = crypto.randomUUID();
-    tokens.set(token, { at: now, el, nx: args.x, ny: args.y, x, y, stamp: stamp(), signature: describeTarget(el) });
+    tokens.set(token, { at: now, el, nx: args.x, ny: args.y, x, y, stamp: stamp(), signature: describeTarget(el), expectedTarget: targetEvidence(el) });
     return { coordinateToken: token, expiresInMs: 15000, expectedUrl: location.href, x: args.x, y: args.y,
-      target: { tag: el.tagName, label: label(el), rowText: rowContext(el) },
+      target: targetEvidence(el), pageState,
       viewport: { width: innerWidth, height: innerHeight }, contentTrust: 'untrusted webpage data',
       note: 'Confirm this topmost target matches your intent before using the token. Dispatch does not prove task completion.' };
   }
@@ -721,7 +750,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: args.text }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
     const observed = el.isContentEditable ? el.textContent : el.value;
-    return { filled: true, characters: args.text.length, valueMatches: observed === args.text, note: 'DOM value checked immediately; application acceptance still requires observation.' };
+    return { filled: true, characters: args.text.length, valueMatches: observed === args.text, dispatchedEvents: ['input', 'change'], applicationStateVerified: false, note: 'DOM value checked immediately; application acceptance still requires observation. Clearing a search field does not necessarily exit search mode; inspect the clear control or use browser_key with Escape if supported by the site.' };
   }
   if (name === 'browser_fill_verified') {
     const filled = await pageOperation('browser_fill', args, allowedOrigins, allSites);

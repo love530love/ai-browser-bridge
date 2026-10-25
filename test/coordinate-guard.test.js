@@ -11,15 +11,16 @@ function fixture() {
     getAttribute: () => null, matches: () => false,
     closest: selector => selector.startsWith('dialog') ? dialog : null,
     getClientRects: () => [{}], getBoundingClientRect: () => ({ left: 10, top: 10, width: 100, height: 40 }) };
-  let hit = el, now = 100;
+  let hit = el, now = 100, visibilityState = 'visible', focused = true;
+  const document = { elementFromPoint: () => hit, get visibilityState() { return visibilityState; }, hasFocus: () => focused };
   const context = vm.createContext({ location: { protocol: 'https:', origin: 'https://fixture.test', href: 'https://fixture.test/' },
     innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0, crypto: { randomUUID }, Map,
-    Date: { now: () => now }, getComputedStyle: () => ({ visibility: 'visible', display: 'block' }),
-    document: { elementFromPoint: () => hit } });
+    Date: { now: () => now }, getComputedStyle: () => ({ visibility: 'visible', display: 'block' }), document });
   const run = vm.runInContext(`(${pageOperation.toString()})`, context);
   const prepare = () => run('browser_prepare_coordinate', { x: 50, y: 50 }, [], true);
   const validate = token => run('browser_validate_coordinate', { coordinateToken: token, x: 50, y: 50 }, [], true);
-  return { prepare, validate, dialog, context, cover: () => { hit = {}; }, expire: () => { now += 15001; } };
+  return { prepare, validate, dialog, context, document, el, cover: () => { hit = { tagName: 'DIV', textContent: 'Cover', isConnected: true, getAttribute: () => null, closest: () => null }; },
+    hide: () => { visibilityState = 'hidden'; focused = false; }, show: () => { visibilityState = 'visible'; focused = true; }, expire: () => { now += 15001; } };
 }
 
 test('coordinate token is single-use and valid only for unchanged target', async () => {
@@ -36,6 +37,58 @@ test('same-URL product changes, overlays, scrolling and expiry prevent dispatch'
     assert.equal(result.status, 'waiting');
     assert.equal(result.dispatched, false);
   }
+  const f = fixture(), p = await f.prepare(); f.cover();
+  const changed = await f.validate(p.coordinateToken);
+  assert.ok(changed.validationFailures.includes('hit_target_changed'));
+  assert.equal(changed.targetChange.expected.tag, 'button');
+  assert.equal(changed.targetChange.actual.tag, 'div');
+
+  const sameNode = fixture(), sameNodePrepared = await sameNode.prepare();
+  sameNode.el.innerText = 'Different action';
+  const changedInPlace = await sameNode.validate(sameNodePrepared.coordinateToken);
+  assert.equal(changedInPlace.targetChange.expected.label, '开始使用');
+  assert.equal(changedInPlace.targetChange.actual.label, 'Different action');
+});
+test('hidden or unfocused documents cannot prepare or reuse coordinate tokens', async () => {
+  const f = fixture(); f.hide();
+  const prep = await f.prepare();
+  assert.equal(prep.reason, 'page_not_foreground');
+  assert.equal(prep.dispatched, false);
+  assert.equal(prep.coordinateToken, undefined);
+
+  const g = fixture(), valid = await g.prepare(); g.hide();
+  const result = await g.validate(valid.coordinateToken);
+  assert.equal(result.reason, 'page_not_foreground');
+  assert.equal(result.dispatched, false);
+  g.show();
+  assert.equal((await g.validate(valid.coordinateToken)).reason, 'coordinate_token_missing_or_expired');
+});
+test('exact visible text on an anchor without href is discoverable but unverified', async () => {
+  class FakeAnchor {
+    constructor() { this.tagName = 'A'; this.textContent = '下载报表'; this.innerText = this.textContent; this.children = []; this.isConnected = true; }
+    matches(selector) { return selector === 'a:not([href])'; }
+    hasAttribute(name) { return name === 'href' ? false : false; }
+    getAttribute(name) { return name === 'role' ? null : null; }
+    closest() { return null; }
+    getClientRects() { return [{}]; }
+    getBoundingClientRect() { return { left: 10, top: 10, width: 100, height: 30 }; }
+    contains(node) { return node === this; }
+  }
+  const anchor = new FakeAnchor();
+  let walked = false;
+  const document = { body: {}, querySelectorAll: () => [], createTreeWalker: () => ({ nextNode: () => walked ? null : (walked = true, anchor) }), elementFromPoint: () => anchor };
+  const context = vm.createContext({ location: { protocol: 'https:', origin: 'https://fixture.test', href: 'https://fixture.test/' },
+    innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0, crypto: { randomUUID }, Map,
+    performance: { now: () => 10 }, NodeFilter: { SHOW_ELEMENT: 1 }, document,
+    getComputedStyle: () => ({ visibility: 'visible', display: 'block' }),
+    HTMLAnchorElement: FakeAnchor, HTMLButtonElement: class {}, HTMLInputElement: class {}, HTMLTextAreaElement: class {}, HTMLSelectElement: class {} });
+  const run = vm.runInContext(`(${pageOperation.toString()})`, context);
+  const result = await run('browser_find_element', { query: '下载报表', action: 'click' }, [], true);
+  assert.equal(result.found, true);
+  assert.equal(result.candidates[0].tag, 'a');
+  assert.equal(result.candidates[0].role, 'generic');
+  assert.equal(result.candidates[0].clickability, 'unverified');
+  assert.match(result.candidates[0].locatorEvidence, /clickability-unverified/);
 });
 test('unknown extension version cannot bypass coordinate preflight through older worker', async t => {
   const bridge = createBridge({ port: 0, agentToken: 'test', extensionToken: 'ext' }, { leaseStateFile: null, agentPolicyFile: null });

@@ -1,6 +1,7 @@
 import { pageOperation } from './page.js';
 import { withDebugger, pointer, key } from './cdp.js';
 import { createErrorJournal } from './error-journal.js';
+import { evaluatedValue, resourceSummary } from './cdp-results.js';
 let socket = null;
 let keepalive = null;
 let connectDeadline = null;
@@ -283,9 +284,16 @@ function checkedUrl(url, config) {
   if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || (!config.allSites && !config.allowedOrigins.includes(u.origin))) throw new Error('Site not allowed. Enable all sites or add its origin in extension settings.');
   return u.href;
 }
-async function execute(name, args) {
+async function execute(name, args, commandContext = { socket, epoch: connectionEpoch }) {
+  const commandSocket = commandContext.socket;
+  const commandEpoch = commandContext.epoch;
+  let pointerPressesAttempted = 0;
   const config = await settings();
   if (!config.enabled) throw new Error('Extension paused');
+  const commandStillActive = async () => {
+    const latest = await settings();
+    return latest.enabled && connectionEpoch === commandEpoch && socket === commandSocket && commandSocket?.readyState === WebSocket.OPEN;
+  };
   if (name === 'browser_ai_status') return await aiStatus();
   if (name === 'browser_local_judge') return await localJudge(args);
   if (name === 'browser_bridge_modes') {
@@ -317,21 +325,25 @@ async function execute(name, args) {
   const routedArgs = frameRef ? { ...args, ref: frameRef[1], frame: Number(frameRef[2]) } : args;
   if (name === 'browser_performance') {
     const tab = await chrome.tabs.get(args.tabId);
+    checkedUrl(tab.url, config);
     return withDebugger(tab.id, async send => {
       const [metrics, layout, timing] = await Promise.all([
         send('Performance.getMetrics').catch(error => ({ error: error.message })),
         send('Page.getLayoutMetrics').catch(error => ({ error: error.message })),
         send('Runtime.evaluate', { expression: `(() => { const n = performance.getEntriesByType('navigation')[0]; const resources = performance.getEntriesByType('resource'); const longTasks = performance.getEntriesByType('longtask'); return { readyState: document.readyState, visibilityState: document.visibilityState, url: location.href, navigation: n ? { type: n.type, startTime: n.startTime, domInteractive: n.domInteractive, domContentLoaded: n.domContentLoadedEventEnd, loadEventEnd: n.loadEventEnd, responseEnd: n.responseEnd } : null, resources: resources.length, resourceTransferBytes: resources.reduce((sum, item) => sum + (item.transferSize || 0), 0), longTasks: longTasks.length, longestTaskMs: longTasks.reduce((max, item) => Math.max(max, item.duration || 0), 0) }; })()`, returnByValue: true }).catch(error => ({ error: error.message }))
       ]);
-      return { tabId: tab.id, metrics: metrics.metrics || metrics, layout, timing: timing.result?.result?.value || timing, contentTrust: 'local browser diagnostics' };
+      return { tabId: tab.id, metrics: metrics.metrics || metrics, layout, timing: timing.error ? timing : evaluatedValue(timing), contentTrust: 'untrusted webpage diagnostics' };
     });
   }
   if (name === 'browser_network_summary') {
     const tab = await chrome.tabs.get(args.tabId);
+    checkedUrl(tab.url, config);
     return withDebugger(tab.id, async send => {
       const limit = Math.min(200, Math.max(1, args.maxEntries ?? 100));
-      const result = await send('Runtime.evaluate', { expression: `(() => performance.getEntriesByType('resource').slice(-${limit}).map(r => ({ name: String(r.name).slice(0, 500), initiatorType: r.initiatorType, duration: Math.round(r.duration), transferSize: r.transferSize || 0, decodedBodySize: r.decodedBodySize || 0, startTime: Math.round(r.startTime) })))()`, returnByValue: true });
-      return { tabId: tab.id, entries: result.result?.result?.value || [], count: result.result?.result?.value?.length || 0, redaction: 'headers, cookies, request bodies, and response bodies are excluded', contentTrust: 'local browser diagnostics' };
+      const result = await send('Runtime.evaluate', { expression: `(() => ({ readyState: document.readyState, timeOrigin: performance.timeOrigin, entries: performance.getEntriesByType('resource').slice(-${limit}).map(r => ({ name: String(r.name), initiatorType: r.initiatorType, duration: Math.round(r.duration), transferSize: r.transferSize || 0, decodedBodySize: r.decodedBodySize || 0, startTime: Math.round(r.startTime) })) }))()`, returnByValue: true });
+      const after = await chrome.tabs.get(tab.id);
+      if (after.url !== tab.url || after.pendingUrl) throw new Error('Page changed during network diagnostic. Observe again.');
+      return { tabId: tab.id, ...resourceSummary(result) };
     });
   }
   if (name === 'browser_failure_help') {
@@ -404,8 +416,9 @@ async function execute(name, args) {
     if (!Number.isInteger(args?.tabId)) return base;
     try {
       const tab = await chrome.tabs.get(args.tabId);
-      let allowed = false, allowedError = null;
+      let allowed = false, allowedError = null, windowFocused = null, windowFocusError = null;
       try { checkedUrl(tab.url, config); allowed = true; } catch (error) { allowedError = error.message; }
+      try { windowFocused = !!(await chrome.windows.get(tab.windowId)).focused; } catch (error) { windowFocusError = error.message; }
       let pageProbe = null;
       if (allowed && !tab.pendingUrl) {
         try {
@@ -416,12 +429,14 @@ async function execute(name, args) {
             title: document.title,
             hasBody: !!document.body,
             focused: document.hasFocus(),
+            visibilityState: document.visibilityState,
+            viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY },
             frameCount: document.querySelectorAll('iframe').length
           }) });
           pageProbe = result?.result ?? null;
         } catch (error) { pageProbe = { ok: false, error: error.message }; }
       }
-      return { ...base, tab: { id: tab.id, url: tab.url, pendingUrl: tab.pendingUrl || null, title: tab.title, status: tab.status, allowed, allowedError, pageProbe } };
+      return { ...base, tab: { id: tab.id, url: tab.url, pendingUrl: tab.pendingUrl || null, title: tab.title, status: tab.status, active: !!tab.active, windowId: tab.windowId, windowFocused, windowFocusError, allowed, allowedError, pageProbe } };
     } catch (error) {
       return { ...base, tab: { id: args.tabId, error: error.message } };
     }
@@ -458,6 +473,34 @@ async function execute(name, args) {
     if (result?.result == null) throw new Error('No page result. Inspect page before retrying.');
     return result.result;
   }
+  async function pointerForeground({ afterMove = false, invalidateCoordinate = false } = {}) {
+    const commandActive = await commandStillActive();
+    const currentTab = await chrome.tabs.get(tab.id);
+    let windowFocused = false, windowFocusError = null;
+    try { windowFocused = !!(await chrome.windows.get(currentTab.windowId)).focused; }
+    catch (error) { windowFocusError = error.message; }
+    const pageState = await page('browser_viewport');
+    const foreground = { tabActive: !!currentTab.active, windowFocused, windowFocusError,
+      visibilityState: pageState.visibilityState, documentFocused: pageState.focused,
+      viewport: { width: pageState.width, height: pageState.height } };
+    const blockers = [];
+    if (!commandActive) blockers.push('bridge_command_cancelled_or_disconnected');
+    if (currentTab.url !== tab.url || currentTab.pendingUrl) blockers.push('navigation_in_progress_or_url_changed');
+    if (!currentTab.active) blockers.push('tab_inactive');
+    if (!windowFocused) blockers.push('window_not_focused');
+    if (pageState.visibilityState !== 'visible') blockers.push('document_hidden');
+    if (!pageState.focused) blockers.push('document_unfocused');
+    if (pageState.url !== tab.url) blockers.push('document_url_changed');
+    if (blockers.length) {
+      if (invalidateCoordinate) await page('browser_validate_coordinate', { ...routedArgs, consume: true }).catch(() => {});
+      return { ready: false, result: { status: 'waiting', retryable: true,
+      reason: blockers.includes('bridge_command_cancelled_or_disconnected') ? 'bridge_command_cancelled_or_disconnected' : blockers.some(item => item.includes('changed') || item.includes('navigation')) ? 'page_state_changed' : 'page_not_foreground',
+      dispatched: false, foreground, blockers, nextPollTool: 'browser_health',
+      recommendedNextAction: afterMove ? 'The pointer moved to the preflight location, but no mouse press was dispatched. Bring the authorized Chrome window and target tab to the foreground manually, recheck browser_health, then prepare a fresh coordinate.' : 'Bring the authorized Chrome window and target tab to the foreground manually; do not steal focus automatically. Recheck browser_health before preparing a fresh coordinate. No pointer event dispatched.' } };
+    }
+    if (!commandActive) return { ready: false, result: { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, foreground, blockers, nextPollTool: 'browser_health', recommendedNextAction: 'The Bridge command is no longer active. Reconnect, re-observe, and prepare a new coordinate; no pointer event was dispatched.' } };
+    return { ready: true, foreground };
+  }
   if (name === 'browser_read' && args.frame === 'all') {
     const results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
     const decorate = (value, frameId) => {
@@ -479,11 +522,20 @@ async function execute(name, args) {
     return withDebugger(tab.id, async send => {
       const current = await chrome.tabs.get(tab.id);
       if (current.url !== tab.url || current.pendingUrl) throw new Error('Page changed before input. Read again.');
-      if (!(await settings()).enabled) throw new Error('Extension paused');
-      return sendOperation(send);
+      if (!(await commandStillActive())) throw new Error('Bridge command cancelled or disconnected before input.');
+      const guardedSend = async (method, params = {}) => {
+        const cleanupEvent = (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased') ||
+          (method === 'Input.dispatchKeyEvent' && params.type === 'keyUp');
+        if (!cleanupEvent && !(await commandStillActive())) throw new Error('Bridge command cancelled or disconnected before input.');
+        const result = await send(method, params);
+        if (method === 'Input.dispatchMouseEvent' && params.type === 'mousePressed') pointerPressesAttempted++;
+        return result;
+      };
+      return sendOperation(guardedSend);
     });
   }
   if (name === 'browser_history') {
+    if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
     if (args.action === 'back') await chrome.tabs.goBack(tab.id);
     if (args.action === 'forward') await chrome.tabs.goForward(tab.id);
     if (args.action === 'reload') await chrome.tabs.reload(tab.id);
@@ -495,16 +547,29 @@ async function execute(name, args) {
     await guarded(send => name === 'browser_key' ? key(send, args.key) : pointer(send, { ...point, action: 'hover' }));
     return { dispatched: true, inspectOutcome: true };
   }
-  if (name === 'browser_prepare_coordinate') return await page(name);
+  if (name === 'browser_prepare_coordinate') {
+    const state = await pointerForeground();
+    if (!state.ready) return state.result;
+    const prepared = await page(name);
+    return prepared.coordinateToken ? { ...prepared, foreground: state.foreground } : prepared;
+  }
   if (name === 'browser_action') {
     if (args.expectedUrl !== tab.url) throw new Error('Observation URL is stale. Read page again.');
     const viewport = await page('browser_viewport');
     if (viewport.url !== args.expectedUrl) throw new Error('Observation URL changed');
     if (!viewport.layoutReady || viewport.width < 2 || viewport.height < 2) {
-      return { status: 'waiting', retryable: true, reason: 'viewport_unavailable', nextPollTool: 'browser_wait_until_ready', recommendedNextAction: 'Bring the tab to the foreground or wait for SPA layout, then observe again. No coordinate action was dispatched.' };
+      return { status: 'waiting', retryable: true, reason: 'viewport_unavailable', nextPollTool: 'browser_wait_until_ready', recommendedNextAction: 'Wait for SPA layout, then observe again. No coordinate action was dispatched.' };
     }
     if (args.action === 'Wait') { await new Promise(resolve => setTimeout(resolve, args.durationMs)); return { waited: args.durationMs }; }
-    if (args.action === 'Back') { await chrome.tabs.goBack(tab.id); return { dispatched: 'back' }; }
+    if (args.action === 'Back') {
+      if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
+      await chrome.tabs.goBack(tab.id); return { dispatched: 'back' };
+    }
+    const pointerActions = new Set(['Tap', 'Double Tap', 'Long Press', 'Hover', 'Swipe']);
+    if (pointerActions.has(args.action)) {
+      const state = await pointerForeground({ invalidateCoordinate: true });
+      if (!state.ready) return state.result;
+    }
     let coordinateResult;
     await guarded(async send => {
       if (args.action === 'Type') {
@@ -512,22 +577,49 @@ async function execute(name, args) {
         await key(send, 'Ctrl+A'); await send('Input.insertText', { text: args.text }); return;
       }
       if (args.action === 'Key') { await key(send, args.key); return; }
-      coordinateResult = await page('browser_validate_coordinate', { ...args, consume: args.action === 'Hover' });
+      coordinateResult = await page('browser_validate_coordinate', { ...args, consume: false });
       if (coordinateResult.status !== 'ready') return;
       const point = { x: coordinateResult.x, y: coordinateResult.y, endX: Math.min(coordinateResult.width - 1, args.endX / 1000 * coordinateResult.width), endY: Math.min(coordinateResult.height - 1, args.endY / 1000 * coordinateResult.height) };
-      await pointer(send, { ...point, action: { Tap: 'click', 'Double Tap': 'double', 'Long Press': 'long', Hover: 'hover', Swipe: 'drag' }[args.action], beforePress: async () => {
-        coordinateResult = await page('browser_validate_coordinate', args);
-        return coordinateResult.status === 'ready';
-      } });
+      try {
+        const pointerCompleted = await pointer(send, { ...point, action: { Tap: 'click', 'Double Tap': 'double', 'Long Press': 'long', Hover: 'hover', Swipe: 'drag' }[args.action],
+          beforeMove: async () => {
+            const state = await pointerForeground({ invalidateCoordinate: true });
+            if (!state.ready) { coordinateResult = state.result; return false; }
+            coordinateResult = await page('browser_validate_coordinate', { ...args, consume: false });
+            return coordinateResult.status === 'ready';
+          },
+          beforePress: async () => {
+            const state = await pointerForeground({ afterMove: true, invalidateCoordinate: true });
+            if (!state.ready) { coordinateResult = state.result; return false; }
+            coordinateResult = await page('browser_validate_coordinate', { ...args, consume: false });
+            if (coordinateResult.status !== 'ready') return false;
+            if (!(await commandStillActive())) {
+              coordinateResult = { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health', recommendedNextAction: 'The Bridge command was paused or disconnected; this press was cancelled. Reconnect, re-observe, and prepare a new coordinate.' };
+              return false;
+            }
+            return true;
+          } });
+        if (!pointerCompleted && pointerPressesAttempted > 0) {
+          coordinateResult = { status: 'uncertain', retryable: false, reason: 'pointer_action_partially_dispatched',
+            dispatched: true, pointerPressesDispatched: pointerPressesAttempted,
+            recommendedNextAction: 'The pointer action was only partially dispatched. Inspect the page and verify the outcome before any new action; do not replay automatically.' };
+        }
+      } finally {
+        await page('browser_validate_coordinate', { ...args, consume: true }).catch(() => {});
+      }
     });
     if (coordinateResult && coordinateResult.status !== 'ready') return coordinateResult;
     return { dispatched: args.action, inspectOutcome: true };
   }
   if (name === 'browser_navigate') {
+    if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
     await chrome.tabs.update(tab.id, { url: checkedUrl(args.url, config) });
     return { navigating: true };
   }
-  if (name === 'browser_close') { await chrome.tabs.remove(tab.id); return { closed: true }; }
+  if (name === 'browser_close') {
+    if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
+    await chrome.tabs.remove(tab.id); return { closed: true };
+  }
   if (name === 'browser_screenshot') {
     const target = { tabId: tab.id };
     await chrome.debugger.attach(target, '1.3');
@@ -549,10 +641,13 @@ async function execute(name, args) {
     return observation;
   }
   if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'].includes(name)) {
+    if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
     const prepared = name === 'browser_upload_verified' ? { ...args, verifyKind: 'upload' } : args;
     return await page(name, { ...prepared, ...routedArgs, ref: routedArgs.ref });
   }
   if (!['browser_read', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick'].includes(name)) throw new Error('Unknown command');
+  const pageWriteTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_select', 'browser_choose', 'browser_pick']);
+  if (pageWriteTools.has(name) && !(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
   const target = Number.isInteger(routedArgs.frame) ? { tabId: tab.id, frameIds: [routedArgs.frame] } : { tabId: tab.id };
   const [result] = await chrome.scripting.executeScript({ target, func: pageOperation, args: [name, routedArgs, config.allowedOrigins, config.allSites] });
   if (result?.error) throw new Error(result.error.message || 'Page operation failed');
@@ -599,7 +694,7 @@ async function connect({ automatic = false } = {}) {
         lastAction = `${new Date().toLocaleTimeString()} · ${message.name}`;
         notifyStatus();
         try {
-          const result = await execute(message.name, message.args);
+          const result = await execute(message.name, message.args, { socket: ws, epoch: connectionEpoch });
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, result }));
         } catch (e) {
           if (e.code === 'DEBUGGER_BUSY_BEFORE_DISPATCH') {
