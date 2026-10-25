@@ -1,40 +1,40 @@
-# Stops the bridge service. Looks up the node process by port (19387 by default)
-# rather than a PID file, because the auto-start launcher never writes one.
-# If the service was started by .\start.ps1 the PID file is still updated and
-# used first as a fast path.
+param([ValidateRange(1, 30)][int]$ProbeTimeoutSec = 8)
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
-New-Item -ItemType Directory -Force -Path (Join-Path $root '.local') | Out-Null
-Set-Content -LiteralPath (Join-Path $root '.local/service-paused') -Value 'Manual stop: start.ps1 resumes service recovery.'
-$port = 19387
-$configPath = Join-Path $root '.local\config.json'
-if (Test-Path -LiteralPath $configPath) {
-  try { $port = ([int](Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json).port) } catch {}
-}
-$expectedScript = Join-Path $root 'src\server.js'
-
-function Get-BridgeProcess {
-  $cim = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue
-  foreach ($p in $cim) {
-    if ($p.CommandLine -and $p.CommandLine.Contains($expectedScript)) { return $p }
+$info = [Diagnostics.ProcessStartInfo]::new()
+$info.FileName = (Get-Command pwsh.exe -ErrorAction Stop).Source
+$info.UseShellExecute = $false
+$info.CreateNoWindow = $true
+$info.RedirectStandardOutput = $true
+$info.RedirectStandardError = $true
+foreach ($arg in @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'scripts/probe-service-process.ps1'))) { $info.ArgumentList.Add($arg) }
+$probe = [Diagnostics.Process]::new()
+$probe.StartInfo = $info
+try {
+  if (-not $probe.Start()) { throw 'Could not start service identity query.' }
+  $stdout = $probe.StandardOutput.ReadToEndAsync()
+  $stderr = $probe.StandardError.ReadToEndAsync()
+  if (-not $probe.WaitForExit($ProbeTimeoutSec * 1000)) {
+    $probe.Kill($true)
+    if (-not $probe.WaitForExit(3000)) { throw 'Identity query timed out and could not be terminated. Service was not touched.' }
+    throw 'Service identity query timed out. Only this query was stopped; service and recovery were not changed.'
   }
-  $net = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($net) {
-    $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $($net.OwningProcess)" -ErrorAction SilentlyContinue
-    if ($cim -and $cim.CommandLine -and $cim.CommandLine.Contains($expectedScript)) { return $cim }
-  }
-  return $null
-}
-
-$pidFile = Join-Path $root '.local\server.pid'
-if (Test-Path -LiteralPath $pidFile) {
-  $stored = [int](Get-Content -LiteralPath $pidFile -Raw)
-  $p = Get-CimInstance Win32_Process -Filter "ProcessId = $stored" -ErrorAction SilentlyContinue
-  if ($p -and $p.CommandLine -and $p.CommandLine.Contains($expectedScript)) { Stop-Process -Id $stored; Write-Host 'Bridge stopped.'; exit 0 }
-}
-
-$process = Get-BridgeProcess
-if (-not $process) { Write-Host 'No bridge service is currently running.'; exit 0 }
-
-Stop-Process -Id $process.ProcessId
-Write-Host 'Bridge stopped. Any in-flight browser action may already have run; inspect the page before retrying.'
+  if ($probe.ExitCode -ne 0) { throw "Service identity query failed with exit code $($probe.ExitCode). Service was not touched." }
+  $result = $stdout.GetAwaiter().GetResult() | ConvertFrom-Json
+  if (@($result.matches).Count -ne 1) { throw 'Expected exactly one verified bridge process. Service and recovery were not changed.' }
+  $identity = $result.matches[0]
+  $service = Get-Process -Id $identity.id -ErrorAction Stop
+  try {
+    $expectedTicks = [long]$identity.startedTicks
+    if ($service.ProcessName -ne 'node' -or [Math]::Abs($service.StartTime.ToUniversalTime().Ticks - $expectedTicks) -gt 20000) { throw 'Service process identity changed. No process was stopped.' }
+    $pause = Join-Path $PSScriptRoot '.local/service-paused'
+    $alreadyPaused = Test-Path -LiteralPath $pause
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $pause) | Out-Null
+    if (-not $alreadyPaused) { Set-Content -LiteralPath $pause -Value 'Manual stop: start.ps1 resumes recovery.' }
+    try { $service.Kill() } catch {
+      if (-not $alreadyPaused) { Remove-Item -LiteralPath $pause -ErrorAction SilentlyContinue }
+      throw
+    }
+    if (-not $service.WaitForExit(3000)) { throw 'Stop requested but exit was not verified. Recovery remains paused; inspect before retrying.' }
+    Write-Host 'Bridge stopped. Previously dispatched browser actions may have run; inspect before retrying.'
+  } finally { $service.Dispose() }
+} finally { $probe.Dispose() }
