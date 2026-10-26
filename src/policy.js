@@ -38,6 +38,7 @@ export function requiredScope(name, tool) {
   if (name === 'browser_tab_lease') return 'read';
   if (LEASE_TOOLS.has(name)) return 'lease';
   if (name === 'browser_upload' || name === 'browser_upload_verified') return 'upload';
+  if (name === 'browser_reload_extension') return 'write';
   if (WRITE_TOOLS.has(name) || name === 'browser_open') return 'write';
   if (tool?.annotations?.readOnlyHint) return 'read';
   return 'write';

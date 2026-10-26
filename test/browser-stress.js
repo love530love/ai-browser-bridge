@@ -42,10 +42,10 @@ const stressRows = Array.from({ length: 1000 }, (_, i) => {
 const virtualRows = `<div id="vwindow" style="position:absolute;inset:0 auto auto 0;width:100%"></div><div style="height:40000px"></div>`;
 const chaosPage = `<!doctype html><html lang="en"><meta charset="utf-8"><title>Bridge adversarial fixture</title>
 <style>body{font:14px sans-serif}#vscroll{height:240px;overflow:auto;position:relative;border:1px solid #444}#vwindow [role=listitem]{height:32px}.records{height:220px;overflow:auto}.records [role=row]{display:flex;gap:12px;padding:4px}#cover{position:fixed;inset:0;background:rgba(255,255,255,.01);z-index:99999}</style>
-<h1>Adversarial local fixture</h1><button id="unconfirmed-export">Export with no page confirmation</button><a id="unlinked-export">Export billing report</a><input id="verified-input" value=""><span id="value-state">empty</span><test-widget></test-widget><div id="deep"></div><section class="records">${stressRows}</section><div id="vscroll">${virtualRows}</div>
+<h1>Adversarial local fixture</h1><button id="unconfirmed-export">Export with no page confirmation</button><a id="unlinked-export">Export billing report</a><input id="verified-input" value=""><span id="value-state">empty</span><test-widget></test-widget><div id="deep"></div><p style="visibility:hidden">FIND_HIDDEN_VISIBILITY</p><p style="opacity:0">FIND_HIDDEN_OPACITY</p><div hidden>FIND_HIDDEN_ATTRIBUTE</div><span style="display:contents">FIND_DISPLAY_CONTENTS</span><p>FIND_SPLIT_<b>TARGET</b></p><p>FIND_SPACE <b>TARGET</b></p><div inert>FIND_INERT_TEXT</div><button style="visibility:hidden">FIND_HIDDEN_BUTTON</button><button style="opacity:0">FIND_TRANSPARENT_BUTTON</button><section class="records">${stressRows}</section><div id="vscroll">${virtualRows}</div>
 <iframe title="same-origin-frame" src="/frame"></iframe><div id="cover" hidden></div>
 <script>
-const deep=document.querySelector('#deep');let parent=deep;for(let i=0;i<400;i++){const next=document.createElement('div');next.dataset.depth=i;parent.append(next);parent=next}parent.textContent='DEEP_SENTINEL_6f02d5';
+const deep=document.querySelector('#deep');let parent=deep;for(let i=0;i<400;i++){const next=document.createElement('div');next.dataset.depth=i;parent.append(next);parent=next}parent.textContent='DEEP_SENTINEL_6f02d5';const splitWhitespace=document.createElement('p');splitWhitespace.append(document.createTextNode('FIND_NODE'),document.createTextNode(' '),document.createTextNode('TARGET'));document.body.append(splitWhitespace);const largeText=document.createElement('div');largeText.textContent='FIND_BUDGET_START'+'x'.repeat(600000)+'FIND_BUDGET_END';document.body.append(largeText);
 const vwindow=document.querySelector('#vwindow');function render(){const start=Math.floor(document.querySelector('#vscroll').scrollTop/32);vwindow.style.transform='translateY('+start*32+'px)';vwindow.innerHTML=Array.from({length:30},(_,i)=>{const n=start+i;return '<div role="listitem">Virtual row '+n+(n===940?' VIRTUAL_TARGET_940':'')+'</div>'}).join('')}document.querySelector('#vscroll').addEventListener('scroll',render);render();
 class TestWidget extends HTMLElement{constructor(){super();const root=this.attachShadow({mode:'open'});root.innerHTML='<button aria-label="Shadow sentinel action">Shadow sentinel action</button>'}}customElements.define('test-widget',TestWidget);
 document.querySelectorAll('[role=row] button').forEach(button=>button.addEventListener('click',async()=>{const row=button.closest('[role=row]');const record=row.dataset.record;row.querySelector('.row-status').textContent='Exported '+record;await fetch('/audit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({record,action:'export'})})}));document.querySelector('#unconfirmed-export').addEventListener('click',()=>{fetch('/audit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({record:'unconfirmed-record',action:'unconfirmed-export'})})});document.querySelector('#unlinked-export').addEventListener('click',event=>{event.currentTarget.setAttribute('aria-label','Report export queued');fetch('/audit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({record:'unlinked-record',action:'unlinked-export'})})});document.querySelector('#verified-input').addEventListener('input',event=>{const target=event.currentTarget;if(target.value==='transient'){setTimeout(()=>{target.value='';document.querySelector('#value-state').textContent='reverted'},40)}else document.querySelector('#value-state').textContent='committed'});
@@ -191,9 +191,40 @@ try {
     const deep = await call('browser_find_text', { tabId, query: 'DEEP_SENTINEL_6f02d5', maxMatches: 2, contextChars: 40, budgetMs: 3000 });
     assert.equal(deep.found, true);
     assert.equal(deep.matches[0].match, 'DEEP_SENTINEL_6f02d5');
+    for (const mode of ['cheap', 'normal']) {
+      for (const hiddenText of ['FIND_HIDDEN_VISIBILITY', 'FIND_HIDDEN_OPACITY', 'FIND_HIDDEN_ATTRIBUTE', 'FIND_INERT_TEXT']) {
+        const hiddenMatch = await call('browser_find_text', { tabId, query: hiddenText, mode, maxMatches: 1, budgetMs: 2000 });
+        assert.equal(hiddenMatch.found, false, `${mode} finder must not report non-rendered text ${hiddenText}`);
+      }
+      const displayContents = await call('browser_find_text', { tabId, query: 'FIND_DISPLAY_CONTENTS', mode, maxMatches: 1, budgetMs: 2000 });
+      assert.equal(displayContents.found, true, `${mode} finder must retain rendered text under display:contents`);
+      const splitText = await call('browser_find_text', { tabId, query: 'FIND_SPLIT_TARGET', mode, maxMatches: 5, budgetMs: 2000 });
+      assert.equal(splitText.found, true, `${mode} finder must match rendered text split across inline nodes`);
+      assert.equal(splitText.matchCount, 1, `${mode} finder must not duplicate direct/fallback matches`);
+      const spacedText = await call('browser_find_text', { tabId, query: 'FIND_SPACE TARGET', mode, maxMatches: 1, budgetMs: 2500 });
+      assert.equal(spacedText.found, true, `${mode} finder must preserve whitespace between inline text nodes`);
+      const mergedWithoutSpace = await call('browser_find_text', { tabId, query: 'FIND_SPACETARGET', mode, maxMatches: 1, budgetMs: 2500 });
+      assert.equal(mergedWithoutSpace.found, false, `${mode} finder must not erase a whitespace-only sibling node`);
+      const explicitSpace = await call('browser_find_text', { tabId, query: 'FIND_NODE TARGET', mode, maxMatches: 1, budgetMs: 2500 });
+      assert.equal(explicitSpace.found, true, `${mode} finder must preserve whitespace-only adjacent text nodes`);
+      const explicitMerge = await call('browser_find_text', { tabId, query: 'FIND_NODETARGET', mode, maxMatches: 1, budgetMs: 2500 });
+      assert.equal(explicitMerge.found, false, `${mode} finder must not concatenate around a whitespace-only text node`);
+      const hiddenControl = await call('browser_find_text', { tabId, query: 'FIND_HIDDEN_BUTTON', mode, includeElements: true, maxMatches: 1, budgetMs: 2000 });
+      assert.equal(hiddenControl.nearbyElements.some(item => item.label.includes('FIND_HIDDEN_BUTTON')), false, `${mode} finder must not return hidden nearby controls`);
+    }
+    const overTextBudget = await call('browser_find_text', { tabId, query: 'FIND_BUDGET_END', maxMatches: 1, budgetMs: 3000 });
+    assert.equal(overTextBudget.found, false, 'finder must not search beyond its bounded text window');
+    assert.equal(overTextBudget.truncated, true, 'finder must disclose a single-node text-length cutoff');
+    assert.equal(overTextBudget.diagnostics.textLengthBudgetHit, true);
 
     const frameRead = await call('browser_read', { tabId, frame: 'all', maxChars: 2000, maxElements: 40, maxTextNodes: 500, budgetMs: 3000 });
     assert.ok(frameRead.frameResults.some(item => item.result?.text?.includes('FRAME_SENTINEL_48ac31')));
+    const mainFrameFind = await call('browser_find_text', { tabId, query: 'FRAME_SENTINEL_48ac31', maxMatches: 3, budgetMs: 3000 });
+    assert.equal(mainFrameFind.found, false, 'default finder scope must remain the main frame');
+    const frameFind = await call('browser_find_text', { tabId, query: 'FRAME_SENTINEL_48ac31', frame: 'all', maxMatches: 3, budgetMs: 3000 });
+    assert.equal(frameFind.found, true, 'frame=all finder must search accessible child frames');
+    assert.ok(frameFind.matches.some(item => item.match === 'FRAME_SENTINEL_48ac31' && item.frameId !== 0));
+    assert.equal(frameFind.scope, 'allFrames injection results returned by Chrome; hidden text excluded');
     const shadow = await call('browser_shadow_tree', { tabId, maxRoots: 20, maxControls: 30 });
     assert.ok(shadow.controls.some(item => item.label === 'Shadow sentinel action'));
 

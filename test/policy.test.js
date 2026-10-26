@@ -26,6 +26,8 @@ test('scope derivation agrees with the lease layer', () => {
     assert.ok(scope === 'write' || scope === 'upload', `${name} should be write or upload, got ${scope}`);
   }
   assert.equal(requiredScope('browser_click', byName.get('browser_click')), 'write');
+  assert.equal(requiredScope('browser_reload_extension', byName.get('browser_reload_extension')), 'write');
+  assert.equal(requiredScope('browser_desktop_windows', byName.get('browser_desktop_windows')), 'read');
   assert.equal(requiredScope('browser_upload', byName.get('browser_upload')), 'upload');
   assert.equal(requiredScope('browser_upload_verified', byName.get('browser_upload_verified')), 'upload');
   assert.equal(requiredScope('browser_read', byName.get('browser_read')), 'read');

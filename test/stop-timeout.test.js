@@ -35,3 +35,24 @@ test('stop verifies creation time and only terminates its identified fixture pro
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(existsSync(join(root, '.local/service-paused')), true);
 });
+
+test('service identity probe reads command lines without WMI', { skip: process.platform !== 'win32' }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-service-probe-'));
+  mkdirSync(join(root, 'scripts'));
+  mkdirSync(join(root, 'src'));
+  copyFileSync(new URL('../scripts/probe-service-process.ps1', import.meta.url), join(root, 'scripts/probe-service-process.ps1'));
+  writeFileSync(join(root, 'src/server.js'), 'setInterval(() => {}, 1000);\n');
+  const child = spawn(process.execPath, [join(root, 'src/server.js')], { windowsHide: true, stdio: 'ignore' });
+  t.after(() => { child.kill(); rmSync(root, { recursive: true, force: true }); });
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+
+  const result = spawnSync('pwsh.exe', ['-NoProfile', '-File', join(root, 'scripts/probe-service-process.ps1')], { encoding: 'utf8', timeout: 20000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const payload = JSON.parse(result.stdout.trim());
+  const matches = payload.matches.filter(match => match.id === child.pid);
+  assert.equal(matches.length, 1, result.stdout + result.stderr);
+  assert.match(matches[0].startedTicks, /^\d+$/);
+});

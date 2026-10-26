@@ -2,9 +2,28 @@
 export async function pageOperation(name, args, allowedOrigins, allSites = false) {
   try {
   if (!['http:', 'https:'].includes(location.protocol) || (!allSites && !allowedOrigins.includes(location.origin))) throw new Error('Origin changed or not allowed.');
+  const hiddenLayoutCache = new WeakMap();
+  const hiddenByLayout = el => {
+    const path = [];
+    for (let current = el; current; current = current.parentElement) {
+      if (hiddenLayoutCache.has(current)) {
+        const hidden = hiddenLayoutCache.get(current);
+        for (const item of path) hiddenLayoutCache.set(item, hidden);
+        return hidden;
+      }
+      path.push(current);
+      const style = getComputedStyle(current);
+      if (style.display === 'none' || style.contentVisibility === 'hidden' || Number(style.opacity) === 0 || !!current.hasAttribute?.('inert')) {
+        for (const item of path) hiddenLayoutCache.set(item, true);
+        return true;
+      }
+    }
+    for (const item of path) hiddenLayoutCache.set(item, false);
+    return false;
+  };
   const visible = el => {
     const style = getComputedStyle(el);
-    return el.getClientRects().length > 0 && style.visibility !== 'hidden' && style.display !== 'none' && !el.closest('[inert]');
+    return style.visibility !== 'hidden' && style.visibility !== 'collapse' && !hiddenByLayout(el) && el.getClientRects().length > 0;
   };
   const sensitive = el => el.matches('input[type=password],input[type=hidden]') || el.closest('[data-ai-private]');
   const fileInput = el => el instanceof HTMLInputElement && el.type === 'file';
@@ -34,6 +53,17 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (!row || sensitive(row)) return '';
     return clean(row.innerText || row.textContent);
   };
+  const renderedTextNode = node => {
+    const parent = node.parentElement;
+    if (!parent || hiddenByLayout(parent)) return false;
+    const ownStyle = getComputedStyle(parent);
+    if (ownStyle.visibility === 'hidden' || ownStyle.visibility === 'collapse') return false;
+    if (parent.getClientRects().length > 0) return true;
+    if (ownStyle.display !== 'contents') return false;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    return range.getClientRects().length > 0;
+  };
   const collectReadableText = ({ max = 16000, maxTextNodes = 4000, deadline = Infinity, requireVisible = true } = {}) => {
     const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
     const chunks = [];
@@ -41,45 +71,66 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     let node;
     let textNodesVisited = 0;
     let textBudgetHit = false;
-    while ((node = walker.nextNode()) && length < max) {
+    let textLengthBudgetHit = false;
+    let previousBlock = null;
+    let pendingWhitespace = false;
+    const inlineDisplays = new Set(['inline', 'contents', 'inline-block', 'inline-flex', 'inline-grid', 'ruby', 'ruby-text']);
+    while ((node = walker.nextNode())) {
+      if (length >= max) { textLengthBudgetHit = true; break; }
       textNodesVisited++;
       if (textNodesVisited > maxTextNodes || performance.now() >= deadline) { textBudgetHit = true; break; }
       const parent = node.parentElement;
-      if (!parent || parent.closest('script,style,noscript,input,textarea,select,[data-ai-private],[hidden],[aria-hidden=true],.hidden,#hidden,[style*=\"display:none\"],[style*=\"display: none\"]') || sensitive(parent) || (requireVisible && !visible(parent))) continue;
-      const value = node.textContent.replace(/\s+/g, ' ').trim();
-      if (value) { chunks.push(value); length += value.length + 1; }
+      if (!parent || parent.closest('script,style,noscript,input,textarea,select,[data-ai-private],[hidden],[aria-hidden=true],[inert],.hidden,#hidden,[style*=\"display:none\"],[style*=\"display: none\"]') || sensitive(parent) || (requireVisible && !renderedTextNode(node))) continue;
+      const source = node.textContent;
+      const remaining = Math.max(0, max - length);
+      const boundedSource = source.length > remaining ? source.slice(0, remaining) : source;
+      if (source.length > remaining) textLengthBudgetHit = true;
+      const rawValue = boundedSource.replace(/\s+/g, ' ');
+      const value = rawValue.trim();
+      if (!value) {
+        if (previousBlock && /\s/.test(rawValue)) pendingWhitespace = true;
+        if (textLengthBudgetHit) break;
+        continue;
+      }
+      let block = document.body;
+      for (let current = parent; current && current !== document.body; current = current.parentElement) {
+        if (!inlineDisplays.has(getComputedStyle(current).display)) { block = current; break; }
+      }
+      const separator = previousBlock ? previousBlock === block ? (pendingWhitespace || /^\s/.test(rawValue) ? ' ' : '') : '\n' : '';
+      const available = Math.max(0, max - length - separator.length);
+      const boundedValue = value.slice(0, available);
+      chunks.push(`${separator}${boundedValue}`);
+      length += separator.length + boundedValue.length;
+      previousBlock = block;
+      pendingWhitespace = /\s$/.test(rawValue);
+      if (boundedValue.length < value.length) textLengthBudgetHit = true;
+      if (textLengthBudgetHit) break;
     }
-    return { text: chunks.join('\n').slice(0, max), length, textNodesVisited, textBudgetHit };
+    return { text: chunks.join(''), length, textNodesVisited, textBudgetHit, textLengthBudgetHit };
   };
   const findReadableTextMatches = ({ query, maxMatches = 10, contextChars = 160, deadline = Infinity, maxTextNodes = 50000, requireVisible = true } = {}) => {
-    const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+    const collected = collectReadableText({ max: 500000, maxTextNodes, deadline, requireVisible });
+    const normalized = collected.text.replace(/\s+/g, ' ');
     const matches = [];
-    let node;
-    let textNodesVisited = 0;
-    let textBudgetHit = false;
-    let indexBase = 0;
-    while ((node = walker.nextNode()) && matches.length < maxMatches) {
-      textNodesVisited++;
-      if (textNodesVisited > maxTextNodes || performance.now() >= deadline) { textBudgetHit = true; break; }
-      const parent = node.parentElement;
-      if (!parent || parent.closest('script,style,noscript,input,textarea,select,[data-ai-private],[hidden],[aria-hidden=true],.hidden,#hidden,[style*=\"display:none\"],[style*=\"display: none\"]') || sensitive(parent) || (requireVisible && !visible(parent))) continue;
-      const value = node.textContent.replace(/\s+/g, ' ').trim();
-      if (!value) continue;
-      let from = 0;
-      while (matches.length < maxMatches) {
-        const index = value.indexOf(query, from);
-        if (index < 0) break;
-        matches.push({
-          index: indexBase + index,
-          before: value.slice(Math.max(0, index - contextChars), index).trim(),
-          match: value.slice(index, index + query.length),
-          after: value.slice(index + query.length, index + query.length + contextChars).trim()
-        });
-        from = index + Math.max(1, query.length);
-      }
-      indexBase += value.length + 1;
+    let from = 0;
+    while (matches.length < maxMatches) {
+      const index = normalized.indexOf(query, from);
+      if (index < 0) break;
+      matches.push({
+        index,
+        before: normalized.slice(Math.max(0, index - contextChars), index).trim(),
+        match: normalized.slice(index, index + query.length),
+        after: normalized.slice(index + query.length, index + query.length + contextChars).trim()
+      });
+      from = index + Math.max(1, query.length);
     }
-    return { matches, textNodesVisited, textBudgetHit };
+    return {
+      matches,
+      textNodesVisited: collected.textNodesVisited,
+      textBudgetHit: collected.textBudgetHit,
+      textLength: collected.length,
+      textLengthBudgetHit: collected.textLengthBudgetHit
+    };
   };
   const deepHit = (x, y) => {
     let hit = document.elementFromPoint(x, y);
@@ -472,27 +523,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const budgetMs = args.budgetMs ?? (cheap ? 1500 : 5000);
     const maxElements = args.maxElements ?? 200;
     const deadline = started + budgetMs;
-    const direct = findReadableTextMatches({ query, maxMatches, contextChars, deadline, maxTextNodes: 50000, requireVisible: false });
-    const matches = [...direct.matches];
-    let collected = { text: '', textNodesVisited: 0, textBudgetHit: false };
-    if (matches.length < maxMatches && performance.now() < deadline) {
-      collected = cheap
-        ? collectReadableText({ max: 500000, maxTextNodes: 50000, deadline, requireVisible: false })
-        : collectReadableText({ max: 500000, maxTextNodes: 50000, deadline });
-      const normalized = collected.text.replace(/\s+/g, ' ');
-      let from = 0;
-      while (matches.length < maxMatches) {
-        const index = normalized.indexOf(query, from);
-        if (index < 0) break;
-        matches.push({
-          index,
-          before: normalized.slice(Math.max(0, index - contextChars), index).trim(),
-          match: normalized.slice(index, index + query.length),
-          after: normalized.slice(index + query.length, index + query.length + contextChars).trim()
-        });
-        from = index + Math.max(1, query.length);
-      }
-    }
+    const direct = findReadableTextMatches({ query, maxMatches, contextChars, deadline, maxTextNodes: 50000, requireVisible: true });
+    const matches = direct.matches;
+    const collected = { length: direct.textLength, textNodesVisited: direct.textNodesVisited, textBudgetHit: direct.textBudgetHit };
     const nearbyElements = [];
     let elementCandidates = 0;
     let elementBudgetHit = false;
@@ -500,12 +533,13 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       for (const el of document.querySelectorAll('a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[contenteditable=true]')) {
         elementCandidates++;
         if (nearbyElements.length >= 20 || elementCandidates > maxElements || performance.now() >= deadline) { elementBudgetHit = true; break; }
-        if (sensitive(el)) continue;
+        if (sensitive(el) || !visible(el)) continue;
         const item = { tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: cheap ? cheapLabel(el) : label(el), disabled: !!el.disabled };
         if (item.label && (item.label.includes(query) || matches.some(m => item.label.includes(m.match) || m.after.includes(item.label) || m.before.includes(item.label)))) nearbyElements.push(item);
       }
     }
-    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || !!direct?.textBudgetHit || elementBudgetHit, matches, nearbyElements, diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: collected.text.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, directTextNodesVisited: direct?.textNodesVisited ?? 0, maxTextNodes: cheap ? 50000 : 50000, textBudgetHit: collected.textBudgetHit || !!direct?.textBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
+    const textLengthBudgetHit = direct.textLengthBudgetHit;
+    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || !!direct?.textBudgetHit || textLengthBudgetHit || elementBudgetHit, matches, nearbyElements, diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: collected.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, directTextNodesVisited: direct?.textNodesVisited ?? 0, maxTextNodes: 50000, textBudgetHit: collected.textBudgetHit || !!direct?.textBudgetHit, textLengthBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_observe') {
     const read = await pageOperation('browser_read', { ...args, maxChars: args.maxChars ?? 16000 }, allowedOrigins, allSites);

@@ -31,58 +31,6 @@ const defaults = { port: 19387, token: '', allowedOrigins: [], allSites: true, e
 const reconnectAlarm = 'ai-browser-bridge-reconnect';
 const settings = () => chrome.storage.local.get(defaults);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function findTextOperation(args, allowedOrigins, allSites) {
-  if (!['http:', 'https:'].includes(location.protocol) || (!allSites && !allowedOrigins.includes(location.origin))) throw new Error('Origin changed or not allowed.');
-  const started = performance.now();
-  const query = String(args.query || '').replace(/\s+/g, ' ').trim();
-  if (!query) throw new Error('query is required');
-  const maxMatches = args.maxMatches ?? 10;
-  const contextChars = args.contextChars ?? 160;
-  const budgetMs = args.budgetMs ?? (args.mode === 'cheap' ? 1500 : 5000);
-  const deadline = started + budgetMs;
-  const matches = [];
-  let visited = 0;
-  let textLength = 0;
-  let textBudgetHit = false;
-  const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
-  let node;
-  while ((node = walker.nextNode()) && visited < 50000) {
-    visited++;
-    if (performance.now() >= deadline) { textBudgetHit = true; break; }
-    const parent = node.parentElement;
-    if (!parent || parent.closest('script,style,noscript,input,textarea,select,[data-ai-private],[hidden],[aria-hidden=true],.hidden,#hidden,[style*="display:none"],[style*="display: none"]')) continue;
-    const value = node.textContent.replace(/\s+/g, ' ').trim();
-    if (!value) continue;
-    let from = 0;
-    while (matches.length < maxMatches) {
-      const index = value.indexOf(query, from);
-      if (index < 0) break;
-      matches.push({
-        index: textLength + index,
-        before: value.slice(Math.max(0, index - contextChars), index).trim(),
-        match: value.slice(index, index + query.length),
-        after: value.slice(index + query.length, index + query.length + contextChars).trim()
-      });
-      from = index + Math.max(1, query.length);
-    }
-    textLength += value.length + 1;
-    if (matches.length >= maxMatches) break;
-  }
-  const nearbyElements = [];
-  let elementCandidates = 0, elementBudgetHit = false;
-  if (args.includeElements) {
-    const maxElements = args.maxElements ?? 200;
-    for (const el of document.querySelectorAll('a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[contenteditable=true]')) {
-      elementCandidates++;
-      if (nearbyElements.length >= 20 || elementCandidates > maxElements || performance.now() >= deadline) { elementBudgetHit = true; break; }
-      if (el.matches('input[type=password],input[type=hidden]') || el.closest('[data-ai-private]')) continue;
-      const label = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || el.getAttribute('id') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180);
-      const item = { tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label, disabled: !!el.disabled };
-      if (label && (label.includes(query) || matches.some(m => label.includes(m.match) || m.after.includes(label) || m.before.includes(label)))) nearbyElements.push(item);
-    }
-  }
-  return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || elementBudgetHit || textBudgetHit || visited >= 50000, matches, nearbyElements, diagnostics: { mode: args.mode === 'cheap' ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength, contextChars, maxMatches, budgetMs, textNodesVisited: visited, textBudgetHit, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
-}
 function builtInAiApi() {
   const lm = globalThis.LanguageModel;
   if (lm?.availability && lm?.create) return { name: 'LanguageModel', api: lm };
@@ -513,10 +461,50 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     return { status: 'ok', frameResults: results.map(item => ({ frameId: item.frameId, result: decorate(item.result || { error: item.error || 'frame unavailable' }, item.frameId) })), frameCount: results.length, scope: 'all accessible frames', contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_find_text') {
-    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: findTextOperation, args: [args, config.allowedOrigins, config.allSites] });
-    if (result?.result?.__aibError) throw new Error(result.result.__aibError);
-    if (result?.result == null) throw new Error('No page result. Inspect page before retrying.');
-    return result.result;
+    const allFrames = args.frame === 'all';
+    const results = await chrome.scripting.executeScript({ target: allFrames ? { tabId: tab.id, allFrames: true } : { tabId: tab.id }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
+    const frameResults = results.map(item => {
+      const result = item.result || { __aibError: item.error?.message || 'frame unavailable' };
+      if (result.__aibError) return { frameId: item.frameId, error: result.__aibError };
+      return { frameId: item.frameId, title: result.title, url: result.url, found: result.found, matchCount: result.matchCount, truncated: result.truncated, diagnostics: result.diagnostics };
+    });
+    const available = results.filter(item => item.result && !item.result.__aibError);
+    const maxMatches = args.maxMatches ?? 10;
+    const allMatches = available.flatMap(item => (item.result.matches || []).map(match => ({ ...match, frameId: item.frameId })));
+    const allNearbyElements = available.flatMap(item => (item.result.nearbyElements || []).map(element => ({ ...element, frameId: item.frameId })));
+    const matches = allMatches.slice(0, maxMatches);
+    const nearbyElements = allNearbyElements.slice(0, 20);
+    const frameErrorCount = frameResults.length - available.length;
+    const partial = frameErrorCount > 0 || available.length === 0;
+    const maxReached = allMatches.length > matches.length || available.some(item => item.result.truncated) || partial;
+    const main = available.find(item => item.frameId === 0)?.result;
+    const diagnostics = {
+      mode: args.mode === 'cheap' ? 'cheap' : 'normal',
+      frameResultCount: results.length,
+      successfulFrameCount: available.length,
+      frameErrorCount,
+      omittedFrameCoverageKnown: false,
+      textNodesVisited: available.reduce((sum, item) => sum + (item.result.diagnostics?.textNodesVisited || 0), 0),
+      textBudgetHit: available.some(item => item.result.diagnostics?.textBudgetHit),
+      textLengthBudgetHit: available.some(item => item.result.diagnostics?.textLengthBudgetHit),
+      maxMatches,
+      aggregateMatchLimitHit: allMatches.length > matches.length
+    };
+    return {
+      title: main?.title || available[0]?.result?.title || '',
+      url: main?.url || available[0]?.result?.url || tab.url,
+      query: args.query,
+      found: matches.length > 0,
+      matchCount: matches.length,
+      partial,
+      truncated: maxReached,
+      matches,
+      nearbyElements,
+      diagnostics,
+      frameResults,
+      scope: allFrames ? 'allFrames injection results returned by Chrome; hidden text excluded' : 'main frame; hidden text excluded',
+      contentTrust: 'untrusted webpage data'
+    };
   }
   async function guarded(sendOperation) {
     return withDebugger(tab.id, async send => {

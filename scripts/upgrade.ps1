@@ -2,6 +2,8 @@ param(
   [switch]$ApplyGitUpdate,
   [switch]$BestEffort,
   [switch]$SkipReload,
+  [ValidateRange(0, 2147483647)][int]$ChromeProcessId = 0,
+  [long]$ChromeWindowHandle = 0,
   [ValidateRange(1, 600)][int]$HealthTimeoutSec = 45
 )
 
@@ -15,7 +17,7 @@ New-Item -ItemType Directory -Force -Path $state | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $resultPath = Join-Path $state 'last-result.json'
 $backupPath = Join-Path $state "backup-$stamp"
-$result = [ordered]@{ startedAt=(Get-Date).ToString('o'); root=$root; appliedGitUpdate=$false; reload='skipped'; reloadAttempts=0; doctor=$null; ok=$false }
+$result = [ordered]@{ startedAt=(Get-Date).ToString('o'); root=$root; appliedGitUpdate=$false; reload='skipped'; reloadAttempts=0; reloadExitCode=$null; reloadDispatched=$false; doctor=$null; ok=$false }
 $maintenanceToken = $null
 function Invoke-Maintenance($payload) {
   $config = Get-Content -LiteralPath (Join-Path $root '.local/config.json') -Raw | ConvertFrom-Json
@@ -80,12 +82,29 @@ try {
     throw 'Existing service version or source identity is stale/unverified. Restart it during an idle maintenance window, then rerun upgrade.'
   }
   if (-not $SkipReload) {
-    for ($attempt = 1; $attempt -le 2; $attempt++) {
-      $result.reloadAttempts = $attempt
-      & $pwsh -NoProfile -File (Join-Path $PSScriptRoot 'reload-extension.ps1') -BestEffort
-      if ($LASTEXITCODE -eq 0) { $result.reload = 'attempted'; break }
-      $result.reload = 'failed'
-      Start-Sleep -Seconds 1
+    $result.reloadAttempts = 1
+    try {
+      & $pwsh -NoProfile -File (Join-Path $PSScriptRoot 'reload-extension.ps1') -ChromeProcessId $ChromeProcessId -ChromeWindowHandle $ChromeWindowHandle -BestEffort
+      $result.reloadExitCode = $LASTEXITCODE
+    } catch {
+      # The child may have acted before its process failed; preserve uncertainty.
+      $result.reload = 'uncertain'
+      $result.reloadDispatched = $null
+      $result.reloadError = $_.Exception.Message
+    }
+    if ($null -ne $result.reloadExitCode) {
+      if ($result.reloadExitCode -eq 0) {
+        $result.reload = 'verified'
+        $result.reloadDispatched = $true
+      } elseif ($result.reloadExitCode -eq 2) {
+        $result.reload = 'not-dispatched'
+        $result.reloadDispatched = $false
+      } else {
+        # Exit 3 is explicitly uncertain; all other failures are treated the same
+        # because a child crash cannot prove that the UI action was not dispatched.
+        $result.reload = 'uncertain'
+        $result.reloadDispatched = $null
+      }
     }
   }
   $deadline = (Get-Date).AddSeconds($HealthTimeoutSec)
@@ -106,6 +125,10 @@ try {
   $result.status = 'complete'
 } catch {
   $result.error = $_.Exception.Message
+  if (-not $result.ok) {
+    if ($result.reload -eq 'uncertain') { $result.actionRequired = 'inspect-extension-state-before-retry' }
+    elseif ($result.reload -eq 'not-dispatched' -and -not $result.actionRequired) { $result.actionRequired = 'manual-extension-reload' }
+  }
   if ($backupPath -and (Test-Path -LiteralPath $backupPath)) { $result.backup = $backupPath }
   if (-not $BestEffort) { Save-Result $result; throw }
 } finally {
