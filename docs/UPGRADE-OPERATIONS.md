@@ -16,7 +16,7 @@
 
 每次结果写入 `.local/upgrade/last-result.json`。部署成功需 doctor 比较磁盘、服务和扩展的版本一致；不以“已点击 Reload”作为成功依据。
 
-扩展 Reload 是一次性 UI 操作，升级流程只调用一次，不因非零退出码自动重放。存在多个可见 Chrome 窗口时，重载脚本拒绝猜选目标；先运行 `pwsh -NoProfile -File scripts/reload-extension.ps1 -ListWindows` 查看进程 ID、窗口句柄和标题，再用 `-ChromeWindowHandle <hwnd>` 精确指定窗口，并可用 `-ChromeProcessId <pid>` 限定所属进程；`scripts/upgrade.ps1` 会透传这两个参数。重载按钮优先按扩展 ID 精确匹配；只在 ID 未暴露且产品名只匹配到一个按钮时才回退，歧义即停止。`reload-extension.ps1` 的退出码 `0` 表示目标版本已观察到，`2` 表示确认未调用 Reload，`3` 表示调用可能已派发但未能验证；其他进程错误也按不确定处理。升级结果同时记录 `reload`、`reloadExitCode` 和 `reloadDispatched`（`null` 表示无法确认）。遇到 `uncertain` 时必须先独立观察扩展连接与版本，再决定是否手动操作，不得直接重试。
+扩展 Reload 是一次性 UI 操作，升级流程只调用一次，不因非零退出码自动重放。存在多个可见 Chrome 窗口时，重载脚本拒绝猜选目标；先运行 `pwsh -NoProfile -File scripts/reload-extension.ps1 -ListWindows` 查看进程 ID、窗口句柄和标题，再用 `-ChromeWindowHandle <hwnd>` 精确指定窗口，并可用 `-ChromeProcessId <pid>` 限定所属进程；`scripts/upgrade.ps1` 会透传这两个参数。重载只按固定扩展 ID 定位：优先检查 UIA 按钮祖先上下文；若 Chrome 未将 ID 置于祖先，则要求地址栏精确指向该扩展详情 URL、页面中可见的扩展 ID 唯一，并且开发者 Reload 控件唯一且启用；不按产品名回退，歧义即停止。`reload-extension.ps1` 的退出码 `0` 表示目标版本已观察到，`2` 表示确认未调用 Reload，`3` 表示调用可能已派发但未能验证；其他进程错误也按不确定处理。升级结果同时记录 `reload`、`reloadExitCode` 和 `reloadDispatched`（`null` 表示无法确认）。遇到 `uncertain` 时必须先独立观察扩展连接与版本，再决定是否手动操作，不得直接重试。
 
 开发版新增 `service-build-current`：服务启动时固定计算 src 中 JS/JSON 源码及 package/lock 声明的 SHA-256 摘要，doctor 与当前磁盘重新计算的结果比较。旧服务不提供 buildId 也视为未验证，避免同一版本号下运行旧代码被误报为部署完成。升级脚本遇到该项不一致先要求空闲服务更新，不继续尝试扩展重载。
 

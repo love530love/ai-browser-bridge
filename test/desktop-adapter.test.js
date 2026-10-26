@@ -1,8 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createDesktopAdapter, BRIDGE_EXTENSION_ID, RELOAD_EXTENSION_CONFIRMATION } from '../src/desktop-adapter.js';
 
 const successful = (stdout = '') => ({ spawned: true, timedOut: false, code: 0, stdout, stderr: '' });
+
+test('reload script rejects non-Chrome process targets and binds fallback to exact details evidence', () => {
+  const script = readFileSync(new URL('../scripts/reload-extension.ps1', import.meta.url), 'utf8');
+  assert.match(script, /\$targetProcess\.ProcessName -ne 'chrome'/);
+  assert.match(script, /GetFileName\(\$targetProcess\.Path\) -ine 'chrome\.exe'/);
+  assert.match(script, /\$targetUrl = "chrome:\/\/extensions\/\?id=\$ExtensionId"/);
+  assert.match(script, /\$visibleIds\.Count -eq 1/);
+  assert.match(script, /AutomationId -eq 'dev-reload-button'/);
+});
 
 test('desktop adapter exposes fixed actions only on Windows', async () => {
   let runs = 0;

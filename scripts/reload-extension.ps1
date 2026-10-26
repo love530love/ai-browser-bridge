@@ -61,6 +61,13 @@ $expectedVersion = (Get-Content -LiteralPath (Join-Path $projectRoot 'extension/
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $chromeWindows = @()
 if ($ChromeProcessId -gt 0) {
+  $targetProcess = Get-Process -Id $ChromeProcessId -ErrorAction SilentlyContinue
+  if (-not $targetProcess -or $targetProcess.ProcessName -ne 'chrome' -or
+      [string]::IsNullOrWhiteSpace($targetProcess.Path) -or [System.IO.Path]::GetFileName($targetProcess.Path) -ine 'chrome.exe') {
+    $message = "Process ID $ChromeProcessId is not a verified Chrome process; no UI action was taken."
+    if ($BestEffort) { Write-Warning $message; exit 2 }
+    throw $message
+  }
   $handles = [NativeWindow]::VisibleWindowsForProcess($ChromeProcessId)
   foreach ($handle in $handles) { $chromeWindows += [pscustomobject]@{ ProcessId=$ChromeProcessId; Handle=$handle } }
 } else {
@@ -90,7 +97,8 @@ if (-not $focused -or [NativeWindow]::GetForegroundWindow() -ne $chromeWindow.Ha
   throw $message
 }
 $shell = New-Object -ComObject WScript.Shell
-$shell.SendKeys('^l'); $shell.SendKeys('chrome://extensions'); $shell.SendKeys('%{ENTER}')
+$targetUrl = "chrome://extensions/?id=$ExtensionId"
+$shell.SendKeys('^l'); $shell.SendKeys($targetUrl); $shell.SendKeys('%{ENTER}')
 $condition = New-Object System.Windows.Automation.PropertyCondition(
   [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
   [System.Windows.Automation.ControlType]::Button)
@@ -111,6 +119,33 @@ do {
         $node = $walker.GetParent($node)
       }
       if ($context -match [regex]::Escape($ExtensionId)) { $exactCandidates += $button }
+    }
+    # Chrome can flatten extension card ancestors in its accessibility tree.
+    # Bind the exact details URL and visible ID before accepting its unique
+    # developer Reload control; never fall back to the browser toolbar Reload.
+    if ($exactCandidates.Count -eq 0) {
+      $editCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Edit)
+      $urlMatched = $false
+      foreach ($edit in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCondition)) {
+        if ($edit.Current.AutomationId -notlike 'view_*') { continue }
+        try {
+          $value = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
+          if ($value -eq $targetUrl -or $value -eq "chrome://extensions?id=$ExtensionId") { $urlMatched = $true }
+        } catch { }
+      }
+      if ($urlMatched) {
+        $idCondition = [System.Windows.Automation.PropertyCondition]::new(
+          [System.Windows.Automation.AutomationElement]::NameProperty, $ExtensionId)
+        $idNodes = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $idCondition)
+        $visibleIds = @($idNodes | Where-Object { -not $_.Current.IsOffscreen })
+        if ($visibleIds.Count -eq 1) {
+          $exactCandidates = @($buttons | Where-Object {
+            $_.Current.AutomationId -eq 'dev-reload-button' -and -not $_.Current.IsOffscreen -and $_.Current.IsEnabled
+          })
+        }
+      }
     }
   } catch { $exactCandidates = @() }
   if ($exactCandidates.Count -eq 0) { Start-Sleep -Milliseconds 250 }
