@@ -6,4 +6,4 @@
 
 部署验收结果：提交 `f4bd3c9`（Reload 脚本进程/目标约束）和 `7d68bb4`（UIA 地址控件定位与输入时序修复）均已推送到 `sshpush/main`、`origin/main`。本机 Bridge 服务已运行 0.5.22 且 buildId 与工作树一致；Reload 前扩展为 0.5.21。首个本轮 UIA 调用明确返回 `not_dispatched`，未调用 Invoke；修正地址栏匹配后，固定扩展 Reload 只执行一次，返回 `success / dispatched:true / verified:true`。扩展 session 从 `4d3d158c-5c23-446c-9876-8880775d5bfb` 变为 `c13b3add-0cba-4680-b63f-2cfd06e4d3b5`，版本变为 0.5.22；doctor 全部检查通过、队列空闲。测试和真实 Reload 均不代表业务站点下载或任意 Chrome 设置已验收。
 
-Reload 后再次执行全量测试，138/140 通过；两个失败均在 `test/stop-timeout.test.js`：一个短超时/退出码 fixture 的 `spawnSync` 返回 `status:null`，另一个故意提供不完整 probe 输出的 fixture 也超时，断言收到 null 而非预期退出码。单独复核时升级前置两项均通过，停止探测的真实命令行识别测试也通过，但两个 stop fixture 仍失败，故不能将 Reload 后这次完整回归记为全绿。Bridge doctor 与扩展健康/version-match 检查仍通过。
+Reload 后首轮全量测试为 138/140；两项失败来自 `test/stop-timeout.test.js` 的 `spawnSync` 外层等待到期（status=null）。将此类 Windows 子进程 fixture 的外层上限调至 60 秒，并补充失败诊断信息；保留 stop 脚本自身 1/8 秒探测预算作为被测对象。随后停止探测测试 3/3、升级前置测试 2/2、browser-stress 10/10，最终 Node 全量 140/140 通过。stress harness 还增加等待扩展 panel 的异步存储初始化完成，并在连接前核对隔离端口、随机配对密钥和 all-sites 状态，避免与常驻 19387 服务串线。Bridge doctor 与扩展健康/version-match 检查仍通过。

@@ -125,10 +125,15 @@ try {
   const extensionId = new URL(worker.url()).host;
   const panel = await context.newPage();
   await panel.goto(`chrome-extension://${extensionId}/panel.html`);
+  await panel.waitForFunction(() => document.getElementById('status').textContent !== '读取状态…' && document.getElementById('port').value);
   await panel.locator('#token').fill(config.extensionToken);
   await panel.locator('#port').fill(String(config.port));
   await panel.locator('#all-sites').check();
   await panel.locator('#save').click();
+  const savedState = await worker.evaluate(async () => chrome.storage.local.get(['port', 'token', 'allSites']));
+  assert.equal(savedState.port, config.port, 'stress extension must persist the isolated bridge port');
+  assert.equal(savedState.token, config.extensionToken, 'stress extension must persist its matching pairing key');
+  assert.equal(savedState.allSites, true);
   await waitExtensionConnected(panel);
   mark('stress harness connected real extension to local bridge');
 
