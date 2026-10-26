@@ -10,6 +10,9 @@ test('reload script rejects non-Chrome process targets and binds fallback to exa
   assert.match(script, /\$targetProcess\.ProcessName -ne 'chrome'/);
   assert.match(script, /GetFileName\(\$targetProcess\.Path\) -ine 'chrome\.exe'/);
   assert.match(script, /\$targetUrl = "chrome:\/\/extensions\/\?id=\$ExtensionId"/);
+  assert.match(script, /\$addressControls = @\(\$root\.FindAll/);
+  assert.match(script, /ControlType\]::ComboBox/);
+  assert.doesNotMatch(script, /\$edit\.Current\.AutomationId -notlike 'view_\*'/);
   assert.match(script, /\$visibleIds\.Count -eq 1/);
   assert.match(script, /AutomationId -eq 'dev-reload-button'/);
 });

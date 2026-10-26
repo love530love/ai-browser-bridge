@@ -90,6 +90,7 @@ if (-not $chromeWindow) {
   if ($BestEffort) { Write-Warning $message; exit 2 }
   throw $message
 }
+$targetUrl = "chrome://extensions/?id=$ExtensionId"
 $focused = [NativeWindow]::SetForegroundWindow($chromeWindow.Handle)
 if (-not $focused -or [NativeWindow]::GetForegroundWindow() -ne $chromeWindow.Handle) {
   $message = 'Could not verify the selected Chrome window is foreground; no keyboard input was sent.'
@@ -97,8 +98,9 @@ if (-not $focused -or [NativeWindow]::GetForegroundWindow() -ne $chromeWindow.Ha
   throw $message
 }
 $shell = New-Object -ComObject WScript.Shell
-$targetUrl = "chrome://extensions/?id=$ExtensionId"
-$shell.SendKeys('^l'); $shell.SendKeys($targetUrl); $shell.SendKeys('%{ENTER}')
+$shell.SendKeys('^l'); Start-Sleep -Milliseconds 150
+$shell.SendKeys($targetUrl); Start-Sleep -Milliseconds 150
+$shell.SendKeys('%{ENTER}')
 $condition = New-Object System.Windows.Automation.PropertyCondition(
   [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
   [System.Windows.Automation.ControlType]::Button)
@@ -127,12 +129,15 @@ do {
       $editCondition = [System.Windows.Automation.PropertyCondition]::new(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::Edit)
+      $comboCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::ComboBox)
+      $addressControls = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCondition)) + @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $comboCondition))
       $urlMatched = $false
-      foreach ($edit in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCondition)) {
-        if ($edit.Current.AutomationId -notlike 'view_*') { continue }
+      foreach ($edit in $addressControls) {
         try {
           $value = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
-          if ($value -eq $targetUrl -or $value -eq "chrome://extensions?id=$ExtensionId") { $urlMatched = $true }
+          if (-not $edit.Current.IsOffscreen -and ($value -eq $targetUrl -or $value -eq "chrome://extensions?id=$ExtensionId")) { $urlMatched = $true }
         } catch { }
       }
       if ($urlMatched) {
