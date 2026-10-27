@@ -3,6 +3,7 @@ import { withDebugger, pointer, key } from './cdp.js';
 import { createErrorJournal } from './error-journal.js';
 import { evaluatedValue, resourceSummary } from './cdp-results.js';
 import { captureDevtools, createTabSubscription } from './cdp-capture.js';
+import { reuseKey, samePage, visibleTab, createTabOwnership } from './tab-identity.js';
 let socket = null;
 let keepalive = null;
 let connectDeadline = null;
@@ -18,6 +19,9 @@ const errorJournal = createErrorJournal(chrome.storage.local, message => {
   if (socket?.readyState !== WebSocket.OPEN || connectionState !== '已连接') return false;
   socket.send(JSON.stringify(message)); return true;
 });
+// Which tabs this bridge opened. Closing anything else would destroy work the
+// user did not hand over, so browser_close checks this before removing a tab.
+const tabOwnership = createTabOwnership(chrome.storage.session);
 function reportExtensionError(source, error, category = 'EXTENSION_ERROR') {
   void errorJournal.record(source, category).then(() => errorJournal.flush()).catch(() => {});
 }
@@ -410,21 +414,34 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     }
   }
   if (name === 'browser_tabs') {
+    const owned = await tabOwnership.ids();
     return (await chrome.tabs.query({})).filter(tab => {
+      if (!visibleTab(tab, { includeIncognito: args.includeIncognito === true })) return false;
       try { checkedUrl(tab.url, config); return true; } catch { return false; }
-    }).map(({ id, title, url, active, windowId }) => ({ id, title, url, active, windowId }));
+    }).map(({ id, title, url, active, windowId, incognito }) => ({
+      id, title, url, active, windowId, incognito: incognito === true, bridgeCreated: owned.has(id)
+    }));
   }
   if (name === 'browser_open') {
     const targetUrl = checkedUrl(args.url, config);
+    // Stealing focus buys nothing: every primitive works on a background tab,
+    // so a caller that wants the window in front has to say so.
+    const wantActive = args.active === true;
     if (args.reuseExisting !== false) {
-      const existing = (await chrome.tabs.query({})).find(candidate => candidate.url === targetUrl);
+      const wanted = reuseKey(targetUrl);
+      const existing = wanted === null ? null
+        : (await chrome.tabs.query({})).find(candidate => visibleTab(candidate) && samePage(candidate.url, targetUrl));
       if (existing) {
-        await chrome.tabs.update(existing.id, { active: true });
-        return { tabId: existing.id, url: existing.url, reused: true, loading: existing.status !== 'complete' };
+        if (wantActive) await chrome.tabs.update(existing.id, { active: true });
+        return { tabId: existing.id, url: existing.url, reused: true, activated: wantActive,
+          loading: existing.status !== 'complete', note: 'Reused an existing tab. Nothing was created and the window was not moved to the front.' };
       }
     }
-    const tab = await chrome.tabs.create({ url: targetUrl, active: true });
-    return { tabId: tab.id, url: targetUrl, reused: false, loading: true };
+    // The extension cannot create incognito tabs: a split incognito profile has
+    // a separate cookie jar, and silently opening one would look logged out.
+    const tab = await chrome.tabs.create({ url: targetUrl, active: wantActive });
+    await tabOwnership.mark(tab.id);
+    return { tabId: tab.id, url: targetUrl, reused: false, activated: wantActive, incognito: false, loading: true };
   }
   if (!Number.isInteger(args.tabId) || args.tabId < 1) throw new Error('Invalid tabId');
   const tab = await chrome.tabs.get(args.tabId);
@@ -634,7 +651,18 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   }
   if (name === 'browser_close') {
     if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
-    await chrome.tabs.remove(tab.id); return { closed: true };
+    // A tab the bridge did not open belongs to the user's session. Closing it
+    // can destroy unsaved work or a logged-in flow, so it needs an explicit
+    // override rather than being a side effect of a generic "close" call.
+    if (args.force !== true && !(await tabOwnership.owns(tab.id))) {
+      return { status: 'denied', closed: false, dispatched: false, retryable: false,
+        reason: 'tab_not_created_by_bridge', tabId: tab.id, url: tab.url,
+        nextPollTool: 'browser_tabs',
+        recommendedNextAction: 'This tab existed before the bridge opened it. Closing it would remove something the user was using. Close it yourself, or pass force:true after explicit approval for this exact tab. Nothing was closed.' };
+    }
+    await chrome.tabs.remove(tab.id);
+    await tabOwnership.forget(tab.id);
+    return { closed: true };
   }
   if (name === 'browser_screenshot') {
     const target = { tabId: tab.id };
@@ -746,6 +774,9 @@ chrome.alarms.onAlarm.addListener(alarm => {
 // Tell the service so it drops the lease immediately instead of holding it until
 // the TTL expires and blocking the next agent.
 chrome.tabs.onRemoved.addListener(tabId => {
+  // The tab is gone, so its ownership record is dead weight that would otherwise
+  // accumulate for the whole browser session.
+  tabOwnership.forget(tabId).catch(() => {});
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'tab-removed', tabId }));
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {

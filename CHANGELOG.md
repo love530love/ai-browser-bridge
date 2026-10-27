@@ -11,7 +11,17 @@
 - 新增 `evidenceQuality`（`live` / `stale-frame-possible`）替代“隐藏即拒绝”：文档自报隐藏时截图可能是旧帧，但 DOM 命中测试仍有效，该字段是提示而非拒绝理由。
 - 真实后台实测 `test/focus-matrix.js` 25/25：两个 fixture 标签，激活第二个使第一个真后台，`browser_read`/`find_element`/`click`/`fill`/`key`/`scroll`/`select`/`screenshot`/`performance`/`devtools_capture` 全部可用，DOM 副作用真实发生（计数器 0→1）；`browser_prepare_coordinate` 正常签发 token 并解析到 `button`；`browser_action` `Tap` 真实落到预备目标（计数器 1→2）、`Hover` 正常派发；`requireForeground:true` 仍返回 `waiting`/`page_not_foreground` 且不签发 token。
 - 实测环境事实：非激活标签仍自报 `visibilityState=visible`、`document.hasFocus()=true`（视口 2560×1271）。`visibilityState`/`hasFocus` 不等价于“在前台”，原先按它们拦截会时灵时不灵；真正需要前台的只剩 UIA 的 `SendKeys`（扩展 Reload）与最小化窗口下的 UIA 回读。
-- 部署与现场验收（2026-10-27）：服务重启到 0.5.24（buildId `937f6f5b…`）、扩展经 `browser_reload_extension` 重载并验证新会话与版本（`verified: true`，`targetResolution: "single-visible-chrome-window"`），`doctor` 全项通过；`browser_devtools_capture` 真实 Chrome 验收 9/9 通过（本地 fixture，只操作自身标签）；全量 `node --test test/*.test.js` 181/181 通过（41 个测试文件全部有贡献，无静默跳过）。
+- 会话复用契约（`extension/tab-identity.js` + `browser_open`/`browser_tabs`/`browser_close`）：
+  - 复用判定改为**页面身份**而不是原始 URL 字符串相等：忽略 `#fragment` 与路径尾斜杠，保留查询串（`?id=1` 与 `?id=2` 判为不同页面）。`/x` 与 `/x/`、带不带锚点不再各开一个标签。
+  - `browser_open` 不再抢焦点：`active` 默认 `false`，复用分支不再无条件 `tabs.update({active:true})`。所有原语在后台标签可用，抢焦点没有收益且会打断用户。
+  - 不创建新窗口（无 `windows.create` 路径），不创建隐身标签（扩展在 split 模式下也无法静默进入隐身 cookie 罐）。
+  - `browser_tabs` 默认**排除隐身标签**并返回 `incognito` 与 `bridgeCreated`；`includeIncognito:true` 才显示。
+  - `browser_close` 只关本桥创建的标签：归属记录在 `chrome.storage.session`（worker 挂起后仍有效，浏览器关闭即清），非本桥标签返回 `denied`/`tab_not_created_by_bridge`，需 `force:true` 才关。
+  - 会话保持本已正确：manifest 未申请 `cookies`/`browsingData`，全仓库无清 cookie / 清存储 / 生产 `--disable-*`。
+- 修正 `browser_capability_guide` 的过期结论：坐标意图原标记 `focusRequired: true`、`browser_prepare_coordinate`/`browser_action` 原列在 `foregroundRequiredTools`，与 0.5.24 的坐标放宽直接冲突，会把接入方重新引回「等前台」。现已改为后台安全，`foregroundRequiredTools` 只保留真正需要 OS 前台的 Windows UI Automation 项；新增 `open-or-reuse-tab` 意图。
+- 新增真实现场验收 `npm run test:session`（`test/live-session.js`）**17/17**：同 URL 复用同一 tabId、`#fragment` 复用、不同查询串不误复用、开标签后 `tab.active === false`（未抢焦点）、窗口数不变、本桥标签 `bridgeCreated: true` 而用户既有 18 个标签全为 `false`、本桥标签可关闭且关后消失。**刻意不在此脚本里验证「拒绝关闭非本桥标签」**——若该守卫失效就会关掉用户真实标签，风险不可接受；该分支由单元测试与一次性浏览器 e2e 覆盖。
+- `test/tab-identity.test.js` 9/9：复用身份规则（片段/尾斜杠/查询串/协议/主机/路径/凭据/非 HTTP）、隐身可见性、归属在存储往返与 worker 挂起后仍有效、存储后端损坏时退化为内存而不是抛错、非正整数 tabId 不入库。
+- 部署与现场验收（2026-10-27）：服务重启到 0.5.24（buildId `937f6f5b…` → 会话复用版 `ce5ef584…`）、扩展经 `browser_reload_extension` 重载并验证新会话与版本（`verified: true`，`targetResolution: "single-visible-chrome-window"`），`doctor` 全项通过；`browser_devtools_capture` 真实 Chrome 验收 9/9 通过（本地 fixture，只操作自身标签）；全量 `node --test test/*.test.js` 191/191 通过（43 个测试文件全部有贡献，无静默跳过）。
 - 版本号与 manifest 同步升到 0.5.24。
 
 ## 0.5.23 — 2026-10-26

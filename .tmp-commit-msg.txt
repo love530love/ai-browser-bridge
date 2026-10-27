@@ -1,0 +1,48 @@
+Reuse the user's session instead of disturbing it
+
+The bridge drives a real browser that someone is working in, so "reuse" and
+"do not destroy" are correctness requirements, not optimisations.
+
+browser_open compared raw URL strings, so /x and /x/, or a URL with and
+without a #fragment, each got their own tab. It also passed active:true on
+every path, yanking the window to the front for a tab nobody needed to see.
+Matching now uses page identity (extension/tab-identity.js): fragment and
+trailing slash are ignored, the query string is kept, because ?id=1 and
+?id=2 can be different documents and reusing across them would silently
+operate the wrong page. active defaults to false - every primitive works on
+a backgrounded tab, so stealing focus buys nothing.
+
+browser_close removed any tab id it was handed, including tabs the user
+opened. Ownership is recorded when the bridge creates a tab, in
+chrome.storage.session so it survives a worker suspension but dies with the
+browser. Anything else returns denied/tab_not_created_by_bridge unless the
+caller passes force:true.
+
+browser_tabs no longer shows incognito tabs by default. An incognito tab
+has its own cookie jar, so operating one looks like a logged-out session;
+it is opt-in via includeIncognito, and the extension cannot silently create
+one.
+
+Also fixes a contradiction this round created: browser_capability_guide
+still marked coordinates as foreground-only and listed
+browser_prepare_coordinate/browser_action under foregroundRequiredTools,
+which would have sent agents back to waiting for a foreground that is no
+longer required. Those are now background-safe and the foreground list
+keeps only the Windows UI Automation paths that genuinely type into the
+screen.
+
+Evidence:
+- test/live-session.js 17/17 against the real Chrome - same URL reuses the
+  same tabId, fragment reuses, a different query does not, tab.active is
+  false after open (no focus stolen), window count 1 -> 1, bridge-opened
+  tabs are marked bridgeCreated while the user's 18 existing tabs are not.
+  It deliberately does not test the close-refusal branch: pointing that at
+  a real user tab would destroy it if the guard were broken.
+- test/tab-identity.test.js 9/9 - identity rules, incognito visibility,
+  ownership across a storage round trip and a worker suspension, degraded
+  storage falling back to memory instead of throwing.
+- Full suite 191/191 across 43 files, no file silently skipped.
+
+Still missing: launching Chrome when it is not running (must reuse the same
+profile or cookies are lost), and browser_reload_extension still leaves a
+new chrome://extensions tab behind on every call.

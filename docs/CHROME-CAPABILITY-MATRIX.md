@@ -64,6 +64,21 @@ REA 明确这是静态证据：未执行扩展启动代码，动态名称、运�
 
 **实测环境事实**：本机一次运行中，非激活标签仍自报 `visibilityState=visible`、`document.hasFocus()=true`（视口 2560×1271，窗口未最小化）。可见 `visibilityState`/`hasFocus` 并不等价于“在前台”，这正是原先按它们拦截会时灵时不灵的原因；判定应以能否完成目标为准。
 
+## 会话复用与不打扰契约（0.5.24 实测）
+
+操作的是**用户的真实浏览器**，所以「少创建、不夺焦点、不销毁别人的东西」是硬约束，不是优化项。
+
+| 行为 | 现在的规则 | 证据 |
+|---|---|---|
+| 复用判定 | 按页面身份匹配：忽略 `#fragment` 与路径尾斜杠，**保留查询串**（`?id=1` 与 `?id=2` 是不同页面，宁可多开也不误用） | `test/tab-identity.test.js` 9/9、`test/live-session.js` 17/17 |
+| 抢焦点 | `browser_open` 的 `active` 默认 `false`，复用分支不再无条件激活。所有原语在后台标签可用，抢焦点没有收益 | 实测开标签后 `tab.active === false` |
+| 新窗口 | 无 `chrome.windows.create` 路径；实测窗口数 `1 → 1` | 同上 |
+| 隐身 | `browser_tabs` 默认排除隐身标签并回 `incognito`；扩展也无法静默创建隐身标签（独立 cookie 罐，会表现为未登录） | 同上 |
+| 关标签 | 只关本桥创建的标签。归属记在 `chrome.storage.session`（worker 挂起后仍有效，浏览器关闭即清）。非本桥标签返回 `denied`/`tab_not_created_by_bridge`，需 `force:true` | `test/tab-identity.test.js` |
+| 会话保持 | manifest 未申请 `cookies`/`browsingData`，全仓库无清 cookie、清存储、生产 `--disable-*`；服务启停不触碰用户标签 | 静态审计 |
+
+**未实现**：浏览器没在运行时主动拉起（必须用**同一个** profile，否则丢 Cookie 导致账号互踢）；`browser_reload_extension` 每次用 `Alt+Enter` 新开一个 `chrome://extensions` 标签且事后不关闭，属于「创建优于复用」的反例。
+
 ## 推荐执行策略
 
 1. 先使用 `browser_health`、`browser_observe`/`browser_read` 和 `browser_capabilities` 判断页面类别。

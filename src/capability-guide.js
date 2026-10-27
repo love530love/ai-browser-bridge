@@ -14,11 +14,17 @@ const COORDINATE = ['browser_prepare_coordinate', 'browser_action'];
 // Ordered: the first matching intent wins, so put the specific ones first.
 const INTENTS = [
   { id: 'coordinate-or-canvas', match: /坐标|画布|canvas|webgl|坐标点击|coordinate|无法定位元素/i,
-    tools: COORDINATE, focusRequired: true,
-    why: 'Coordinates are resolved by the browser hit test at the moment of the press, so the window must be in front or the press can land on whatever is on top of it.',
-    backgroundSafe: false,
-    prefer: 'Try browser_find_element or browser_find_text first. Most "I cannot locate the element" cases are solved by a ref-based browser_click, which needs no foreground.',
+    tools: COORDINATE, focusRequired: false,
+    why: 'The coordinate token is bound to the DOM element under the point and re-hit-tested before the press, and CDP dispatches into the target by tabId, so a backgrounded tab still resolves the same element. Foreground is only needed if you explicitly ask for it with requireForeground:true.',
+    backgroundSafe: true,
+    prefer: 'Try browser_find_element or browser_find_text first; a ref-based browser_click needs no coordinate token at all. If you must use coordinates, prepare them from the geometry browser_find_element already returned instead of guessing a point, and check the returned target.',
     fallback: ['browser_find_element', 'browser_screenshot', 'browser_scan_overlays'] },
+  { id: 'open-or-reuse-tab', match: /新标签|新窗口|复用|重复标签|隐身|无痕|incognito|open tab|new tab|reuse|打开(?![\s\S]*chrome:\/\/|[\s\S]*devtools:\/\/)/i,
+    tools: ['browser_tabs', 'browser_open'], focusRequired: false,
+    why: 'browser_open matches an existing tab by page identity (ignoring a #fragment and a trailing slash, keeping the query string), so it does not create duplicates. It never creates a window, never opens an incognito tab, and does not move the window to the front unless you pass active:true.',
+    backgroundSafe: true,
+    prefer: 'Call browser_open without active:true. Every primitive works on a background tab, so stealing focus buys nothing and interrupts the user. Incognito tabs are excluded from browser_tabs and are never opened implicitly.',
+    fallback: ['browser_tabs', 'browser_open'] },
   { id: 'extension-reload-or-deploy', match: /重载|reload|部署|deploy|版本不匹配|version mismatch|doctor/i,
     tools: ['browser_reload_extension'], focusRequired: false,
     why: 'Target binding is resolved inside the call: one visible Chrome window is used, several return candidates instead of guessing.',
@@ -97,11 +103,11 @@ const NOT_IMPLEMENTED = [
 
 const FOCUS_POLICY = {
   summary: 'Foreground is required only where the operating system, not the page, decides the target.',
-  backgroundSafeTools: ['browser_read', 'browser_find_text', 'browser_find_element', 'browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_scroll', 'browser_key', 'browser_wait', 'browser_screenshot', 'browser_performance', 'browser_network_summary', 'browser_devtools_capture', 'browser_debug', 'browser_health'],
-  foregroundRequiredTools: [...COORDINATE, 'browser_desktop_windows', 'browser_native_snapshot', 'browser_devtools', 'browser_reload_extension'],
+  backgroundSafeTools: ['browser_read', 'browser_find_text', 'browser_find_element', 'browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_scroll', 'browser_key', 'browser_wait', 'browser_screenshot', 'browser_performance', 'browser_network_summary', 'browser_devtools_capture', 'browser_debug', 'browser_health', ...COORDINATE, 'browser_tabs', 'browser_open', 'browser_close'],
+  foregroundRequiredTools: ['browser_desktop_windows', 'browser_native_snapshot', 'browser_devtools', 'browser_reload_extension'],
   advisoryOnlyStates: ['tab.active', 'window.focused', 'document.visibilityState', 'document.hasFocus'],
-  guidance: 'These four states are reported for diagnosis, not as a gate. A backgrounded tab is a normal working state: do not stop a DOM or CDP task because of them. They only block the coordinate path and Windows UI Automation, because those act on the real screen.',
-  evidence: 'test/focus-matrix.js exercises every read/write/diagnostic primitive against a genuinely backgrounded tab.'
+  guidance: 'These four states are reported for diagnosis, not as a gate. A backgrounded tab is a normal working state: do not stop a DOM, CDP or coordinate task because of them. Only Windows UI Automation still needs the foreground, because it types into the real screen. Coordinates do not: the token is bound to the DOM element and re-hit-tested, and CDP dispatches into the target by tabId. Pass requireForeground:true only when you specifically want foreground evidence.',
+  evidence: 'test/focus-matrix.js exercises every read/write/diagnostic/coordinate primitive against a genuinely backgrounded tab: 25/25, including a Tap that really moves a DOM counter.'
 };
 
 export function capabilityGuide({ goal = '', tabId = null } = {}) {
@@ -135,7 +141,7 @@ export function capabilityGuide({ goal = '', tabId = null } = {}) {
     whenAToolIsMissing: 'If a primitive you expected is absent or refuses for an unfamiliar reason, call browser_capability_guide again with the goal in plain language, then browser_bridge_modes for the fallback order. Do not conclude the task is impossible: report the blocker and the tool you tried.',
     whenBlocked: {
       waiting: 'Read reason and blockers, then poll with browser_wait_until_ready. waiting is resumable and is not a failure.',
-      pageNotForeground: 'Switch to a ref-based DOM tool. Only the coordinate path and Windows UI Automation need the foreground.',
+      pageNotForeground: 'This only happens when the call asked for requireForeground:true. Drop that flag: every page primitive, including coordinates, works on a backgrounded tab. Only Windows UI Automation genuinely needs the front.',
       uncertain: 'Never replay. Re-observe with browser_health and browser_read, then decide.'
     },
     contentTrust: 'local capability description, not page content'

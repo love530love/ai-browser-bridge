@@ -13,16 +13,36 @@ test('a backgrounded tab is not treated as a blocker for DOM work', () => {
   assert.match(guide.focusPolicy.guidance, /not as a gate/);
 });
 
-test('only the coordinate path and Windows UI Automation are marked foreground-only', () => {
-  for (const goal of ['用坐标点一下画布', '打开 chrome://settings 改代理']) {
+test('coordinates no longer claim to need the foreground, and Windows UI Automation still does', () => {
+  // This assertion used to be the opposite. It flipped because the coordinate
+  // gate was an implementation defect: the token is bound to a DOM element and
+  // re-hit-tested, and CDP dispatches by tabId, so a backgrounded tab resolves
+  // the same target. Telling agents otherwise made them stall for no reason.
+  for (const goal of ['用坐标点一下画布', 'coordinate click on the canvas']) {
     const guide = capabilityGuide({ goal });
-    assert.equal(guide.focusRequired, true, goal);
-    assert.equal(guide.primary.backgroundSafe, false, goal);
-    assert.ok(guide.primary.why.length > 20);
+    assert.equal(guide.focusRequired, false, goal);
+    assert.equal(guide.primary.backgroundSafe, true, goal);
+    assert.match(guide.primary.why, /backgrounded|tabId/);
   }
-  for (const tool of ['browser_prepare_coordinate', 'browser_action', 'browser_native_snapshot', 'browser_devtools']) {
-    assert.ok(capabilityGuide({ goal: '' }).focusPolicy.foregroundRequiredTools.includes(tool), tool);
+  // The genuine OS-level limit stays honest: chrome:// settings goes through
+  // Windows UI Automation, which types into the real screen.
+  assert.equal(capabilityGuide({ goal: '打开 chrome://settings 改代理' }).focusRequired, true);
+  // Extension reload does not, because its target binding is resolved inside the call.
+  assert.equal(capabilityGuide({ goal: 'reload the extension' }).focusRequired, false);
+  const policy = capabilityGuide({ goal: '' }).focusPolicy;
+  for (const tool of ['browser_prepare_coordinate', 'browser_action']) assert.ok(policy.backgroundSafeTools.includes(tool), tool);
+  for (const tool of ['browser_native_snapshot', 'browser_devtools', 'browser_reload_extension']) {
+    assert.ok(policy.foregroundRequiredTools.includes(tool), tool);
   }
+  assert.doesNotMatch(policy.guidance, /block the coordinate path/);
+});
+
+test('opening a page is answered with reuse, not with a new tab', () => {
+  const guide = capabilityGuide({ goal: '打开这个页面看看' });
+  assert.equal(guide.primary.intent, 'open-or-reuse-tab');
+  assert.match(guide.primary.why, /does not create duplicates|incognito/);
+  assert.match(guide.primary.prefer, /active:true|background/);
+  assert.equal(guide.focusRequired, false);
 });
 
 test('an unknown goal still returns a usable chain instead of nothing', () => {
