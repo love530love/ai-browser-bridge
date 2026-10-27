@@ -46,7 +46,7 @@
 - CDP 只读捕获（`browser_devtools_capture`）：`extension/cdp-capture.js`（`createRecorder` / `createTabSubscription` / `captureDevtools`，纯函数、无 chrome 依赖，可直接单测）、`test/cdp-capture.test.js`
 - Windows UI 自动化：`src/desktop-adapter.js`、`scripts/devtools-ui.ps1`、`scripts/reload-extension.ps1`
 - 现有能力/路线图：`docs/CHROME-CAPABILITY-MATRIX.md`、`docs/PRODUCT-ROADMAP.md`、`docs/DEVTOOLS-EXECUTION.md`
-- 回归入口：`npm test`（串行全量）、`npm run test:stress`（隔离 Chromium）、`npm run test:devtools`（现有 Chrome 的 opt-in、本地 fixture，操作后仅关闭自身测试标签）。
+- 回归入口：`npm test`（串行全量）、`npm run test:stress`（隔离 Chromium）、`npm run test:devtools`（现有 Chrome 的 opt-in、本地 fixture，操作后仅关闭自身测试标签）、`npm run test:capture`（同上，针对 `browser_devtools_capture`；扩展未 Reload 时会报 BLOCKED，那不是通过）。
 
 ## DevTools UIA 的未决审查点
 

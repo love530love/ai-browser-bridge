@@ -54,3 +54,5 @@ Agent 判断任务意图与授权，工具不增加新的人工确认口令。�
 
 - 单元契约 15/15（`test/cdp-capture.test.js`）：console 字段边界与对象不序列化、网络敏感字段拒绝、失败请求保留、pending 不冒充完成、溢出计数、脚本去重与 inline 标记、单 domain enable 失败报 failed、全部失败不编造数据、导航漂移、跨 tab 事件不归属、非法 domain 不订阅不调用、预算收敛、URL 脱敏、数组 schema 校验。
 - **尚未做真实 Chrome 现场验收**。CDP 事件行为在不同 Chrome 版本可能不同，验收必须用本地 fixture 页面而不是用户业务页面。
+- 现场验收入口已就绪：`npm run test:capture`（`test/live-capture.js`）。它启动本地 fixture（每 400ms 重复一次探针突发，保证有界窗口必然重叠）、用 `browser_open` 开自己的标签、跑一次捕获、断言 console 文本与级别、未捕获异常、`/api/ok` 的 200 完成行、被拒绝请求保留为 failed、脚本含 inline 标记、结果不含 header/cookie/凭据、负证据存在、缓冲计数存在，最后只关闭自己创建的标签。
+- **当前该入口会 BLOCKED 而不是 PASS**：已加载扩展是 0.5.22，不含 `browser_devtools_capture` 命令；必须先获授权 Reload 0.5.24 扩展。脚本在版本不匹配时**不打开任何标签**，直接以退出码 **2** 结束（0=全通过，1=有断言失败，2=被环境阻断），所以 BLOCKED 不可能被 CI 当成成功。
