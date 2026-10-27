@@ -23,7 +23,11 @@ export const WRITE_TOOLS = new Set([
   // Both change what the page's origin now holds or what the server has already
   // been told. A second agent writing the same origin or replaying into it is a
   // real conflict, not a harmless parallel read.
-  'browser_storage_write', 'browser_replay_request'
+  'browser_storage_write', 'browser_replay_request',
+  // A recipe run is a sequence of writes on one tab. Treating it as a read
+  // because it is one call would let two agents replay into the same page at the
+  // same time.
+  'browser_recipe_run'
 ]);
 
 const clampTtl = value => {

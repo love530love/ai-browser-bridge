@@ -1,3 +1,20 @@
+## 0.11.0 — 2026-10-27（已部署，本机实测）
+
+- **先调研，再动手**：新增 [docs/AGENT-ROBUSTNESS-RESEARCH.md](docs/AGENT-ROBUSTNESS-RESEARCH.md)。把「弱 agent 也能完成任意目的」拆成五条可测能力（看懂页面 / 选对目标 / 知道做成了没有 / 出错能恢复 / 不必每次重新想），再对照业界做法逐条给结论：Playwright MCP 用无障碍树而非截图、Playwright 的 aria snapshot、browser-use 的历史重放、Healenium 的多属性自愈、Skyvern 的「选择器优先 + AI 兜底」。**明确不采纳**的是 AI 兜底定位（基座必须在无模型时可用，且模型判断不可复现、不可审计）、set-of-marks 截图标注（真实账号的像素不该进上下文）、云端反爬/CAPTCHA（本项目不承载风控对抗）。许可证纪律也写进去了：Skyvern 是 AGPL-3.0，只借思路不抄代码。
+- **本轮落地的能力是 recipe：把「想过一次」存成数据**。`browser_recipe_save` / `browser_recipe_run` / `browser_recipe_list` / `browser_recipe_delete`。核心不是「录制回放」，而是**每步存一个耐久描述符**（tag / role / accessible name / 可见文本 / id / name 属性 / selector），运行时按**七级身份阶梯**重新解析：`role+name → name → id → name-attribute → selector → text → fuzzy-name`。这样跨得过重建（框架每次都换 id）、跨得过快照淘汰（ref 会死，accessible name 不会）。
+- **四条「宁可拒绝也不猜」的硬规则**，这是和测试类自愈工具最本质的区别（它们的 KPI 是「别红」，本项目的 KPI 是「别点错」）：
+  ① **某一级命中多个可见元素就拒绝**（`recipe_step_target_ambiguous`），绝不按位置挑——猜错一次可能是把钱付了、把密码填进搜索框；
+  ② **变量在 step 1 之前全量校验**，缺一个就拒绝（`recipe_variables_missing`），因为「半执行」比「不执行」更难收拾；
+  ③ **secret 步骤拒绝存字面量**，只接受 `{{变量}}`（`secret_value_not_storable`）——否则 recipe 文件本身就是一份明文密码库；
+  ④ **拒绝记录导航 / 上传 / 坐标步骤**（`step_tool_not_replayable`），它们的目标无法按身份重新解析，静默重放等于把流程带到错误的页面。
+- **一次点击会导航时，步骤结果是 `navigated` 而不是 `uncertain`**。真机第一版就是在这里失败的：`browser_click_verified` 提交后文档被替换，验证代码所在的文档没了，工具抛错，recipe 把它当「结果未知」停下。改成看 URL：**URL 变了就是已派发的证据**，记为 `navigated` 并继续进入新文档；URL 没变才保持 `uncertain`。这条区分很重要——把「确实点了」和「不知道点没点」混成一个结果，正是弱 agent 被误导的根源。
+- **失败时如实说明已完成的部分不回滚**：`failedAtStep` / `stepsCompleted` / `steps` 一起返回，并写明「1..N 步已经跑过，没有回滚；不要从第 1 步重跑」。这与 browser-use 的历史重放行为一致（它在第一个匹配不上的步骤抛错，之前的步骤已执行），区别是我们把它写进返回值而不是留给调用方读堆栈。
+- **`jobTimeoutMs` 继续演进**：recipe 一次调用可能跑多步、每步都有加载等待，给 120s；这与 0.10 给登录相位按 `timeoutMs + 10s` 抬高的理由是同一条——**别让「按计划慢」被误报成 `read_timeout`**。
+- 新增 `src/recipes.js`（纯逻辑，可单测）与页面侧 `browser_recipe_describe` / `browser_recipe_locate`。**存储由服务进程负责**（扩展没有持久文件系统，且 recipe 应该是用户能读、能改、能删的产物），`0600` 写入。
+- 能力引导新增 `repeat-flow` 意图，并**同样放在 `screenshot` 之前**（0.9 踩过的坑：意图按数组顺序取第一个匹配，`screenshot` 的 match 含「看看」这种常用词）。
+- 新增单测 `test/recipes.test.js`（18 条）与真机 `test/live-recipe.js`（**26/26**）。真机里最关键的一条是**故意用两个只有 id 不同的页面**（`/v1/login` 与 `/v2/login`）：在 `/v1` 录制、在 `/v2` 回放，断言 `matchedBy` 不是 `id` 而是 `name`，且流程真的走到了 `/v2/done`，并用**服务端回显**证明替换后的变量确实到达（表单无论填没填都会提交，只有回显才能区分）。另外覆盖了「两个同名按钮必须拒绝」「缺变量必须不执行」「secret 字面量必须拒绝」「导航步骤必须拒绝」「删掉后按名找不到」。
+- 全量单测 **350/350**；`doctor` 10/10 全绿；扩展与服务同为 0.11.0；工具数 64 → 68。
+
 ## 0.10.0 — 2026-10-27（已部署，本机实测）
 
 - **自动登录的最后一段空缺补上了：提交之后「等相位」**。0.9.0 修好了密码框能写，但提交那一下仍然读不出来——`browser_login_state` 是单帧快照，而提交恰恰是唯一一个单帧必然不够的时刻：服务端跳转或 SPA 换视图，紧接着的一次读取正好落在两份文档之间，只能回 `unknown`。调用方于是分不清「服务器慢」和「密码被拒」，而分不清这两件事的代价是**再提交一次**（可能触发锁定或再发一条验证码）。现在 `browser_login_state` 接受 `untilPhase` / `timeoutMs` / `pollMs`，返回 `wait` 段。

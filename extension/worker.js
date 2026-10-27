@@ -885,6 +885,111 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     const prepared = name === 'browser_upload_verified' ? { ...args, verifyKind: 'upload' } : args;
     return await page(name, { ...prepared, ...routedArgs, ref: routedArgs.ref });
   }
+  // Ref-to-descriptor conversion for recipe saving. It answers here rather than
+  // in the service because only the page knows an element's accessible name and
+  // selector; the service never sees the DOM.
+  if (name === 'browser_recipe_describe') return await page('browser_recipe_describe', routedArgs);
+  // Deterministic replay of a recorded flow. Every step is re-resolved by
+  // identity before it runs, so a weak caller never has to look at the page: it
+  // supplies variables and reads the per-step report.
+  if (name === 'browser_recipe_run') {
+    const recipe = args.recipe && typeof args.recipe === 'object' ? args.recipe : null;
+    if (!recipe || !Array.isArray(recipe.steps) || recipe.steps.length === 0) throw new Error('browser_recipe_run needs a stored recipe');
+    const variables = args.variables && typeof args.variables === 'object' ? args.variables : {};
+    const settleMs = Math.min(5000, Math.max(0, Number(args.settleMs) || 350));
+    const stepTimeoutMs = Math.min(30000, Math.max(1000, Number(args.stepTimeoutMs) || 8000));
+    const substitute = value => {
+      if (typeof value === 'string') return value.replace(/\{\{\s*([A-Za-z0-9_.-]{1,40})\s*\}\}/g, (whole, key) => (Object.hasOwn(variables, key) ? String(variables[key]) : whole));
+      if (Array.isArray(value)) return value.map(substitute);
+      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, substitute(item)]));
+      return value;
+    };
+    // Waits on the tab's own load state, not on a page promise: after a click
+    // that navigates, the injected world is gone, but chrome.tabs still knows
+    // whether the new document finished loading.
+    const documentReady = async () => {
+      const deadline = Date.now() + stepTimeoutMs;
+      for (;;) {
+        const now = await chrome.tabs.get(tab.id).catch(() => null);
+        if (!now) return false;
+        if (now.status === 'complete' && !now.pendingUrl) return true;
+        if (Date.now() >= deadline) return false;
+        await new Promise(resolve => setTimeout(resolve, 120));
+      }
+    };
+    const done = [];
+    for (const [index, step] of recipe.steps.entries()) {
+      const at = index + 1;
+      if (!(await documentReady())) {
+        return { status: 'waiting', retryable: true, reason: 'recipe_step_document_not_ready', dispatched: done.some(item => item.dispatched),
+          recipe: recipe.name, failedAtStep: at, stepsCompleted: done.length, steps: done,
+          recommendedNextAction: 'The document did not finish loading before this step. Re-observe the tab, then run the recipe again only if the remaining steps have not already run: steps already completed are not rolled back.' };
+      }
+      const located = await page('browser_recipe_locate', { target: step.target, frame: routedArgs.frame });
+      if (!located?.found) {
+        return { status: 'failed', retryable: false, dispatched: done.some(item => item.dispatched),
+          reason: located?.ambiguous ? 'recipe_step_target_ambiguous' : 'recipe_step_target_not_found',
+          recipe: recipe.name, failedAtStep: at, stepsCompleted: done.length, detail: located, steps: done,
+          recommendedNextAction: done.length
+            ? `Steps 1..${done.length} already ran and were NOT rolled back. Re-observe the page, finish the remaining steps by hand, then record a new recipe from the current page. Do not re-run from step 1 without checking what already happened.`
+            : 'Nothing ran: the first step could not be resolved. Re-observe the page and record a new recipe.' };
+      }
+      const stepArgs = { ...step, ref: located.target.ref };
+      delete stepArgs.target;
+      delete stepArgs.tool;
+      const callArgs = substitute(stepArgs);
+      const urlBefore = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null;
+      let outcome = null;
+      try {
+        outcome = await page(step.tool, callArgs);
+      } catch (error) {
+        const urlAfter = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null;
+        // A submit that navigates destroys the document the step was verifying
+        // in, so the tool throws even though the click landed. A changed url is
+        // the evidence that it landed: record the step as navigated and carry on
+        // into the new document. Without a url change there is no evidence at
+        // all, and that stays uncertain.
+        if (urlAfter && urlAfter !== urlBefore) {
+          done.push({ step: at, tool: step.tool, matchedBy: located.tier, degradedMatch: located.degraded === true,
+            status: 'navigated', verified: null, url: urlAfter,
+            note: 'The document was replaced during this step, so the step\'s own expectation could not be evaluated. The url change is the evidence it dispatched.' });
+          if (at < recipe.steps.length) await new Promise(resolve => setTimeout(resolve, settleMs));
+          continue;
+        }
+        // The step may or may not have dispatched. Report it as uncertain and
+        // stop: continuing would build the next step on an unknown state.
+        return { status: 'uncertain', retryable: false, reason: 'recipe_step_failed_midway', dispatched: true,
+          recipe: recipe.name, failedAtStep: at, stepsCompleted: done.length, steps: done,
+          message: String(error?.message ?? error).slice(0, 300),
+          recommendedNextAction: 'The failing step may or may not have been dispatched, so its outcome is unknown. Re-observe the page before doing anything else, and do not re-run the recipe from the start.' };
+      }
+      // The url comes from the tab, not from the page: after a step that
+      // navigates, the injected world is gone and `location` here is the
+      // extension's own url, not the page's.
+      const afterStep = await chrome.tabs.get(tab.id).catch(() => null);
+      done.push({ step: at, tool: step.tool, matchedBy: located.tier, degradedMatch: located.degraded === true,
+        status: outcome?.status ?? null, verified: outcome?.verified ?? null, url: afterStep?.url ?? null });
+      if (outcome?.status === 'failed' || outcome?.status === 'denied') {
+        return { status: 'failed', retryable: false, dispatched: true, reason: 'recipe_step_reported_failure',
+          recipe: recipe.name, failedAtStep: at, stepsCompleted: done.length - 1, steps: done, stepResult: outcome,
+          recommendedNextAction: 'The step ran and reported a failure, so the page state is known to be short of the expectation. Read the step result, fix the page by hand, and record a new recipe if the flow changed.' };
+      }
+      // An uncertain step is not a step that succeeded. Carrying on would build
+      // the next step on an unknown state and still report the run as a success.
+      if (outcome?.status === 'uncertain' || outcome?.status === 'waiting') {
+        return { status: 'uncertain', retryable: false, reason: 'recipe_step_outcome_unknown',
+          recipe: recipe.name, failedAtStep: at, stepsCompleted: done.length - 1, steps: done, stepResult: outcome,
+          dispatched: true,
+          recommendedNextAction: 'This step reported that its own outcome is unknown, so the run stopped rather than building on it. Re-observe the page before doing anything else; do not re-run from step 1.' };
+      }
+      if (at < recipe.steps.length) await new Promise(resolve => setTimeout(resolve, settleMs));
+    }
+    return { status: 'success', retryable: false, dispatched: true, recipe: recipe.name,
+      stepsCompleted: done.length, steps: done,
+      degradedMatches: done.filter(item => item.degradedMatch).map(item => item.step),
+      finalUrl: (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null,
+      note: 'Every step was re-resolved by identity, not replayed by position. A step whose match was fuzzy is listed in degradedMatches; check those against the page if the flow mattered.' };
+  }
   if (!['browser_read', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch'].includes(name)) throw new Error('Unknown command');
   const pageWriteTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_select', 'browser_choose', 'browser_pick']);
   if (pageWriteTools.has(name) && !(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };

@@ -19,7 +19,8 @@ import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
 import { lookupCredential, credentialOriginHash, CREDENTIAL_LOOKUP_CONFIRMATION } from './credential-store.js';
 import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMATION } from './password-manager.js';
-import { STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION } from './confirmations.js';
+import { STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION, RECIPE_RUN_CONFIRMATION } from './confirmations.js';
+import { recipeDir, recipeFileName, buildRecipe, saveRecipe, loadRecipe, listRecipes, deleteRecipe, missingVariables, MAX_RECIPE_STEPS } from './recipes.js';
 
 function equal(a, b) {
   return typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -190,7 +191,15 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         indexedDb: 'structure only - the list comes from indexedDB.databases() in the page, and a name that is not on that list is refused rather than opened, because opening a missing database creates it; records are read through browser_debugger evaluate',
         refused: ['clearing every cookie of an origin', 'writing IndexedDB through this tool']
       },
-      requestReplay: { tool: 'browser_replay_request', sentBy: 'page-context fetch', carriesPageCookies: true, autoRetried: false, timeoutIsUncertain: true, callerSuppliesTheRequest: true }
+      requestReplay: { tool: 'browser_replay_request', sentBy: 'page-context fetch', carriesPageCookies: true, autoRetried: false, timeoutIsUncertain: true, callerSuppliesTheRequest: true },
+      recipes: {
+        tools: ['browser_recipe_save', 'browser_recipe_run', 'browser_recipe_list', 'browser_recipe_delete'],
+        what: 'a flow solved once, stored as durable target descriptors and replayed step by step, so a weak caller supplies variables instead of deciding anything',
+        resolution: ['role+name', 'name', 'id', 'name-attribute', 'selector', 'text', 'fuzzy-name'],
+        refusesRatherThanGuesses: ['a tier matching more than one visible element', 'a missing variable (checked before step 1)', 'a literal value on a secret step', 'navigation, upload and coordinate steps'],
+        storage: 'JSON files under the service state directory, mode 0600, no secrets by construction',
+        partialRun: 'a failed run reports which steps already ran and states they are not rolled back'
+      }
     },
     policy: { installOrRemoveExtension: 'not_implemented_even_with_user_approval', developerMode: 'not_implemented_even_with_user_approval', browserSecuritySettings: 'not_implemented_even_with_user_approval', cookiesAndSecrets: 'the open tab\'s own origin cookies are readable and writable through browser_storage_*; other origins\' cookies, the OS credential store and browser security settings are not' },
     fallback: ['ordinary_page', 'protected_ui', 'requires_user'],
@@ -313,6 +322,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     : name === 'browser_replay_request' ? Math.max(timeoutMs, 65000)
     : name === 'browser_login_state' && Number.isFinite(args.timeoutMs)
       ? Math.max(timeoutMs, Math.min(60000, args.timeoutMs) + 10000)
+    // A recipe run is many steps in one call, each with its own load wait.
+    : name === 'browser_recipe_run' ? Math.max(timeoutMs, 120000)
     : timeoutMs;
   // Lease bookkeeping is answered by the service process itself and never
   // enters the job queue. It therefore cannot occupy the single active slot or
@@ -418,6 +429,78 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // are refused before they reach the queue when the confirmation is missing.
   // Refusing here, rather than in the extension, keeps a mis-typed call from
   // costing a queue slot and from being retried into a real side effect.
+  // Recipes are stored on disk by the service, because the extension has no
+  // durable filesystem and a recipe is an artifact the user should be able to
+  // read, edit and delete.
+  const recipesRoot = () => recipeDir(stateDir);
+  function recordRecipeAudit(tool, args, outcome, extra = {}) {
+    audit({ time: new Date().toISOString(), id: randomUUID(), tool, tabId: args.tabId ?? null, agent: args.agent ?? null,
+      outcome, dispatched: false, ...extra });
+  }
+  // Saving needs exactly one extension round trip: only the page can turn a ref
+  // into a durable descriptor. It runs through the normal job queue so it cannot
+  // overtake a write that is already in flight, and the file is written here
+  // afterwards - never from inside the extension.
+  async function recipeSaveCall(name, tool, args) {
+    const startedAt = Date.now();
+    if (!recipeFileName(args.name)) {
+      recordRecipeAudit(name, args, 'denied', { resultStatus: 'denied', errorCategory: 'invalid_recipe_name', durationMs: 0 });
+      return { status: 'denied', retryable: false, reason: 'invalid_recipe_name',
+        message: 'Recipe names must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}. Use a name that says what the flow does, for example "acme-login".' };
+    }
+    if (!Array.isArray(args.steps) || args.steps.length === 0) {
+      recordRecipeAudit(name, args, 'denied', { resultStatus: 'denied', errorCategory: 'recipe_needs_steps', durationMs: 0 });
+      return { status: 'denied', retryable: false, reason: 'recipe_needs_steps', message: 'A recipe needs at least one step.' };
+    }
+    if (args.steps.length > MAX_RECIPE_STEPS) {
+      recordRecipeAudit(name, args, 'denied', { resultStatus: 'denied', errorCategory: 'recipe_too_long', durationMs: 0 });
+      return { status: 'denied', retryable: false, reason: 'recipe_too_long', message: `A recipe may have at most ${MAX_RECIPE_STEPS} steps; this one has ${args.steps.length}. Split it into two recipes.` };
+    }
+    const described = await enqueueJob('browser_recipe_describe', tool, { steps: args.steps, tabId: args.tabId, agent: args.agent });
+    if (!described?.ok) {
+      const bad = (described?.steps ?? []).filter(item => !item.ok);
+      recordRecipeAudit(name, args, 'error', { resultStatus: 'failed', errorCategory: 'recipe_step_target_unresolved', durationMs: Date.now() - startedAt });
+      return { status: 'failed', retryable: false, reason: 'recipe_step_target_unresolved', dispatched: false,
+        steps: described?.steps ?? [],
+        message: 'At least one step could not be turned into a durable target, so nothing was saved. A recipe built on a ref that is already gone would fail at the first run.',
+        detail: bad.slice(0, 5),
+        recommendedNextAction: 'Read the page again and call browser_recipe_save while the refs are fresh, or pass a target descriptor explicitly for each step.' };
+    }
+    const steps = args.steps.map((step, index) => {
+      const copy = { ...step, target: described.steps[index].target };
+      delete copy.ref;
+      return copy;
+    });
+    const built = buildRecipe({ name: args.name, origin: args.origin ?? null, note: args.note ?? null, steps, variables: args.variables ?? [] });
+    if (!built.ok) {
+      recordRecipeAudit(name, args, 'denied', { resultStatus: 'denied', errorCategory: built.reason, durationMs: Date.now() - startedAt });
+      return { status: 'denied', retryable: false, ...built };
+    }
+    const saved = saveRecipe(recipesRoot(), built.recipe);
+    if (!saved.ok) {
+      recordRecipeAudit(name, args, 'error', { resultStatus: 'failed', errorCategory: saved.reason, durationMs: Date.now() - startedAt });
+      return { status: 'failed', retryable: false, reason: saved.reason, message: saved.message };
+    }
+    recordRecipeAudit(name, args, 'ok', { resultStatus: 'success', durationMs: Date.now() - startedAt, recipe: built.recipe.name, recipeSteps: built.recipe.steps.length });
+    return { status: 'success', retryable: false, dispatched: false,
+      recipe: built.recipe.name, stepCount: built.recipe.steps.length, variables: built.recipe.variables,
+      steps: built.recipe.steps.map((step, index) => ({ step: index + 1, tool: step.tool, matchedBy: Object.keys(step.target).filter(key => ['role', 'name', 'id', 'attrName', 'selector', 'text'].includes(key) && step.target[key]) })),
+      strippedArgs: built.stripped,
+      note: 'Saved as data, not as a recording: each step carries a durable target descriptor, so the recipe survives the snapshot being evicted and ids being regenerated. Run it with browser_recipe_run and the same variable names.',
+      contentTrust: 'the descriptors came from untrusted page content' };
+  }
+  function recipeListCall(name, args) {
+    const recipes = listRecipes(recipesRoot());
+    recordRecipeAudit(name, args, 'ok', { resultStatus: 'success', durationMs: 0, recipeCount: recipes.length });
+    return { status: 'success', count: recipes.length, recipes,
+      note: recipes.length ? 'Run one with browser_recipe_run; it re-resolves every step by identity and refuses rather than guessing.' : 'No recipes are saved yet. Complete a flow once, then call browser_recipe_save with the steps and the refs you used.' };
+  }
+  function recipeDeleteCall(name, args) {
+    const removed = deleteRecipe(recipesRoot(), args.name);
+    recordRecipeAudit(name, args, removed.ok ? 'ok' : 'denied', { resultStatus: removed.ok ? 'success' : 'denied', errorCategory: removed.ok ? null : removed.reason, durationMs: 0 });
+    if (!removed.ok) return { status: 'denied', retryable: false, reason: removed.reason, message: `No recipe named ${JSON.stringify(args.name)} was deleted.`, known: listRecipes(recipesRoot()).map(item => item.name) };
+    return { status: 'success', deleted: args.name, path: removed.path, note: 'The file is gone; nothing on any page was touched.' };
+  }
   function denyUnconfirmed(toolName, args, expected) {
     audit({
       time: new Date().toISOString(), id: randomUUID(), tool: toolName, tabId: args.tabId ?? null,
@@ -760,9 +843,15 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (name === 'browser_launch') return launchCall(name, args);
     if (name === 'browser_credential_lookup') return credentialCall(args);
     if (name === 'browser_password_manager_reveal') return passwordManagerCall(args);
+    // Answered from disk: a recipe listing must work even when the browser is
+    // disconnected, because that is exactly when a caller wants to know what
+    // flows exist.
+    if (name === 'browser_recipe_list') return recipeListCall(name, args);
+    if (name === 'browser_recipe_delete') return recipeDeleteCall(name, args);
     if (name === 'browser_desktop_windows' || name === 'browser_devtools' || name === 'browser_native_snapshot') return desktopCall(name, args);
     if (name === 'browser_storage_write' && args.confirmation !== STORAGE_WRITE_CONFIRMATION) return denyUnconfirmed(name, args, STORAGE_WRITE_CONFIRMATION);
     if (name === 'browser_replay_request' && args.confirmation !== REPLAY_REQUEST_CONFIRMATION) return denyUnconfirmed(name, args, REPLAY_REQUEST_CONFIRMATION);
+    if (name === 'browser_recipe_run' && args.confirmation !== RECIPE_RUN_CONFIRMATION) return denyUnconfirmed(name, args, RECIPE_RUN_CONFIRMATION);
     if (LEASE_TOOLS.has(name)) return leaseCall(name, args, decision);
     if (!WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) leases.heartbeat(args.tabId, args.agent ?? null, name);
     if (lease && lease !== owner) {
@@ -780,7 +869,26 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       const conflict = leases.guard(args.tabId, args.agent ?? null, name);
       if (conflict) return { ...conflict, queue: queueSnapshot() };
     }
-    const prepared = name === 'browser_upload' || name === 'browser_upload_verified' ? { ...uploadArgs(args), expect: args.expect ?? {}, timeoutMs: args.timeoutMs } : args;
+    if (name === 'browser_recipe_save') return recipeSaveCall(name, tool, args);
+    let prepared = name === 'browser_upload' || name === 'browser_upload_verified' ? { ...uploadArgs(args), expect: args.expect ?? {}, timeoutMs: args.timeoutMs } : args;
+    if (name === 'browser_recipe_run') {
+      const loaded = loadRecipe(recipesRoot(), args.name);
+      if (!loaded.ok) {
+        recordRecipeAudit(name, args, 'denied', { resultStatus: 'denied', errorCategory: loaded.reason, durationMs: 0 });
+        return { status: 'denied', retryable: false, reason: loaded.reason, message: loaded.message, known: loaded.known };
+      }
+      // Checked here, before the job is queued, so a missing variable can never
+      // produce a flow that stops halfway with the first steps already applied.
+      const missing = missingVariables(loaded.recipe, args.variables ?? {});
+      if (missing.length) {
+        recordRecipeAudit(name, args, 'denied', { resultStatus: 'denied', errorCategory: 'recipe_variables_missing', durationMs: 0, recipe: loaded.recipe.name });
+        return { status: 'denied', retryable: false, reason: 'recipe_variables_missing', missing,
+          required: loaded.recipe.variables,
+          message: `Nothing ran: the recipe needs ${missing.map(item => `"${item}"`).join(', ')}. Every variable is checked before step 1, because a half-executed flow is worse than a refusal.`,
+          recommendedNextAction: 'Call browser_recipe_list or read the recipe and pass every variable in variables.' };
+      }
+      prepared = { ...args, recipe: loaded.recipe, variables: args.variables ?? {} };
+    }
     const promise = enqueueJob(name, tool, prepared);
     let result = promise;
     // The judge is a normal queued call answered by the extension; the service

@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.10.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.11.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.11.0 回答的是另一个问题：**一个看不懂页面的 agent，凭什么能把事做完？** 先做调研再动手，结论写在 [让「很弱的 agent」也能把事做完](docs/AGENT-ROBUSTNESS-RESEARCH.md)：弱 agent 做不完事，通常不是因为不够聪明，而是因为**每一步都要它做决定**。所以这一轮把决定挪走——`browser_recipe_save` / `browser_recipe_run` / `browser_recipe_list` / `browser_recipe_delete` 让流程**想过一次就能按数据重放**。每步存的不是动作也不是选择器，而是一个**耐久描述符**（tag / role / accessible name / 可见文本 / id / name 属性 / selector），运行时按七级身份阶梯重新解析（`role+name → name → id → name-attribute → selector → text → fuzzy-name`），所以跨得过框架重建（id 每次都换）、跨得过快照淘汰（ref 会死，accessible name 不会）。四条硬规则都是「宁可拒绝也不猜」：命中多个可见元素就拒绝、变量在 step 1 之前全量校验、secret 步骤拒绝存字面量（否则 recipe 文件就是明文密码库）、拒绝记录导航/上传/坐标步骤。调研里**明确不采纳**的也有理由：AI 兜底定位（基座必须在无模型时可用，且模型判断不可复现）、set-of-marks 截图标注（真实账号的像素不该进上下文）、云端反爬与 CAPTCHA。详见 [Chrome 能力矩阵](docs/CHROME-CAPABILITY-MATRIX.md)。
 
 0.10.0 补的是自动登录的**最后一段空缺：提交之后「等相位」**。0.9.0 让密码框可以写，但提交那一下仍然读不出来——`browser_login_state` 是单帧快照，而提交恰恰是单帧必然不够的时刻：服务端跳转或 SPA 换视图，紧接着的一次读取正好落在两份文档之间，只能回 `unknown`。调用方于是分不清「服务器慢」和「密码被拒」，而分不清这两件事的代价是**再提交一次**（可能触发锁定或再发一条验证码）。现在它接受 `untilPhase` / `timeoutMs` / `pollMs`：轮询写在 **service worker** 而不是页面里，因为页面内 `await` 一个 Promise 会被**正在等待的那次导航**销毁，跨不过整页跳转；每次轮询都是对当前文档的一次独立注入。同一个拦截必须先拆：`worker.js` 对所有命令都做「`pendingUrl` 存在就拒绝」，而这条命令正是应该在导航中被调用的，第一版因此真机报 `Navigation in progress`，现在只有 `browser_login_state` + `untilPhase` 豁免。相位表新增 `identifier`（邮箱框 + 下一步、没有密码框的两步登录首屏；原先落 `unknown`，而 `unknown` 的引导是「去看 shadow root」，等于把人指去找组件而不是去填用户名），`logged_in` 增加一条**弱证据**（没有登录表单 + 存在账号/头像元素，标 `phaseConfidence:"weak"`，明说是负向推断），并排掉「自身文字写着 Sign in 的账号元素」这类假阳性。等待超时不写成失败：`note` 明说服务器慢、验证码、未建模的第二步、错误横幅在这里长得一样，同时给出 `phasesSeen` 让人自己判断；匹配到也不吹，相位是 DOM 读数而非认证证明。详见 [Chrome 能力矩阵](docs/CHROME-CAPABILITY-MATRIX.md)。
 
@@ -200,7 +202,7 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 }
 ```
 
-MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 64 个工具，`browser_screenshot` 返回 MCP 图片内容。
+MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 68 个工具，`browser_screenshot` 返回 MCP 图片内容。
 
 ### CLI 客户端
 

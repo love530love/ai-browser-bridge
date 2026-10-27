@@ -905,6 +905,116 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       contentTrust: 'untrusted webpage data plus extension geometry'
     };
   }
+  if (name === 'browser_recipe_describe') {
+    // A recipe must survive the ref it was recorded with. Refs live in a
+    // snapshot that gets evicted, and a framework regenerates ids on every
+    // build, so the ref is converted here into a durable descriptor: role,
+    // accessible name, visible text, id, name attribute and a short selector.
+    // The run side then re-resolves it tier by tier instead of replaying a ref.
+    const steps = Array.isArray(args.steps) ? args.steps.slice(0, 40) : [];
+    const describeDurable = el => ({
+      tag: el.tagName.toLowerCase(),
+      role: el.getAttribute('role') || null,
+      type: el.getAttribute('type') || null,
+      // The accessible name, never the value. A password field is identified by
+      // its label, and its contents never leave the page.
+      name: (label(el) || clean(el.textContent) || '').slice(0, 180),
+      text: clean(el.innerText || el.textContent || '').slice(0, 120),
+      id: el.id || null,
+      attrName: el.getAttribute('name') || null,
+      placeholder: el.getAttribute('placeholder') || null,
+      autocomplete: el.getAttribute('autocomplete') || null,
+      selector: shortSelector(el)
+    });
+    const out = [];
+    for (const [index, step] of steps.entries()) {
+      if (!step || typeof step !== 'object') { out.push({ index, ok: false, reason: 'step_not_an_object' }); continue; }
+      if (typeof step.ref === 'string') {
+        const state = stateForRef(step.ref);
+        const el = state?.refs.get(step.ref)?.el;
+        if (!el) {
+          out.push({ index, ok: false, reason: 'ref_not_in_a_live_snapshot',
+            message: `Ref ${step.ref} is no longer in a live snapshot. Read the page again and save while the refs are fresh, or supply a target descriptor directly.` });
+          continue;
+        }
+        if (!el.isConnected) { out.push({ index, ok: false, reason: 'element_detached', message: `Ref ${step.ref} points at an element that left the document.` }); continue; }
+        out.push({ index, ok: true, target: describeDurable(el) });
+        continue;
+      }
+      if (step.target && typeof step.target === 'object') { out.push({ index, ok: true, target: step.target }); continue; }
+      out.push({ index, ok: false, reason: 'no_ref_or_target', message: `Step ${index + 1} has neither a ref nor a target descriptor.` });
+    }
+    return {
+      steps: out,
+      ok: out.every(item => item.ok),
+      note: 'A descriptor is a durable identity, not a selector. At run time each tier is tried in order, and a tier that matches more than one visible element is refused rather than resolved by position.',
+      contentTrust: 'untrusted webpage data'
+    };
+  }
+  if (name === 'browser_recipe_locate') {
+    const target = args.target && typeof args.target === 'object' ? args.target : {};
+    const snapshot = crypto.randomUUID();
+    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
+    const makeRef = el => {
+      for (const [existingRef, entry] of state.refs) if (entry.el === el) return existingRef;
+      const ref = `${snapshot}:${state.refs.size + 1}`;
+      state.refs.set(ref, { el, fingerprint: fingerprint(el) });
+      return ref;
+    };
+    // Password fields are deliberately in the pool: a recipe has to be able to
+    // find the field it will later fill with secret:true. hidden inputs and
+    // private regions stay out, exactly as everywhere else.
+    const pool = [...document.querySelectorAll(actionSelector)]
+      .filter(el => visible(el) && !el.matches('input[type=hidden]') && !el.closest('[data-ai-private]'));
+    const nameOf = el => (label(el) || clean(el.textContent) || '');
+    const roleOf = el => (el.getAttribute('role') || el.tagName.toLowerCase());
+    const sameShape = el => (!target.tag || el.tagName.toLowerCase() === target.tag) && (!target.type || (el.getAttribute('type') || '') === target.type);
+    // Levenshtein ratio, computed here rather than pulled in as a dependency:
+    // pageOperation is serialised into the page and cannot import anything, and
+    // this is the only similarity the recipe path needs.
+    const similar = (a, b) => {
+      const x = String(a || '').toLowerCase();
+      const y = String(b || '').toLowerCase();
+      if (!x || !y) return 0;
+      if (x === y) return 1;
+      let prev = new Array(y.length + 1);
+      let cur = new Array(y.length + 1);
+      for (let j = 0; j <= y.length; j += 1) prev[j] = j;
+      for (let i = 1; i <= x.length; i += 1) {
+        cur[0] = i;
+        for (let j = 1; j <= y.length; j += 1) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1));
+        const swap = prev; prev = cur; cur = swap;
+      }
+      return 1 - prev[y.length] / Math.max(x.length, y.length);
+    };
+    // Ordered from strongest identity to weakest. The weak ones are only reached
+    // when every stronger one found nothing, and `degraded` says so in the reply
+    // so a caller can decide not to trust a fuzzy match for a destructive step.
+    const tiers = [
+      { id: 'role+name', ready: Boolean(target.role && target.name), test: el => roleOf(el) === target.role && nameOf(el) === target.name },
+      { id: 'name', ready: Boolean(target.name), test: el => nameOf(el) === target.name },
+      { id: 'id', ready: Boolean(target.id), test: el => el.id === target.id && sameShape(el) },
+      { id: 'name-attribute', ready: Boolean(target.attrName), test: el => (el.getAttribute('name') || '') === target.attrName && sameShape(el) },
+      { id: 'selector', ready: Boolean(target.selector), test: el => shortSelector(el) === target.selector && sameShape(el) },
+      { id: 'text', ready: Boolean(target.text), test: el => clean(el.innerText || el.textContent || '') === target.text && sameShape(el) },
+      { id: 'fuzzy-name', ready: Boolean(target.name && target.name.length >= 4), test: el => sameShape(el) && similar(nameOf(el), target.name) >= 0.86 }
+    ];
+    const describe = el => ({ ref: makeRef(el), tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || null, name: nameOf(el).slice(0, 120), id: el.id || null, selector: shortSelector(el) });
+    for (const tier of tiers) {
+      if (!tier.ready) continue;
+      const hits = pool.filter(tier.test);
+      if (!hits.length) continue;
+      if (hits.length > 1) {
+        return { found: false, ambiguous: true, tier: tier.id, candidates: hits.slice(0, 5).map(describe),
+          note: `Tier ${tier.id} matched ${hits.length} visible elements. Nothing was chosen: a recipe that guesses here clicks the wrong control. Handle this step by hand or record a new recipe from the current page.`,
+          contentTrust: 'untrusted webpage data' };
+      }
+      return { found: true, tier: tier.id, degraded: tier.id === 'fuzzy-name', target: describe(hits[0]), contentTrust: 'untrusted webpage data' };
+    }
+    return { found: false, ambiguous: false, tiersTried: tiers.filter(tier => tier.ready).map(tier => tier.id), candidates: pool.slice(0, 5).map(describe),
+      note: 'No tier matched. The control may have been renamed, moved into a shadow root or an iframe, or the page may not have finished rendering. Re-observe before recording a new recipe.',
+      contentTrust: 'untrusted webpage data' };
+  }
   if (name === 'browser_find_element') {
     const { candidates, partial, diagnostics } = findElementCandidates(args);
     return { title: document.title, url: location.href, query: args.query, action: args.action || 'any', partial, diagnostics, searchStatus: partial ? 'partial' : 'complete', candidates, found: candidates.length > 0, guidance: partial ? 'Search is incomplete. Do not infer that the target is absent or unique; inspect a screenshot and refine the scope.' : 'Verify the intended target and row before using an uncovered enabled candidate. If covered, inspect overlays before writing.', contentTrust: 'untrusted webpage data plus extension hit testing' };

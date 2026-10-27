@@ -1,3 +1,6 @@
+import { RECIPE_STEP_TOOLS } from './recipes.js';
+import { RECIPE_RUN_CONFIRMATION } from './confirmations.js';
+
 const tabId = { type: 'integer', minimum: 1 };
 const text = (maxLength = 20000) => ({ type: 'string', minLength: 1, maxLength });
 const ref = text(100);
@@ -247,6 +250,29 @@ export const TOOLS = [
     requireKeyword: { type: 'boolean' },
     agent
   }, ['tabId']),
+  tool('browser_recipe_save', 'Store a flow that already worked, so it can be replayed later without deciding anything again. This is the difference between a strong agent and a weak one: the strong one solves the page once, the recipe replays the solution step by step. Each step names one DOM tool plus either a ref from a live snapshot or a durable target descriptor; a ref is converted here into a descriptor (tag, role, accessible name, visible text, id, name attribute, selector) so the recipe survives the snapshot being evicted and ids being regenerated on the next build. Write values that change between runs as "{{variableName}}". A step marked secret must use a placeholder only: a literal is refused, because a recipe file containing a password turns this into a plaintext credential store. Navigation, upload and coordinate steps are refused: their target cannot be re-resolved by identity, and replaying them silently is how a flow lands on the wrong page. Saving only writes a recipe file; it never touches the page.', {
+    name: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$', minLength: 1, maxLength: 64 },
+    tabId,
+    origin: text(2000),
+    note: text(500),
+    variables: { type: 'array', items: text(40), maxItems: 20 },
+    steps: { type: 'array', minItems: 1, maxItems: 40, items: { type: 'object', additionalProperties: true, required: ['tool'], properties: { tool: { type: 'string', enum: RECIPE_STEP_TOOLS }, ref, target: { type: 'object', additionalProperties: true }, secret: { type: 'boolean' } } } },
+    agent
+  }, ['name', 'tabId', 'steps'], true),
+  tool('browser_recipe_run', 'Replay a stored recipe on one tab. Each step is re-resolved by identity, strongest tier first (role+name, name, id, name attribute, selector, text, then a fuzzy name match), and then executed with the same tool and the same guards as a normal call, so a secret step still needs secret:true and is still never echoed. All variables are checked before step 1 runs, so a missing or misspelled variable is a refusal and never a half-executed flow. A tier that matches more than one visible element is refused rather than resolved by position, because guessing is exactly where this becomes dangerous. The reply carries stepsCompleted, matchedBy per step, degradedMatches for fuzzy matches and the final url; on failure it names the step that failed and states that completed steps were not rolled back. Needs confirmation:"run_recipe_once", because one approval covers every write in the recipe.', {
+    name: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$', minLength: 1, maxLength: 64 },
+    tabId,
+    variables: { type: 'object', additionalProperties: { type: 'string' } },
+    settleMs: { type: 'integer', minimum: 0, maximum: 5000 },
+    stepTimeoutMs: { type: 'integer', minimum: 1000, maximum: 30000 },
+    confirmation: { type: 'string', enum: [RECIPE_RUN_CONFIRMATION] },
+    agent
+  }, ['name', 'tabId', 'confirmation']),
+  tool('browser_recipe_list', 'List stored recipes with their origin, declared variables and step count. Read this before asking a caller to record one, and after a run fails so you know which flows exist.', { agent }, [], true),
+  tool('browser_recipe_delete', 'Delete a stored recipe by name. It removes one file and never touches the page. Deleting is how a stale flow stops being replayed after a site changes for good.', {
+    name: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$', minLength: 1, maxLength: 64 },
+    agent
+  }, ['name']),
   tool('browser_screenshot', 'Capture an allowed tab. Borrows an already-open browser_debugger session when there is one, otherwise uses a temporary attachment; a tab owned by another debugger fails. While the tab is paused by a debugger session this returns status=waiting instead of hanging. A hidden tab produces no animation frames, so capture briefly starts a screencast to force one and stops it again; sideEffects and warmup report that. Pixels may contain sensitive page content and embedded frames.', { tabId, agent }, ['tabId'], true),
   tool('browser_key', 'Send a browser-level key or chord, e.g. Enter, Tab, Ctrl+A, Shift+Enter. Optional ref focuses a current element first. If the tab is leased, pass the matching agent.', { tabId, key: text(80), ref, agent }, ['tabId', 'key']),
   tool('browser_hover', 'Move the mouse to a current element reference. If the tab is leased, pass the matching agent.', { tabId, ref, agent }, ['tabId', 'ref']),

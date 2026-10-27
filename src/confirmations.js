@@ -8,3 +8,7 @@
 // service accepts. test/confirmation-schemas.test.js pins them together.
 export const STORAGE_WRITE_CONFIRMATION = 'modify_site_storage_once';
 export const REPLAY_REQUEST_CONFIRMATION = 'replay_request_once';
+// A recipe run performs an unbounded number of writes from one call, so the
+// approval is for the run as a whole and each recorded step must not carry its
+// own confirmation (src/recipes.js refuses a step that does).
+export const RECIPE_RUN_CONFIRMATION = 'run_recipe_once';

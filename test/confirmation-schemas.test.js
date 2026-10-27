@@ -46,12 +46,14 @@ test('every tool that declares a confirmation requires one and offers a single v
   }
 });
 
-test('the two new gates are distinct from each other and from the older ones', () => {
+test('every confirmation gate is distinct and named after what it authorises', () => {
   const values = TOOLS
     .filter(item => item.inputSchema.properties.confirmation)
     .map(item => item.inputSchema.properties.confirmation.enum[0]);
   assert.equal(new Set(values).size, values.length,
     `confirmation values must not be shared between tools, found ${JSON.stringify(values)}`);
   // A single shared word would let one confirmation authorise an unrelated tool.
-  for (const value of values) assert.match(value, /^(modify|replay|reveal|read|reload)_/);
+  // The verb has to say what kind of thing is being authorised: `run_` covers a
+  // stored recipe, which is many writes from one approval.
+  for (const value of values) assert.match(value, /^(modify|replay|reveal|read|reload|run)_/);
 });
