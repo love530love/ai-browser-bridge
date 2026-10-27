@@ -4,7 +4,7 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.5.22**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.5.23**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 0.5.18 增加断线错误暂存、重连补传和落盘确认，以及鼠标移入后的再次校验、弹窗表单值变化检测。日志保留范围与错误清理流程见 [扩展错误维护](docs/EXTENSION-ERROR-MAINTENANCE.md)。
 
@@ -20,9 +20,11 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 - 点击、填写、选择、滚动、上传、下载、导航和关闭标签页，并对关键写操作做结果验证。
 - 处理 iframe、重型 SPA、虚拟滚动、下拉框、广告、引导层、客服浮窗和透明遮挡。
 - 通过 DOM、Accessibility、Debugger、截图和坐标适配器进行分层兜底；没有 GPT 时仍可使用本地确定性工具链。
+- Windows 0.5.23 候选支持停靠式 DevTools 观察，以及在用户已打开 DevTools 后选择 Elements/Console/Network 面板；由于 UIA 负证据与全局 F12 焦点竞态，当前候选不自动打开 DevTools。脚本执行、Chrome 设置修改、分离 DevTools 绑定和下载落盘核验仍未实现。
 - 支持多 Agent 队列、优先级、等待状态、标签页写租约、租约续期和服务重启恢复。
 - 支持上传目录白名单、SHA256 校验、Agent 作用域、origin 白名单、内容边界和审计脱敏。
 - 提供 `doctor`、`browser_health`、`browser_execution_profile`、网络/性能诊断和本地滚动日志。
+- 真实 Chrome 本地 fixture 验收可通过 `npm run test:devtools` 运行；该用例仅操作并关闭自身创建的测试标签。
 - 默认本机监听 `127.0.0.1`，不直接暴露公网；高风险网页内容按不可信输入处理。
 
 完整能力基线、限制、验收指标和升级目标见 [产品路线图](docs/PRODUCT-ROADMAP.md)；新 Agent 接入规则见 [AGENTS.md](AGENTS.md)。

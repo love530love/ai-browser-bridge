@@ -3,10 +3,12 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { delimiter, join } from 'node:path';
 import { VERSION } from './version.js';
+import { nativeUiSnapshot } from './native-ui-snapshot.js';
 
 export const RELOAD_EXTENSION_CONFIRMATION = 'reload_extension_once';
 export const BRIDGE_EXTENSION_ID = 'mmopbppoabmhliflinadkgnedjpmbgig';
 const SCRIPT_PATH = fileURLToPath(new URL('../scripts/reload-extension.ps1', import.meta.url));
+const DEVTOOLS_SCRIPT = fileURLToPath(new URL('../scripts/devtools-ui.ps1', import.meta.url));
 const POWERSHELL_EXE = (process.env.PATH ?? '').split(delimiter)
   .map(directory => join(directory.replace(/^"|"$/g, ''), 'pwsh.exe'))
   .find(candidate => existsSync(candidate)) ?? 'pwsh.exe';
@@ -133,5 +135,34 @@ export function createDesktopAdapter({
     return mapReloadResult(result, expectedVersion);
   }
 
-  return { available, listChromeWindows, reloadExtension };
+  async function devtools({ action = 'observe', windowHandle, processId, expectedUrl, panel } = {}) {
+    if (!available) return unavailable();
+    if (!['observe', 'select_panel'].includes(action) || !Number.isSafeInteger(windowHandle) || windowHandle <= 0 ||
+        !Number.isSafeInteger(processId) || processId <= 0 || (action === 'select_panel' && !expectedUrl) ||
+        (action === 'select_panel' && (typeof panel !== 'string' || !panel.trim() || panel.length > 200))) {
+      return { status: 'not_dispatched', reason: 'invalid_devtools_target', dispatched: false, retryable: false };
+    }
+    const args = ['-ChromeProcessId', String(processId), '-ChromeWindowHandle', String(windowHandle), '-Action', action];
+    if (expectedUrl) args.push('-ExpectedUrl', expectedUrl);
+    if (panel) args.push('-Panel', panel);
+    let result;
+    try { result = await runScript(DEVTOOLS_SCRIPT, args, 30000); }
+    catch { result = { spawned: true, code: null }; }
+    if (result.code === 0 && !result.timedOut) {
+      try {
+        const value = JSON.parse(result.stdout);
+        if (['success', 'not_dispatched', 'uncertain'].includes(value.status) && typeof value.dispatched === 'boolean' &&
+            (value.status !== 'success' || (value.verified === true && value.evidence &&
+              (action === 'observe' || (value.evidence.devtoolsOpen === true && value.evidence.url === expectedUrl &&
+                (action !== 'select_panel' || value.evidence.selectedPanels?.includes(panel))))))) return value;
+      } catch { /* Never infer success from process exit alone. */ }
+    }
+    return { status: action !== 'observe' && result.spawned ? 'uncertain' : 'failed',
+      reason: 'devtools_result_unverified', dispatched: action !== 'observe' && result.spawned ? null : false, retryable: false };
+  }
+  const implementedActions = available
+    ? ['reload_extension', 'observe_devtools', 'select_devtools_panel']
+    : [];
+  return { available, implementedActions, listChromeWindows, reloadExtension, devtools,
+    nativeSnapshot: target => nativeUiSnapshot(target, { platform }) };
 }

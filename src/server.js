@@ -154,7 +154,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     protectedUi: {
       status: desktopAdapter.available ? 'partial' : 'unavailable',
       channels: desktopAdapter.available ? ['windows_uia'] : [],
-      implementedActions: desktopAdapter.available ? ['list_chrome_windows', 'reload_extension'] : [],
+      implementedActions: desktopAdapter.available ? ['list_chrome_windows', 'reload_extension', ...(typeof desktopAdapter.devtools === 'function' ? ['observe_docked_devtools', 'select_docked_devtools_panel'] : [])] : [],
       notImplemented: ['chrome_settings_changes', 'devtools_script_execution', 'extension_install_or_remove', 'browser_data_access'],
       pages: ['chrome://extensions', 'chrome://settings', 'chrome://inspect', 'chrome-extension://*'],
       confirmationModel: 'The fixed confirmation field is a caller attestation; the service cannot independently verify human approval.',
@@ -401,7 +401,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
           return recordDesktopAudit(name, args, result, startedAt);
         });
     }
-    if (args.confirmation !== RELOAD_EXTENSION_CONFIRMATION) {
+    if (name === 'browser_reload_extension' && args.confirmation !== RELOAD_EXTENSION_CONFIRMATION) {
       return recordDesktopAudit(name, args, { status: 'denied', retryable: false, reason: 'explicit_confirmation_required', dispatched: false }, startedAt);
     }
     if (!desktopAdapter.available) {
@@ -435,6 +435,14 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         return { status: 'denied', retryable: false, reason: 'chrome_target_no_longer_visible', dispatched: false,
           message: 'The selected processId/windowHandle pair is no longer a visible Chrome window. List windows and reconfirm the target.' };
       }
+      if (name === 'browser_native_snapshot') {
+        if (typeof desktopAdapter.nativeSnapshot !== 'function') return { status: 'unavailable', reason: 'native_snapshot_unavailable', dispatched: false };
+        return desktopAdapter.nativeSnapshot(args);
+      }
+      if (name === 'browser_devtools') {
+        if (typeof desktopAdapter.devtools !== 'function') return { status: 'unavailable', reason: 'devtools_adapter_unavailable', dispatched: false, retryable: false };
+        return desktopAdapter.devtools(args);
+      }
       return desktopAdapter.reloadExtension(args);
     })
       .catch(() => ({ status: 'uncertain', retryable: false, reason: 'desktop_process_result_unknown', dispatched: null,
@@ -446,7 +454,11 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     const tool = validateCall(name, args);
     if (name === 'browser_agent_guide') return agentGuide();
     if (name === 'browser_capabilities') return capabilities();
-    if (name === 'browser_protected_ui_plan') return protectedUiPlan({ ...args, desktopAdapterAvailable: desktopAdapter.available === true });
+    if (name === 'browser_protected_ui_plan') return protectedUiPlan({
+      ...args,
+      desktopAdapterAvailable: desktopAdapter.available === true,
+      desktopAdapterActions: desktopAdapter.implementedActions ?? []
+    });
     if (name === 'browser_execution_profile') return executionProfile();
     if (name === 'browser_queue_status') return queueSnapshot();
     if (name === 'browser_wait_until_ready') return waitUntilReady(args);
@@ -476,7 +488,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true },
         recommendedNextAction: 'Wait for the one-shot desktop action to finish; do not issue conflicting browser writes.', queue: queueSnapshot() };
     }
-    if (name === 'browser_desktop_windows' || name === 'browser_reload_extension') return desktopCall(name, args);
+    if (name === 'browser_desktop_windows' || name === 'browser_reload_extension' || name === 'browser_devtools' || name === 'browser_native_snapshot') return desktopCall(name, args);
     if (LEASE_TOOLS.has(name)) return leaseCall(name, args, decision);
     if (!WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) leases.heartbeat(args.tabId, args.agent ?? null, name);
     if (lease && lease !== owner) {

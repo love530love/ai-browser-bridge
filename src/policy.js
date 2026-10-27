@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
 import { TOOLS } from './tools.js';
@@ -81,7 +81,7 @@ function normalize(entry = {}) {
 
 export function createAgentPolicy({ file = null, requireIdentity = false } = {}) {
   let agents = new Map();
-  let loadedMtimeMs = null;
+  let loadedFingerprint = null;
 
   function persist() {
     if (!file) return;
@@ -97,28 +97,40 @@ export function createAgentPolicy({ file = null, requireIdentity = false } = {})
 
   function load() {
     if (!file) return;
+    let bytes;
     try {
-      const raw = JSON.parse(readFileSync(file, 'utf8'));
+      bytes = readFileSync(file);
+      const raw = JSON.parse(bytes.toString('utf8'));
       const next = new Map();
       for (const [name, entry] of Object.entries(raw?.agents ?? {})) {
         if (typeof name === 'string' && name && entry && typeof entry === 'object') next.set(name, normalize(entry));
       }
       agents = next;
-      loadedMtimeMs = mtime();
+      loadedFingerprint = bytes;
     } catch {
       agents = new Map();
+      // Keep the exact observed bytes when parsing failed; if an atomic writer
+      // replaces the file concurrently, the next refresh will see new bytes.
+      loadedFingerprint = bytes ?? fingerprint();
     }
   }
 
-  function mtime() {
-    try { return statSync(file).mtimeMs; } catch { return null; }
+  function fingerprint() {
+    if (!file) return null;
+    try { return readFileSync(file); } catch { return null; }
+  }
+
+  function sameFingerprint(left, right) {
+    return left === right || (Buffer.isBuffer(left) && Buffer.isBuffer(right) && left.equals(right));
   }
 
   // `node src/cli.js agent set` writes the same file the running service reads.
-  // Reload on change so operator edits take effect without a restart.
+  // Compare file contents rather than mtime: Windows timestamp granularity can
+  // be coarser than the CLI edit/test interval, which otherwise misses updates.
   function refresh() {
     if (!file) return;
-    if (mtime() !== loadedMtimeMs) load();
+    const current = fingerprint();
+    if (!sameFingerprint(current, loadedFingerprint)) load();
   }
 
   function deny(reason, detail) {
@@ -179,8 +191,8 @@ export function createAgentPolicy({ file = null, requireIdentity = false } = {})
     requireIdentity: () => requireIdentity,
     get: name => { refresh(); return agents.has(name) ? normalize(agents.get(name)) : null; },
     list: () => { refresh(); return [...agents.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, entry]) => ({ agent: name, ...normalize(entry) })); },
-    set: (name, entry) => { agents.set(String(name), normalize(entry)); persist(); loadedMtimeMs = mtime(); return { agent: String(name), ...normalize(agents.get(String(name))) }; },
-    remove: name => { const removed = agents.delete(String(name)); if (removed) persist(); return { removed, agent: String(name) }; },
+    set: (name, entry) => { agents.set(String(name), normalize(entry)); persist(); loadedFingerprint = fingerprint(); return { agent: String(name), ...normalize(agents.get(String(name))) }; },
+    remove: name => { const removed = agents.delete(String(name)); if (removed) { persist(); loadedFingerprint = fingerprint(); } return { removed, agent: String(name) }; },
     size: () => { refresh(); return agents.size; }
   };
 }

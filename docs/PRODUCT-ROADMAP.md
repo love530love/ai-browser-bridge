@@ -1,14 +1,16 @@
 # AI Browser Bridge 能力路线图
 
-本项目的目标是成为面向多 Agent、无人值守和复杂网页场景的可靠浏览器操控编排层。评价标准不是工具数量，而是系统能否在不同页面、并发和故障条件下自动选择策略、验证结果并恢复任务。
+本项目的目标是让 Agent 能在人类可用的当前 Chrome 界面上完成浏览器任务：普通网站、Chrome 内部页、DevTools、设置页和扩展 UI 都不因 URL 类型而永久封禁。按任务选择 DOM、扩展 API、CDP、Windows UI Automation、视觉/坐标和用户接管通路；状态未知不能误报完成或盲目重试。
 
-## 当前基线：0.5.22（2026-10-26）
+评价标准不是工具数量，而是能否用一句话委托目标、选到正确执行表面、完成操作并验证结果，以及在页面/浏览器/权限拒绝时给出可恢复状态。
 
-以下能力已经纳入当前版本体系。`npm run doctor` 检查版本、连接、构建摘要和工具 schema；它不证明每项业务能力已完成现场验收。验证范围见 [部署记录](DEPLOYMENT-2026-10-26.md)。
+## 当前源码候选：0.5.23（2026-10-27）
+
+0.5.22 是已验证的上一个完整部署基线；当前源码已包含 0.5.23 的停靠 DevTools UIA 阶段，但仍处于候选验收。此前运行服务曾加载过 DevTools 候选，而本轮随后修改了策略热加载实现，故服务 build ID 需要重新核对/维护部署；Chrome 加载扩展仍为 0.5.22，`doctor` 的版本匹配检查未通过。不要把源码版本、服务版本和扩展版本混称为已完成发布。`npm run doctor` 检查版本、连接、构建摘要和工具 schema；它不证明每项业务能力已完成现场验收。验证范围见 [部署记录](DEPLOYMENT-2026-10-26.md)。
 
 - 本地 HTTP/WebSocket 桥接与 Chrome 扩展连接
 - 服务与扩展版本匹配检查
-- 51 个 MCP 工具的完整性检查
+- 51 个已发布 MCP 工具的完整性检查（未发布工作区 DevTools 增量后为52）
 - 多 Agent 队列、优先级、等待状态和标签页租约
 - 读操作超时隔离，避免拖垮桥接连接
 - 写操作结果不确定时禁止自动盲目重放
@@ -48,9 +50,11 @@ GPT、其他云端模型和本地模型都只能作为可选的规划、视觉�
 
 对抗性网页回归场景至少覆盖覆盖式透明层、不断变化的按钮位置、伪造浏览器警告、恶意提示注入、循环弹窗、自动下载、重定向链、跨源 iframe、混淆脚本、广告点击劫持和敏感信息诱导。目标是安全停止并保留检查点，而不是在不确定时强行完成。
 
-### 人类级操作与受保护界面
+### 人类等价操作面与内部 UI 适配
 
-“任意 Agent 都能操作浏览器”分为两类能力：普通网页的完整操控，以及 Chrome 内部/桌面界面的受控操控。普通 HTTP/HTTPS 页面继续由 Bridge 通过 DOM、Accessibility、iframe、Shadow DOM、Debugger、截图和坐标适配器完成；`chrome://extensions`、`chrome://settings`、`chrome://inspect`、DevTools 内部页和 `chrome-extension://` 页面不能伪装成普通网页 DOM。
+“人类可在当前 Chrome 操作的界面”是任务覆盖目标，不按 `chrome://`、DevTools 或扩展 UI 这类 URL 前缀永久封禁。但内部页面采用其真实控制面：普通 HTTP/HTTPS 页面使用 DOM、Accessibility、iframe、Shadow DOM、Debugger、截图和坐标；Chrome 内部页使用 Chrome API 或桌面 UI Automation；调试协议只承担明确的诊断/调试动作。未实现的动作返回精确能力缺口，不假装按键或脚本派发就是任务完成。
+
+人类等价是任务执行面广，不是绕过 Chrome/OS 强制权限、网站认证或浏览器安全提示。Agent/用户负责声明任务意图与授权，Bridge 仍负责绑定当前用户授权的 profile/window/tab、执行通道前提检查、记录派发/验证状态；UI 切换、下载或提交等 toggle/副作用动作必须在结果未知时停止而不盲重放。
 
 新增能力经纪层（capability broker）后，Agent 先提交目标和风险，再由本地策略选择执行通道：
 
@@ -58,7 +62,7 @@ GPT、其他云端模型和本地模型都只能作为可选的规划、视觉�
 目标 → 风险评估 → 能力协商 → 预览计划 → 授权/检查点 → 单步执行 → 证据验证 → 完成/恢复
 ```
 
-能力矩阵：
+能力矩阵（风险级别仅用于描述动作影响，并非页面类型禁区）：
 
 | 等级 | 示例 | 默认策略 |
 |---|---|---|
@@ -69,9 +73,9 @@ GPT、其他云端模型和本地模型都只能作为可选的规划、视觉�
 | L4 | 重载/安装扩展、开启开发者模式、修改浏览器安全设置 | 每次确认，默认禁止自动 |
 | L5 | Cookie/密钥、任意文件、系统命令、绕过安全机制 | 禁止或独立人工流程 |
 
-受保护界面适配器的优先顺序是 Computer Use/桌面 UI 自动化、专用隔离 Chrome 实例和 Native Messaging；Native Messaging 只负责受白名单约束的生命周期与诊断，不能成为任意 Shell 或绕过 Chrome 安全边界的后门。每个动作必须校验窗口标题、目标 URL、扩展 ID、截图/版本证据、一次性 nonce、Agent 身份和幂等键。
+适配器按可用性逐级选择：Chrome 扩展 API/CDP、Windows UI Automation、可见 UI/坐标、最后人工接管。Native Messaging 如采用，只作为有明确 Chrome manifest host 权限的消息通道，不能承载任意 Shell。每个桌面动作绑定当前 profile/PID/HWND/标签 URL 和具体 UI 控件；结果通过 UIA、Chrome 状态或文件证据回读。
 
-新增目标工具：`browser_capabilities`（能力和限制握手）、`browser_policy_check`（风险与所需授权）、`browser_privileged_ui`（受限内部界面动作）、`browser_task_checkpoint`（长任务检查点）、`browser_verify_state`（版本/连接/下载/表单证据）和 `browser_audit_query`（解释等待、拒绝和未知状态）。保护页面不能被误报为普通 DOM 成功；不支持时必须返回 `requires_user` 或 `unsupported_with_reason`。
+能力 broker 按 surface/action 声明可用性；缺实现时报告 `not_implemented`，环境不具备报告 `adapter_unavailable`，目标证据不完整报告 `unknown/not_dispatched`。F12/快捷键等 toggle 在已确认打开时改为 no-op/聚焦，确认关闭才单次派发；观察不完整时禁止把 unknown 当 closed。
 
 ### 页面理解层
 
@@ -187,6 +191,12 @@ GPT、其他云端模型和本地模型都只能作为可选的规划、视觉�
 本项目不应宣称在所有浏览器操控能力上超过 Playwright、Puppeteer、CDP 或其他方案。它的目标优势是把这些通道编排为可授权、可验证、可恢复的多 Agent 本地执行层。对外比较必须按具体场景和上述指标进行，并保留未支持页面能力、浏览器版本和权限条件。
 
 本文件随每次版本迭代更新，已完成能力、当前限制和下一阶段目标必须保持一致。
+
+### 0.5.23 DevTools 工作区增量（2026-10-26）
+
+停靠式 DevTools 状态观察、打开和面板选择已加入 0.5.23。Windows UIA 在本机真实 Chrome 本地测试标签上完成开/已开幂等、Console/Network/Elements 选择及选后回读验证；当前候选代码测试结果会在完整回归记录中更新。服务端尚待受控部署。
+
+**实现边界：**只支持停靠 DevTools。UIA 观察完整且将 DevTools 状态正向判为 closed 才允许一次 F12；open 不再派发；UIA partial/unknown、同进程 detached DevTools 歧义均 fail-closed。面板只在选中状态回读验证后报告 success。分离 DevTools 绑定、Console/脚本执行、断点、设置写入、下载事件闭环仍未实现。
 
 ## 下一阶段交付顺序与验收门槛
 

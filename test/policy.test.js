@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TOOLS } from '../src/tools.js';
@@ -221,7 +221,15 @@ test('an operator edit to the file is picked up without a restart', () => {
   live.set('reader', { scopes: ['read'] });
   assert.equal(live.evaluate({ name: 'browser_click', tool: byName.get('browser_click'), args: { tabId: 1, ref: 'r' }, agent: 'reader' }).allowed, false);
 
-  // A second process (the CLI) widens the scope on disk.
+  // A second process (the CLI) widens the scope on disk. Restore the original
+  // timestamp to model Windows coarse timestamp resolution; content changes
+  // must still invalidate the live process cache.
+  const beforeEdit = statSync(file);
+  const stableTimestampMs = Math.floor(beforeEdit.mtimeMs / 1000) * 1000;
+  utimesSync(file, stableTimestampMs / 1000, stableTimestampMs / 1000);
+  const stableMtimeMs = statSync(file).mtimeMs;
   createAgentPolicy({ file }).set('reader', { scopes: ['read', 'write'] });
+  utimesSync(file, stableTimestampMs / 1000, stableTimestampMs / 1000);
+  assert.equal(statSync(file).mtimeMs, stableMtimeMs);
   assert.equal(live.evaluate({ name: 'browser_click', tool: byName.get('browser_click'), args: { tabId: 1, ref: 'r' }, agent: 'reader' }).allowed, true);
 });

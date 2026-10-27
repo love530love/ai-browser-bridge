@@ -1,3 +1,9 @@
+## 0.5.23 — 2026-10-26
+
+- 增加停靠式 DevTools UIA 通路：observe/select_panel；仅在用户已打开且 UIA 正向识别的 DevTools 中选择面板，回读选中状态后才报成功。
+- 因 UIA 未观察到 DevTools 不足以证明 closed，且 F12 全局快捷键存在焦点竞态，当前候选不暴露 open/F12 toggle。未知不 dispatch；面板结果不确定不自动重放。Console/脚本执行、分离 DevTools 绑定、设置写入和下载落盘核验仍未实现。
+- `node test/live-devtools.js` 可在已连接的现有 Chrome 中，以本地临时页面执行可选真实 UIA 验收，并只关闭自身创建的测试标签。
+
 ## 0.5.22 — 2026-10-26
 
 - 新增 Windows 桌面窗口枚举与本扩展单次 Reload 工具：精确绑定进程/窗口、检查空闲状态、暂停竞争任务，并以新连接会话和版本验证结果；不确定结果禁止自动重放。

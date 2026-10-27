@@ -8,7 +8,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-test('watchdog recovers absent service, respects pause and never restarts occupied ports', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+// The outer budget must exceed four sequential pwsh runs. Nominal runtime is
+// ~20s (5s per run), but a loaded machine has pushed a single run past the 30s
+// per-invocation timeout and produced a false red. Keep the per-invocation
+// timeout (a hung pwsh should still fail fast) and raise only the outer bound.
+test('watchdog recovers absent service, respects pause and never restarts occupied ports', { skip: process.platform !== 'win32', timeout: 180000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'bridge-watch-test-'));
   const state = join(root, '.local'); mkdirSync(state);
   t.after(() => rmSync(root, { recursive: true, force: true }));

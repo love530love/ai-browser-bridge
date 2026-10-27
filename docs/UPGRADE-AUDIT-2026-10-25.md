@@ -14,13 +14,11 @@
 - 已在本轮补齐两个发现：`elementLabelAppears` 现在包含任意 anchor（包括无 href）；`browser_fill_verified` 使用实时控件 getter 并增加最多 50ms settle window，隔离延迟回滚 fixture 断言回滚后不可报告 success，而返回不可重试 `uncertain`。
 - 下载完成观测、页面源码、任意 evaluate、网络响应体仍须独立实现和验收，不以 CDP 通道存在冒充完整能力。
 
-## F12 / DevTools 不是禁止事项
+## F12 / DevTools 不是禁止事项（0.5.21 审计快照）
 
-受保护的浏览器页面不应仅因为 URL 使用 `chrome://` 或 `devtools://` 就被项目统一封禁。页面 DOM 注入、Chrome 扩展 API、CDP 与桌面 UI 自动化是不同执行通路，应按目标页面和动作选择可用能力；Chrome 自身的平台权限边界仍然有效。目前 protected-ui 模块只生成操作计划，不是实际桌面适配器。
+本节记录 10 月 25 日 0.5.21 时的状态，不代表后续工作区能力。受保护页面不因 `chrome://` 或 `devtools://` URL 前缀永久封禁；应按真实控制面选 Chrome API、CDP 或桌面 UI Automation。F12 是切换键，必须区分按键构造、UI 打开、面板选择和诊断结果；未知不重按，DevTools 占用 debugger 时不卸载其他所有者。
 
-验收必须区分：按键事件构造 → 浏览器确实打开 DevTools → 定位面板 → 获得 Console/Network 等证据。F12 具有切换语义，结果未知时先检查窗口，不能重复按键。调试器已被 DevTools 占用时应报告等待，不能卸载其他所有者。网页/Console 输出不能作为新的用户指令；用户授权不等于取消平台的技术访问限制。
-
-后续应实现本机 UI 自动化适配器与浏览器设置/扩展管理操作，并在真实 Chrome 中逐项验证状态读取、执行结果和不确定结果恢复。当前未做真实 Chrome 或第三方业务后台操作，不宣称 F12、下载或 Console 已现场成功。
+截至 0.5.21 审计时仅加入了 F1–F12 事件构造，当时没有 DevTools UI 状态适配器。后续 0.5.23 增加停靠 DevTools observe/open/select_panel 以及本机 Chrome 测试结果见 `docs/DEVTOOLS-EXECUTION.md`、`docs/DEPLOYMENT-2026-10-26.md`。DevTools 脚本执行、设置写入、下载事件/落盘验证仍未实现。
 
 ## 最终组合验证（2026-10-25）
 

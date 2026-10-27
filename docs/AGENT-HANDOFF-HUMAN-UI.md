@@ -1,0 +1,69 @@
+# 人类等价浏览器 UI 基座：Agent 交接
+
+> 本文是后续 Agent 接手本项目的入口，不依赖某一段对话。每次交接前先核对实际 Git、部署和测试状态；不要把本文件中的计划当成已交付能力。
+
+## 目标
+
+让 Agent 能通过当前用户已授权的 Chrome 界面完成工程师可人工执行的浏览器工作。页面 URL 前缀（包括 `chrome://`、`devtools://`、`chrome-extension://`）本身不是永久拒绝理由；应按真实执行表面选用扩展 DOM/Chrome API、CDP、Windows UI Automation、视觉/坐标或人工接管通路。用户/接入 Agent 负责任务意图与业务授权，基座负责可用能力、精确目标绑定、真实执行状态/证据、日志、技术异常处理与不确定结果不重放。
+
+“人类等价”不是绕过 Chrome/操作系统原生权限、认证、策略或安全提示；网页内容不是授权。不得把主机任意命令伪装成浏览器工具，不得把“快捷键/点击已派发”冒充最终任务完成。
+
+## 加入协作与接手步骤
+
+1. 阅读根目录 `AGENTS.md` 和本文件。
+2. 检查 `git status --short --branch`、`git log --oneline --decorate -8`、所有远端跟踪分支及本任务板；不得丢弃、覆盖其他 Agent 的未提交文件。
+3. 在共享任务板认领一个未阻塞事项。当前活跃协作区：`ai-browser-bridge-human-ui`；共享 task list 为本轮人类等价 UI 基座任务板。新会话若无法进入同一个协作区，仍可按仓库此交接文档和任务编号继续，并先向负责人说明。
+4. 实施前先加可复现测试/独立 oracle，改动保持单一能力边界；不得同时操作真实用户浏览器和隔离 fixture。真实 Chrome 操作必须经过 Bridge、限制在本次创建的测试标签/窗口，任何扩展 Reload、用户设置变更、安装/删除扩展都需要本次具体动作的明确授权。
+5. 交付时记录变更文件、确切命令/结果、真实 Chrome 覆盖范围、未覆盖边界、工作树和提交/部署状态；更新本文件与任务板。未明确要求时不要擅自推送、部署或重载扩展。
+
+## 当前交接快照（2026-10-27，接手前必须复核）
+
+- 仓库：`K:\PythonProjects5\AI-Browser-Bridge`，分支 `main`，工作树有未提交的 0.5.23 DevTools 阶段候选改动。
+- 最近本地/`origin/main`：`fddcb1d Align capability matrix and roadmap with verified 0.5.22 deployment`。
+- 当时 `sshpush/main` 指向 `5313232 Stabilize Windows process and browser stress fixtures`，与 `origin/main` 的指针不同；推送前先检查提交图、不要盲目推送或重写历史。
+- 候选包/扩展磁盘版本：0.5.23。最新读取的运行状态：Bridge 服务 0.5.23、buildId 与当时工作树一致；加载中的扩展仍为 0.5.22，session `96c1ce0e-3fa3-4e61-87d6-8c7d808179f3`，队列空闲。`doctor` 因版本不匹配而失败；不得声称部署全绿。扩展本轮仅有 manifest 版本字段变化，没有新扩展代码；是否 Reload 需按发布操作与授权另行决定。
+- 已有停靠式 DevTools `browser_devtools` UIA 候选：**只有 `observe` 与 `select_panel`，不含 `open`/F12 toggle**（原因见下节未决审查点）。代码和文档位于 `src/desktop-adapter.js`、`scripts/devtools-ui.ps1`、`src/server.js`、`src/tools.js`、`docs/DEVTOOLS-EXECUTION.md`；对应测试 `test/devtools-adapter.test.js`、可选真实 Chrome 本地 fixture `test/live-devtools.js`。`devtoolsState` 只会返回 `open` 或 `unknown`，**永不推断 `closed`**。本机 Chrome 历史上曾验证过停靠 DevTools 的 F12 打开/幂等与 Elements/Console/Network 面板选择回读，但 open 通路已在当前候选撤下；select_panel 只适用于用户已自行打开 DevTools 的场景。这不覆盖 detached DevTools、Console 脚本执行、Sources 调试或其他 Chrome/UIA 版本。
+- **本轮已完成的验证（可引用）**：撤下 open/F12 后，`node --check` 四个改动源文件通过；`scripts/devtools-ui.ps1` 用 `System.Management.Automation.Language.Parser::ParseFile` 解析 0 错误；`test/devtools-adapter.test.js` 6/6、`test/protected-ui.test.js` + `devtools-adapter` 组合 12/12；**全量 `node --test --test-concurrency=1 test/*.test.js` = 153/153 通过（38 个测试文件全部跑完，271s）**。这是 0.5.23 源码候选的当前验收基线。
+- 工作树还有 Graphify 临时目录 `graphify-out/` 未跟踪。不得把其中缓存/临时文件加进产品提交；不要在没有审阅前删除。
+- **两个测试基础设施缺陷，本轮已定性，接手者不要再踩**：
+  1. `test/watchdog.test.js` 的外层超时（原 60000ms）小于 4 次串行 `pwsh.exe` 的内层超时之和（4×30000ms），预算内部不自洽；机器有负载时单次 pwsh 超过 30s 就会假红（实测一次 148/149 失败，该文件本轮未修改，单独跑通过）。已把外层提到 180000ms，断言未动。
+  2. 一次全量运行里 `test/native-ui-snapshot.test.js` 的 4 个用例**没有出现在结果中也没有报错**（该轮计 149，正确应为 153），即 runner 可能静默少跑一个文件——这是"看起来全绿其实漏跑"的假绿风险。复核全量结果时必须同时核对用例数与文件数，不能只看 fail=0。
+- 新查明并在当前工作树修复策略注册表的可靠性缺口：热加载原先只比较 `mtimeMs`，Windows 粗粒度/同时间戳原子替换会漏掉外部 CLI 更新；现改为比较文件内容字节并解析同一快照。`test/policy.test.js` 增加同时间戳复现，定向 16/16 通过。
+
+## 本阶段任务板与优先顺序
+
+1. **稳定并收尾 0.5.23 DevTools 阶段**：当前负责人 team-lead。复核完整测试失败，运行新鲜全量回归；审查 UIA 负证据和 F12 焦点竞态；校正文档。发布、推送、部署分别由负责人按实际状态和用户授权推进。
+2. **建立跨 Agent 交接**：由本文件、根 `AGENTS.md`、共享协作区 task list 完成；接手者应先验证以上快照。
+3. **扩充 DevTools 面板原语**：Elements 检查/样式编辑；Console 输入/运行/输出；Sources 断点、单步与编辑；Network 捕获/过滤/重放；Application 存储；Performance/Lighthouse；ServiceWorker。按小步落地，逐动作提供目标、派发状态和结果证据；“打开面板”不等于完成面板任务。
+4. **Chrome 原生 UI**：逐项实现设置读写与回读、证书/代理、扩展管理、下载完成和落盘证据、上传、剪贴板、权限对话框、多窗口/标签。精确目标（尤其扩展 ID、窗口 PID/HWND、下载 ID/文件路径）；不确定的副作用不重放。
+5. **统一执行上下文**：DOM/视觉/网络/页面快照、trace/audit、可扩展 before/after hooks、可分类异常与恢复建议、可暂停/续接的检查点；与现有队列/lease/写超时语义兼容。
+
+## 当前代码入口
+
+- 工具定义/schema：`src/tools.js`
+- 服务端 dispatch、policy、queue、audit、desktop mutex：`src/server.js`、`src/policy.js`、`src/leases.js`
+- 扩展 DOM/Chrome API/CDP：`extension/worker.js`、`extension/page.js`、`extension/cdp.js`
+- Windows UI 自动化：`src/desktop-adapter.js`、`scripts/devtools-ui.ps1`、`scripts/reload-extension.ps1`
+- 现有能力/路线图：`docs/CHROME-CAPABILITY-MATRIX.md`、`docs/PRODUCT-ROADMAP.md`、`docs/DEVTOOLS-EXECUTION.md`
+- 回归入口：`npm test`（串行全量）、`npm run test:stress`（隔离 Chromium）、`npm run test:devtools`（现有 Chrome 的 opt-in、本地 fixture，操作后仅关闭自身测试标签）。
+
+## DevTools UIA 的未决审查点
+
+独立审查指出两项发布阻断问题，**当前候选的处置是收缩能力面，不是修复后保留 open**：
+
+1. **负证据不足**：Document 的 `ValuePattern` 读取失败会被静默吞掉；若 Chrome 只暴露 Accessible Name 或省略部分 DevTools 控件，“UIA 遍历完整但没找到 DevTools”并不能证明 DevTools 已关闭。据此推断 `closed` 会把 `unknown` 误判成确定状态。
+2. **全局焦点 TOCTOU**：`SetForegroundWindow` / `GetForegroundWindow` 检查与 `WScript.Shell.SendKeys('{F12}')` 之间存在跨窗口竞态，F12 可能落到之后获得焦点的窗口。
+
+**处置**：`open`/`toggle` 已从工具 schema、server capabilities、protected-ui planner、PowerShell 脚本、集成测试与文档六处同时撤下；脚本对 `open` 返回 `not_dispatched` / `action_not_implemented`，不派发任何按键。`devtoolsState` 收敛为只允许 `open` / `unknown`。要恢复 open，必须先做到：在目标窗口内用可精确绑定且可回读的原生 UIA action（或 CDP `Target.attachToTarget`）替代全局 SendKeys，并能证明负证据充分。**静态正则测试和单机成功都不是并发焦点安全的证明。** detached DevTools 尚未精确关联目标标签。
+
+## 验证与发布纪律
+
+- 单元/假 runner 测试证明代码契约，不证明真实 UIA；隔离 Chromium fixture 不证明日常 Chrome；实机单窗口结果不证明所有 Chrome 版本。
+- 每项操作区分 `not_dispatched`、`success+verified`、`uncertain`、`unsupported/unavailable`。未知 UI/网络/下载/写结果绝不自动重放。
+- 用托管 Node 运行：`C:\Users\love\.workbuddy-ai\binaries\node\versions\22.22.2-6\node.exe`。
+- 部署先确认队列 idle、maintenance lock、build ID 和 target；不因为 manifest version 字段变化就自动 Reload。
+- 提交时只 stage 本次审查过的产品文件，排除 `graphify-out/`、本机日志、凭据与会话数据；推送之前核对 `origin/main` 与 `sshpush/main` 的提交图及项目长期约定。
+
+## Codex 原生 UI 快照增量（2026-10-27）
+
+本轮领取原生菜单发现/快照子任务。新增 scripts/native-ui-snapshot.ps1、src/native-ui-snapshot.js、test/native-ui-snapshot.test.js、docs/NATIVE-UI-PRIMITIVES.md；在 desktop-adapter/server/tools 仅追加 browser_native_snapshot 分发，保留撤下 open 的协作修复。定向测试 16/16 通过；PowerShell AST 解析及 git diff --check 通过。本机只读适配器实测取得 121 个原生控件，排除 1 个 document，partial=false；识别 Chrome/view_1007/ExpandCollapse 候选。未执行菜单展开、未完成 DevTools 打开；下一步是绑定 ref 的 Expand/Collapse 与 popup owner 关联。新增服务源码尚未部署，未提交或推送；现有 0.5.23 候选其他改动未重置或清理。

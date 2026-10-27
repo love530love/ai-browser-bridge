@@ -48,7 +48,7 @@ test('low risk protected UI still requires a desktop adapter', () => {
   assert.deepEqual(plan.adapterOrder, ['windows_uia', 'manual_user_action']);
 });
 
-test('protected UI plan advertises only the implemented fixed extension reload action', () => {
+test('protected UI plan advertises only actions implemented by the active adapter', () => {
   const supported = protectedUiPlan({ url: 'chrome://extensions', action: 'reload_extension', desktopAdapterAvailable: true });
   assert.equal(supported.status, 'desktop_adapter_available');
   assert.equal(supported.execution.implementedHere, true);
@@ -57,6 +57,17 @@ test('protected UI plan advertises only the implemented fixed extension reload a
   assert.equal(supported.execution.tool, 'browser_reload_extension');
   assert.match(supported.authorization, /direct user approval/);
   assert.match(supported.authorization, /caller attestation/);
+
+  const devtools = protectedUiPlan({
+    url: 'devtools://devtools/bundled/inspector.html', action: 'observe_devtools',
+    desktopAdapterActions: ['observe_devtools', 'select_devtools_panel']
+  });
+  assert.equal(devtools.status, 'desktop_adapter_available');
+  assert.equal(devtools.execution.implementedHere, true);
+  assert.equal(devtools.execution.tool, 'browser_devtools');
+  assert.ok(devtools.supportedActions.includes('select_devtools_panel'));
+  assert.equal(devtools.supportedActions.includes('open_devtools'), false);
+  assert.match(devtools.authorization, /caller remains responsible/);
 
   const settings = protectedUiPlan({ url: 'chrome://settings', action: 'change_setting', desktopAdapterAvailable: true });
   assert.equal(settings.execution.implementedHere, false);
