@@ -19,7 +19,11 @@ export const WRITE_TOOLS = new Set([
   'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_navigate', 'browser_close',
   'browser_key', 'browser_hover', 'browser_select', 'browser_choose', 'browser_action', 'browser_scroll_element',
   'browser_dismiss_overlay', 'browser_click_verified', 'browser_fill_verified', 'browser_upload_verified',
-  'browser_pick', 'browser_history'
+  'browser_pick', 'browser_history',
+  // Both change what the page's origin now holds or what the server has already
+  // been told. A second agent writing the same origin or replaying into it is a
+  // real conflict, not a harmless parallel read.
+  'browser_storage_write', 'browser_replay_request'
 ]);
 
 const clampTtl = value => {

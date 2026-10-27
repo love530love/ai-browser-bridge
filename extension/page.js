@@ -815,9 +815,14 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       popupObservableFromExtension: false,
       why: 'Chrome draws the password autofill popup in the browser process, not in the page DOM, so an extension can neither see it open nor click an entry in it. CDP-synthesised key events are delivered to the renderer and never reach that popup either, so pressing Down/Enter cannot pick a suggestion.',
       paths: [
-        'If the caller already holds the credential, fill it with browser_fill_verified: that is faster, works on a background tab and is verifiable. browser_credential_lookup can read the saved password for one exact origin when the caller has no other source.',
+        // The old text told the caller to "just fill it with browser_fill_verified".
+        // That is a dead end: a password field is a sensitive element, so the
+        // shared guard rejected the write as "Element unavailable or protected",
+        // and browser_fill rejected type=password as an unsupported input type.
+        // A ref that was handed out by browser_login_state was therefore unusable.
+        'To fill a password the caller already holds, call browser_fill_verified with secret:true and the ref from passwordFields. Without secret:true the same ref is rejected as "Element unavailable or protected", and plain browser_fill reports an unsupported input type. A secret fill never echoes the value back: the result carries only the character count and a boolean match. browser_credential_lookup reads the saved password for one exact origin when the caller has no other source; when that cannot resolve it, browser_password_manager_reveal drives Chrome\'s own password manager UI.',
         'To let Chrome fill from its own saved password, a human has to accept the suggestion, or a foreground Windows UI-automation path has to drive the popup.',
-        'A password field whose hasValue is already true means something filled it: read the field state again after the page reacts instead of typing over it.'
+        'A password field whose hasValue is already true means something filled it: read the field state again after the page reacts instead of typing over it. This is only a signal; it does not make the field writable, which still needs an explicit secret:true fill.'
       ]
     };
     if (args.focusPassword === true && passwordFields.length) {
@@ -947,7 +952,22 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   if (!entry || state.url !== location.href || !entry.el.isConnected || fingerprint(entry.el) !== entry.fingerprint) throw new Error('Stale element reference. Read page again.');
   if (entry.rowText !== undefined && rowContext(entry.el) !== entry.rowText) throw new Error('Stale row reference. Table row changed; find the target again.');
   const el = entry.el;
-  if (sensitive(el) || el.disabled || el.getAttribute('aria-disabled') === 'true' || (!visible(el) && name !== 'browser_upload')) throw new Error('Element unavailable or protected');
+  // browser_login_state hands out a real ref for a password field, so the ref is
+  // valid but every write through it used to be rejected by the guard below and
+  // by browser_fill's type whitelist. That made automated sign-in impossible: the
+  // discovery step promised a usable target that no tool could write to.
+  // The relaxation is deliberately narrow. It is bound to the two fill operations
+  // by name, because this guard is shared with scroll_element, dismiss_overlay,
+  // click and the upload paths: a password field must not become clickable just
+  // because the caller passed the same flag. It also requires the element to
+  // really be input[type=password] and to not sit inside a region a third party
+  // declared private with [data-ai-private], so secret:true cannot be used to
+  // reach a hidden input or a marked-private subtree.
+  const secretTarget = (name === 'browser_fill' || name === 'browser_fill_verified')
+    && args.secret === true
+    && el.matches('input[type=password]')
+    && !el.closest('[data-ai-private]');
+  if ((sensitive(el) && !secretTarget) || el.disabled || el.getAttribute('aria-disabled') === 'true' || (!visible(el) && name !== 'browser_upload')) throw new Error('Element unavailable or protected');
   if (name === 'browser_scroll_element') {
     if (!Number.isInteger(args.deltaY) || Math.abs(args.deltaY) > 5000) throw new Error('Invalid scroll');
     if (typeof el.scrollTop !== 'number' || el.scrollHeight <= el.clientHeight) throw new Error('Element is not a scrollable container');
@@ -1047,7 +1067,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (typeof args.text !== 'string' || args.text.length > 20000 || el.readOnly) throw new Error('Invalid text or readonly field');
     el.focus();
     if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-      if (el instanceof HTMLInputElement && !['text', 'email', 'search', 'url', 'tel', 'number'].includes(el.type)) throw new Error('Unsupported input type');
+      // secretTarget already proved this is input[type=password] reached through a
+      // fill operation; every other type keeps the original whitelist.
+      if (el instanceof HTMLInputElement && !secretTarget && !['text', 'email', 'search', 'url', 'tel', 'number'].includes(el.type)) throw new Error('Unsupported input type');
       const proto = el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
       Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, args.text);
     } else if (el.isContentEditable) { el.textContent = args.text; }
@@ -1055,16 +1077,32 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: args.text }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
     const observed = el.isContentEditable ? el.textContent : el.value;
+    // A secret fill must not become the one channel that echoes a credential.
+    // Every other read path (read/observe/find/click/debug) drops sensitive()
+    // elements, so returning the observed value here would reopen exactly the
+    // leak those filters exist to close. Length and a boolean are safe: the
+    // DevTools UI shows the same two facts for a password input.
+    if (args.secret === true) return { filled: true, secret: true, characters: args.text.length, valueMatches: observed === args.text, valueEchoSuppressed: true, dispatchedEvents: ['input', 'change'], applicationStateVerified: false, note: 'Secret fill: the value was written but deliberately not echoed back. Only its length and a boolean match are reported, because the other read paths in this bridge filter sensitive elements and an echoing fill would bypass that. Application acceptance still requires observation.' };
     return { filled: true, characters: args.text.length, valueMatches: observed === args.text, dispatchedEvents: ['input', 'change'], applicationStateVerified: false, note: 'DOM value checked immediately; application acceptance still requires observation. Clearing a search field does not necessarily exit search mode; inspect the clear control or use browser_key with Escape if supported by the site.' };
   }
   if (name === 'browser_fill_verified') {
     const filled = await pageOperation('browser_fill', args, allowedOrigins, allSites);
     const current = el.isContentEditable ? el.textContent : el.value;
-    const result = await verify(args.expect || { valueMatches: args.text }, args.timeoutMs ?? 3000, { value: current, getValue: () => el.isConnected ? (el.isContentEditable ? el.textContent : el.value) : undefined });
-    if (result.status !== 'success') return { filled, verification: { ...result, status: 'not_observed' }, status: 'uncertain',
+    // A secret fill compares against the text that was sent and nothing else. A
+    // caller-supplied expect.valueMatches is a second plaintext copy of the same
+    // credential living in the argument object, where it is redundant: the field
+    // can only be checked against what we just wrote. Keeping it out of the
+    // expectation also keeps it out of any diagnostic that later dumps the
+    // expectation, which is the one place a password could reappear by accident.
+    // Other expectations are dropped with it: the only outcome that matters for a
+    // credential write is whether the field holds what we wrote.
+    const secretExpect = args.secret === true;
+    const result = await verify(secretExpect ? { valueMatches: args.text } : (args.expect || { valueMatches: args.text }), args.timeoutMs ?? 3000, { value: current, getValue: () => el.isConnected ? (el.isContentEditable ? el.textContent : el.value) : undefined });
+    const secretNote = secretExpect ? { expectValueMatchesIgnored: 'secret fill compares against the text that was sent; a caller-supplied expectation is not used' } : {};
+    if (result.status !== 'success') return { filled, verification: { ...result, status: 'not_observed' }, status: 'uncertain', ...secretNote,
       reason: 'filled_value_not_observed', dispatched: true, retryable: false,
       recommendedNextAction: 'The fill events were dispatched, but the expected value was not observed. Re-read the field and application state before any further write; do not refill automatically.' };
-    return { filled, verification: result, status: 'success', dispatched: true, retryable: false };
+    return { filled, verification: result, status: 'success', dispatched: true, retryable: false, ...secretNote };
   }
   throw new Error('Unsupported page operation');
   } catch (error) {

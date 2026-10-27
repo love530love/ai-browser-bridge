@@ -3,6 +3,8 @@ import { withDebugger, pointer, key } from './cdp.js';
 import { createErrorJournal } from './error-journal.js';
 import { evaluatedValue, resourceSummary } from './cdp-results.js';
 import { captureDevtools, createTabSubscription } from './cdp-capture.js';
+import { readStorage, writeStorage } from './cdp-storage.js';
+import { replayRequest } from './cdp-replay.js';
 import { createSessionManager } from './cdp-session.js';
 import { reuseKey, samePage, visibleTab, createTabOwnership } from './tab-identity.js';
 let socket = null;
@@ -383,6 +385,45 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
         return now.pendingUrl ? `pending:${now.pendingUrl}` : now.url;
       }
     }));
+  }
+  // Storage is read and written against the origin the tab is actually on, never
+  // an origin the caller names: the extension permission covers the tab, and
+  // letting a caller pick an origin would turn a page diagnostic into a
+  // cross-site read of a site the user never granted. The tab's own origin is
+  // the whole authorisation.
+  if (name === 'browser_storage_read' || name === 'browser_storage_write') {
+    const tab = await chrome.tabs.get(args.tabId);
+    checkedUrl(tab.url, config);
+    const paused = pausedGuard(tab.id);
+    if (paused) return paused;
+    const securityOrigin = new URL(tab.url).origin;
+    const result = await withTabDebugger(tab, async send => name === 'browser_storage_read'
+      ? readStorage({ send, area: args.area, securityOrigin, key: args.key, limit: args.limit })
+      : writeStorage({ send, area: args.area, action: args.action, securityOrigin, key: args.key, value: args.value, cookie: args.cookie }));
+    // A write can itself cause a navigation (a storage change that a page reacts
+    // to). Comparing the URL is the cheapest way to say whether the answer still
+    // describes the document the caller was looking at.
+    const after = await chrome.tabs.get(tab.id);
+    const moved = after.url !== tab.url || Boolean(after.pendingUrl);
+    if (moved && result?.status === 'success') {
+      return { tabId: tab.id, ...result, status: 'uncertain', reason: 'page_changed_during_storage_call',
+        verified: false,
+        message: 'The tab navigated during this call, so the reply may describe the previous document. Re-read before trusting it.' };
+    }
+    return { tabId: tab.id, ...result, ...(moved ? { pageChangedDuringCall: true } : {}) };
+  }
+  // Replay runs in the page, so it inherits the page's cookies and CORS position
+  // instead of being a separate request the bridge invents. pageUrl is passed so
+  // the module can state whether the body went to a third-party origin.
+  if (name === 'browser_replay_request') {
+    const tab = await chrome.tabs.get(args.tabId);
+    checkedUrl(tab.url, config);
+    const paused = pausedGuard(tab.id);
+    if (paused) return paused;
+    return { tabId: tab.id, ...await withTabDebugger(tab, async send => replayRequest({
+      send, method: args.method, url: args.url, headers: args.headers, body: args.body,
+      timeoutMs: args.timeoutMs, maxResponseChars: args.maxResponseChars, pageUrl: tab.url
+    })) };
   }
   if (name === 'browser_failure_help') {
     const err = String(args.error || '');

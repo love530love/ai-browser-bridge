@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.8.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.9.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.9.0 把 DevTools 的 **Application 面板与 Network 重放**变成可直接调用的能力：`browser_storage_read` / `browser_storage_write` 覆盖 localStorage、sessionStorage、cookie 与 IndexedDB 结构，`browser_replay_request` 是 Network 面板右键 Replay 的等价物。这一轮最有价值的产出是一个**否定事实**：第一版按标准做法用 `DOMStorage.enable` + `getDOMStorageItems` 读 localStorage，真机回 `{"code":-32601,"message":"'DOMStorage.enable' wasn't found"}`，IndexedDB 同样回 `'IndexedDB.enable' wasn't found`；而同一轮 `Network.getCookies` **一直成功**——扩展的 `chrome.debugger.sendCommand` 只转发 CDP 域的一个子集。因此 cookie 走 `Network`，web storage 与 IndexedDB 改走 `Runtime.evaluate` 在页面上下文读写：页面自己的存储按定义就是被测文档的存储，没有 `storageId` 可以填错，每个表达式还回传 `location.origin` 与请求比对，**页面中途导航就拒绝作答**（`reason:"origin_mismatch"`），边界比填 `storageId` 更紧。发现式读取只回键名与值长度（cookie 只回属性），要取值必须显式给 `key`，此时 cookie 带 `sensitive:true`；写入要 `confirmation:"modify_site_storage_once"` 且只回 `verified:false`——命令被接受不等于页面读到了新值。两处刻意拒绝（清空某源全部 cookie、IndexedDB 的三种写）**一次 CDP 都不发**；IndexedDB 读取先查 `indexedDB.databases()`，名单里没有就拒绝，因为 `open` 在库不存在时会**创建一个**。重放由页面上下文 `fetch` 发出，自动带页面当前 cookie 与 CORS 位置，超时是 `status:"uncertain"` + `reason:"replay_timeout"` 而**不是失败**，且**绝不自动重试**。同一轮修掉一个真正的死锁：`browser_login_state` 把密码框注册成合法 ref 交给调用方，但共享守卫的 `sensitive()` 与 `browser_fill` 的输入类型白名单都会拒绝它，自动登录**在最后一步永远走不完**；现在 `browser_fill` / `browser_fill_verified` 接受 `secret:true`，只对「操作名是这两个 fill + 元素确实是 `input[type=password]` + 不在 `[data-ai-private]` 子树内」放行，`sensitive()` 一行未改，`type=hidden` 与第三方声明的私有区域仍拒绝，返回值只有 `characters` 与布尔 `valueMatches`（`valueEchoSuppressed:true`），**不回显值**。详见 [Chrome 能力矩阵](docs/CHROME-CAPABILITY-MATRIX.md)。
 
 0.8.0 补上了 0.7.0 留下的那个缺口：**从 Chrome 自己的密码管理器读回单个站点密码**（`browser_password_manager_reveal`）。用 Windows UI Automation 驱动 `chrome://password-manager/passwords`，像人一样搜站点、开条目、点「显示密码」，把明文读回来——这不是绕过浏览器，而是使用浏览器：CDP 对任何 `chrome://` 页面硬阻断（`Cannot access a chrome:// URL`），内容脚本进不去（`match_origin_as_fallback` 只覆盖 `about:`/`data:`/`blob:`/`filesystem:`），`chrome.passwordsPrivate` 只发给组件扩展。边界写死在代码里：一次一个站点、条目名精确匹配、详情页再按 scheme+host+port 绑一次 origin、审计只记站点哈希不记值、Chrome 把揭示交给操作系统提示时只报 `waiting_for_user_auth` 并请用户完成而绝不绕过。同一轮里试做 **live 脚本编辑**（`browser_debugger` 的 `set_script_source`），结果是一个必须说清的否定结论：V8 已把 `Debugger.setScriptSource` 换成无条件返回 `ServerError("setScriptSource functionality no longer available")` 的空壳，换任何参数都不会变，因此该动作如实返回 `reason:"script_edit_removed_by_v8"`、`blockedBy:"v8_inspector"` 并附替代路径，而不是假装能改。现场验收 56/56。详见 [Chrome 能力矩阵](docs/CHROME-CAPABILITY-MATRIX.md)。
 
@@ -27,14 +29,16 @@
 AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与扩展配套运行。它不内置云模型；任意支持 MCP、HTTP 或 CLI 的 Agent 都可以接入。
 
 - 读取网页正文、交互控件、页面状态和受限截图。
-- 点击、填写、选择、滚动、上传、下载、导航和关闭标签页，并对关键写操作做结果验证。
+- 点击、填写、选择、滚动、上传、下载、导航和关闭标签页，并对关键写操作做结果验证。密码框默认拒绝填写，`browser_fill` / `browser_fill_verified` 需显式 `secret:true` 才放行，且不回显写入的值。
 - 处理 iframe、重型 SPA、虚拟滚动、下拉框、广告、引导层、客服浮窗和透明遮挡。
 - 通过 DOM、Accessibility、Debugger、截图和坐标适配器进行分层兜底；没有 GPT 时仍可使用本地确定性工具链。
 - Windows 0.5.24 候选支持停靠式 DevTools 观察，以及在用户已打开 DevTools 后选择 Elements/Console/Network 面板；由于 UIA 负证据与全局 F12 焦点竞态，当前候选不自动打开 DevTools。
 - `browser_devtools_capture` 通过 CDP 在单次 attach 的有界窗口内只读捕获 Console 消息、异常、Network 请求行、Sources 脚本列表和 Performance 指标；空结果不证明没有发生，网络记录不含 header/cookie/body，缓冲溢出以 `dropped`/`truncated` 计数上报。
+- `browser_storage_read` / `browser_storage_write` 是 DevTools Application 面板的等价物，覆盖 `localStorage`、`sessionStorage`、cookie 与 IndexedDB 结构。拆成读、写两个工具而不是一个带 action 的：读是真的只读，能走 read 优先级、超时降级成可重试；写则必须带 `confirmation:"modify_site_storage_once"`。发现式读取只回键名与值长度（cookie 只回属性），要取值必须显式指定 `key`，此时 cookie 返回带 `sensitive:true`；写入回 `verified:false`，要验证就再读一次。cookie 走 `Network.getCookies`，web storage 与 IndexedDB 走 `Runtime.evaluate`——实测 `DOMStorage.enable` 与 `IndexedDB.enable` 都是 `-32601 wasn't found`，扩展只转发 CDP 域的一个子集。IndexedDB 只读结构：库名先用 `indexedDB.databases()` 查名单，名单里没有就拒绝（`open` 会创建库），读记录用返回的 `recordReadTemplate` 交给 `browser_debugger` 的 `evaluate`。清空某源全部 cookie、IndexedDB 的三种写都被刻意拒绝，且一次 CDP 都不发。
+- `browser_replay_request` 是 Network 面板右键 Replay 的等价物，由页面上下文 `fetch` 发出，所以自动带页面当前 cookie 与 CORS 位置；调用方自己给 `method`/`url`/`headers`/`body`，需 `confirmation:"replay_request_once"`。超时回 `status:"uncertain"` + `reason:"replay_timeout"` 而不是 failed（请求可能已到服务器，只是响应丢了），**绝不自动重试**；`Cookie`/`Host`/`Content-Length`/`Connection`/`Transfer-Encoding`/`Referer` 作为请求头直接拒绝，只接受 http/https。带一次性 CSRF token 的请求重放通常 4xx，那是服务端拒绝过期凭据，不是桥的故障。
 - `browser_password_manager_reveal` 读回 Chrome 自己保存的单个站点密码：用 Windows UI Automation 打开 `chrome://password-manager/passwords`、搜索、打开条目、点「显示密码」，再把明文交给调用方。一次只处理一个站点，条目名精确匹配（绝不做子串匹配），详情页再按 scheme+host+port 绑一次 origin 挡 lookalike；`siteCandidates` 会处理 `com.cn`/`co.uk` 这类多段公共后缀与 IPv4。返回 `success` / `waiting_for_user_auth` / `not_found`（附 `visibleEntries`）/ `uncertain` / `unavailable` / `denied`；Chrome 把揭示交给操作系统提示时只报 `waiting_for_user_auth` 并要求用户自己完成，之后用 `action:"read"` 再取，绝不绕过。代价是 `focusRequired: true`、`method: "windows_ui_automation"`，会短暂占用前台；打开用地址栏 `^l` + Alt+Enter 新标签（命令行传 `chrome://` 会被 Chrome 拒绝，只会开一个 New Tab），关标签前重读地址栏确认仍停在密码管理器，否则保留并说明。明文只回给调用方，不落盘不写日志，审计只记工具名与站点哈希前 16 位，结果里的 `handling` 说明这一点。
 - `browser_debugger` 的 `action:"set_script_source"` 已接线，但**被浏览器拒绝**，这是实测结论而不是没做：Chrome 对 `Debugger.setScriptSource` 返回 `ServerError("setScriptSource functionality no longer available")`，该错误来自 V8 里的一个无条件空壳（`V8DebuggerAgentImpl::setScriptSource`，看任何参数之前就返回）。因此该动作回 `reason:"script_edit_removed_by_v8"` + `blockedBy:"v8_inspector"` + `measuredEvidence` + 三条替代路径，`applied` 恒为 `false`，且**绝不重试**——换 `scriptId`/`source`/`dryRun` 都不可能改变结果。要改运行中页面的行为，用 `action:"evaluate"` 重定义函数或全局变量：立刻生效，但**改的是行为不是脚本文本**，行号与 source map 不变。
-- 仍未实现：请求重放、Console 输入执行、Chrome 设置修改、分离 DevTools 绑定和下载落盘核验；live 脚本编辑受浏览器限制不可达（见上）。
+- 仍未实现：Console 输入执行、Chrome 设置修改、分离 DevTools 绑定、下载落盘核验、性能录制、Lighthouse 与 ServiceWorker 调试；**从捕获记录直接重放**也不支持（`browser_devtools_capture` 刻意丢弃 header 与 body，是只读诊断而非请求存档），`browser_replay_request` 需要调用方自己给请求；live 脚本编辑受浏览器限制不可达（见上）。
 - 支持多 Agent 队列、优先级、等待状态、标签页写租约、租约续期和服务重启恢复。
 - 支持上传目录白名单、SHA256 校验、Agent 作用域、origin 白名单、内容边界和审计脱敏。
 - 提供 `doctor`、`browser_health`、`browser_execution_profile`、网络/性能诊断和本地滚动日志。
@@ -194,7 +198,7 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 }
 ```
 
-MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 61 个工具，`browser_screenshot` 返回 MCP 图片内容。
+MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 64 个工具，`browser_screenshot` 返回 MCP 图片内容。
 
 ### CLI 客户端
 

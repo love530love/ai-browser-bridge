@@ -19,6 +19,7 @@ import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
 import { lookupCredential, credentialOriginHash, CREDENTIAL_LOOKUP_CONFIRMATION } from './credential-store.js';
 import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMATION } from './password-manager.js';
+import { STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION } from './confirmations.js';
 
 function equal(a, b) {
   return typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -176,13 +177,22 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     collection: {
       networkSummary: { source: 'current main-frame Resource Timing buffer', responseBodies: false, includesPreAttachmentEntries: 'if retained', emptyIsProofOfNoTraffic: false },
       evaluate: { status: 'not_implemented', note: 'Debugger availability is not arbitrary script execution support.' },
-      networkBodyCapture: { status: 'not_implemented' },
+      networkBodyCapture: { status: 'not_implemented', note: 'A replay returns the response to that replay only; it is not a capture of the traffic the page made.' },
       pageSource: { status: 'not_implemented', note: 'Live DOM serialization would not equal original HTTP response HTML.' },
-      fill: { events: ['input', 'change'], nativeSetter: true, clearingSearchModeGuaranteed: false },
+      fill: { events: ['input', 'change'], nativeSetter: true, clearingSearchModeGuaranteed: false, passwordFields: 'refused unless secret:true, and a secret fill never echoes the value back' },
       keys: { tool: 'browser_key', examples: ['Escape', 'Enter', 'Tab'] },
-      readiness: { browser_wait_until_ready: 'service connection and queue readiness, not DOM or network idle' }
+      readiness: { browser_wait_until_ready: 'service connection and queue readiness, not DOM or network idle' },
+      storage: {
+        tools: ['browser_storage_read', 'browser_storage_write'],
+        scope: 'the origin the tab is currently on; a caller cannot name another origin',
+        areas: ['localStorage', 'sessionStorage', 'cookies', 'indexedDB'],
+        discoveryReturnsValues: false,
+        indexedDb: 'structure only - the list comes from indexedDB.databases() in the page, and a name that is not on that list is refused rather than opened, because opening a missing database creates it; records are read through browser_debugger evaluate',
+        refused: ['clearing every cookie of an origin', 'writing IndexedDB through this tool']
+      },
+      requestReplay: { tool: 'browser_replay_request', sentBy: 'page-context fetch', carriesPageCookies: true, autoRetried: false, timeoutIsUncertain: true, callerSuppliesTheRequest: true }
     },
-    policy: { installOrRemoveExtension: 'not_implemented_even_with_user_approval', developerMode: 'not_implemented_even_with_user_approval', browserSecuritySettings: 'not_implemented_even_with_user_approval', cookiesAndSecrets: 'blocked' },
+    policy: { installOrRemoveExtension: 'not_implemented_even_with_user_approval', developerMode: 'not_implemented_even_with_user_approval', browserSecuritySettings: 'not_implemented_even_with_user_approval', cookiesAndSecrets: 'the open tab\'s own origin cookies are readable and writable through browser_storage_*; other origins\' cookies, the OS credential store and browser security settings are not' },
     fallback: ['ordinary_page', 'protected_ui', 'requires_user'],
     guarantees: ['Protected pages are never misreported as ordinary DOM success.', 'Model outage does not remove deterministic ordinary-page control.', 'High-risk UI changes require a fresh user confirmation and an auditable checkpoint.']
   });
@@ -292,7 +302,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     };
   }
   const status = queueSnapshot;
-  const jobTimeoutMs = name => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000) : timeoutMs;
+  // A replay may legitimately wait for its own 60s ceiling before it answers. If
+  // the job budget stayed at the default 20s the service would drop the whole
+  // extension socket while the page was still waiting, turning a slow response
+  // into a reconnect for every other agent.
+  const jobTimeoutMs = name => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000)
+    : name === 'browser_replay_request' ? Math.max(timeoutMs, 65000)
+    : timeoutMs;
   // Lease bookkeeping is answered by the service process itself and never
   // enters the job queue. It therefore cannot occupy the single active slot or
   // reach the timeout path that used to drop() the extension and break every
@@ -392,6 +408,19 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       durationMs: Date.now() - startedAt
     });
     return result;
+  }
+  // Two tools change something a caller cannot see from the DOM alone, so they
+  // are refused before they reach the queue when the confirmation is missing.
+  // Refusing here, rather than in the extension, keeps a mis-typed call from
+  // costing a queue slot and from being retried into a real side effect.
+  function denyUnconfirmed(toolName, args, expected) {
+    audit({
+      time: new Date().toISOString(), id: randomUUID(), tool: toolName, tabId: args.tabId ?? null,
+      agent: args.agent ?? null, outcome: 'denied', resultStatus: 'denied', dispatched: false,
+      errorCategory: 'explicit_confirmation_required', durationMs: 0
+    });
+    return { status: 'denied', retryable: false, reason: 'explicit_confirmation_required', dispatched: false,
+      message: `${toolName} needs confirmation:"${expected}". Nothing was sent to the browser.` };
   }
   // Reading a saved password is answered by the service, never by the browser:
   // it is a local profile read, and the value must not travel over the extension
@@ -727,6 +756,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (name === 'browser_credential_lookup') return credentialCall(args);
     if (name === 'browser_password_manager_reveal') return passwordManagerCall(args);
     if (name === 'browser_desktop_windows' || name === 'browser_devtools' || name === 'browser_native_snapshot') return desktopCall(name, args);
+    if (name === 'browser_storage_write' && args.confirmation !== STORAGE_WRITE_CONFIRMATION) return denyUnconfirmed(name, args, STORAGE_WRITE_CONFIRMATION);
+    if (name === 'browser_replay_request' && args.confirmation !== REPLAY_REQUEST_CONFIRMATION) return denyUnconfirmed(name, args, REPLAY_REQUEST_CONFIRMATION);
     if (LEASE_TOOLS.has(name)) return leaseCall(name, args, decision);
     if (!WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) leases.heartbeat(args.tabId, args.agent ?? null, name);
     if (lease && lease !== owner) {

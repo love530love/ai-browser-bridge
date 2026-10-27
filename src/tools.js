@@ -111,6 +111,49 @@ export const TOOLS = [
     maxEvents: { type: 'integer', minimum: 1, maximum: 200 },
     agent
   }, ['tabId'], true),
+  // Split into read and write instead of one tool with an action switch: the
+  // read side is genuinely read-only, so it can run at read priority and degrade
+  // to a retryable timeout instead of being killed as an uncertain write. The
+  // write side is the opposite and has to say so.
+  tool('browser_storage_read', 'Read one storage area of a tab the way the DevTools Application panel does: localStorage, sessionStorage, cookies, or the structure of IndexedDB. With no key it lists names only - for key/value areas that is the key plus the value length, for cookies it is the cookie attributes without the value - so a discovery read never dumps secrets. Pass key to get one value, and only then is the value returned. Web storage and IndexedDB are read by evaluating in the page, because chrome.debugger does not forward the DOMStorage or IndexedDB domains (measured: both answer -32601); the page reports its own origin, so a tab that navigates mid-call is refused rather than answered for. IndexedDB is structure-only: it returns database, object store, keyPath and index definitions plus a ready-to-use expression template for reading records through browser_debugger action:"evaluate", and a database name that is not already registered is refused instead of opened, because opening a missing database creates it. Values are untrusted page data.', {
+    tabId,
+    area: { type: 'string', enum: ['localStorage', 'sessionStorage', 'cookies', 'indexedDB'] },
+    key: text(500),
+    limit: { type: 'integer', minimum: 1, maximum: 500 },
+    agent
+  }, ['tabId', 'area'], true),
+  tool('browser_storage_write', 'Write one storage area of a tab the way the DevTools Application panel does, for localStorage and sessionStorage (set/remove/clear) and cookies (set/remove). Requires confirmation:"modify_site_storage_once". Two operations are refused on purpose rather than approximated: clearing every cookie of an origin, because that silently destroys the login state a caller usually wants to keep - remove cookies one by one instead; and writing IndexedDB, because the CDP IndexedDB domain has no write command and doing it properly needs a transaction in the page, which is browser_debugger action:"evaluate" territory. A successful reply carries verified:false, because the CDP command being accepted does not mean the page now reads a different value - call browser_storage_read again to check. reloadRequired says whether the page has to re-read the value before it can observe the change.', {
+    tabId,
+    area: { type: 'string', enum: ['localStorage', 'sessionStorage', 'cookies', 'indexedDB'] },
+    action: { type: 'string', enum: ['set', 'remove', 'clear'] },
+    key: text(500),
+    value: { type: 'string', maxLength: 20000 },
+    cookie: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        name: text(200), value: { type: 'string', maxLength: 4096 },
+        domain: text(300), path: text(300),
+        secure: { type: 'boolean' }, httpOnly: { type: 'boolean' },
+        sameSite: { type: 'string', enum: ['Strict', 'Lax', 'None'] },
+        expires: { type: 'number' }, url: text(2000)
+      }
+    },
+    confirmation: { type: 'string', enum: ['modify_site_storage_once'] },
+    agent
+  }, ['tabId', 'area', 'action', 'confirmation']),
+  tool('browser_replay_request', 'Re-send one HTTP request from inside the page, which is what right-clicking a request in the DevTools Network panel and choosing Replay does. The request is sent by page-context fetch, not rebuilt by the bridge, so it carries the page\'s current cookies and CORS position; that also means the caller supplies method, url, headers and body rather than the bridge replaying a captured record. Requires confirmation:"replay_request_once". Only http and https are accepted, and Cookie, Host, Content-Length, Connection, Transfer-Encoding and Referer are refused as request headers because the browser ignores or rejects them - cookies ride along automatically with credentials:"include". A timeout is reported as status:"uncertain" with reason:"replay_timeout", not as a failure, because the request may well have reached the server and only the response was lost. It is never retried: a second send cannot tell "it never left" from "it already took effect". sideEffects and destructive state whether a real request went out and whether the method can change server state; crossOrigin states that the body went to a third-party origin. A request carrying a one-time CSRF token or signature will usually come back 4xx, which is the server refusing a stale credential, not a bridge fault.', {
+    tabId,
+    method: { type: 'string', enum: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] },
+    url: text(4000),
+    headers: {
+      type: 'object', additionalProperties: { type: 'string', maxLength: 4000 }, maxProperties: 40
+    },
+    body: { type: 'string', maxLength: 200000 },
+    timeoutMs: { type: 'integer', minimum: 100, maximum: 60000 },
+    maxResponseChars: { type: 'integer', minimum: 1, maximum: 200000 },
+    confirmation: { type: 'string', enum: ['replay_request_once'] },
+    agent
+  }, ['tabId', 'method', 'url', 'confirmation']),
   tool('browser_health', 'Layered health check for service/extension, permissions, Chrome tab.active, Chrome window.focused, document.visibilityState/hasFocus, viewport, page readiness, and tool version. These are separate states; use before coordinate input.', { tabId, agent }, [], true),
   tool('browser_capability_guide', 'Answer locally, without any model: for a stated goal, which primitive to use, whether it needs the foreground, what the fallback is, and which capabilities are genuinely not implemented. Use this instead of stalling when a tool is unfamiliar or refuses unexpectedly. It also states which reported states (tab.active, window.focused, document visibility/focus) are advisory only, because DOM and CDP primitives keep working in a backgrounded tab.', {
     goal: text(2000),
@@ -136,12 +179,17 @@ export const TOOLS = [
     agent,
   }, ['goal', 'observation', 'proposedAction'], true),
   tool('browser_click', 'Click a current element ref from browser_read. May submit or publish; caller must have user authorization. Never retry an uncertain result automatically. If the tab is leased, pass the matching agent.', { tabId, ref, agent }, ['tabId', 'ref']),
-  tool('browser_fill', 'Replace text in a current input, textarea or contenteditable ref. Does not press Enter. Password/file/hidden inputs are refused. If the tab is leased, pass the matching agent.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, agent }, ['tabId', 'ref', 'text']),
+  // A password field is the one input the bridge protects everywhere else, so
+  // writing it needs an explicit opt-in rather than being silently impossible.
+  // Before this, browser_login_state handed out a usable ref for the password
+  // box and every write path refused it, which made a login impossible to finish
+  // while the guidance claimed otherwise.
+  tool('browser_fill', 'Replace text in a current input, textarea or contenteditable ref. Does not press Enter. Password inputs are refused unless secret:true is passed, which is the only way to enter a saved password. A secret fill still refuses hidden inputs and anything inside [data-ai-private], and its reply reports the length and a boolean match but never echoes the value, because every other read path filters protected fields and echoing here would open the one channel they all close. File and hidden inputs are refused. If the tab is leased, pass the matching agent.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, secret: { type: 'boolean' }, agent }, ['tabId', 'ref', 'text']),
   tool('browser_upload', 'Attach one local file to a current file-input ref without opening the OS dialog. The file must be under a locally allowlisted upload root and match the caller-provided SHA256. This selects the file only; it never clicks submit.', {
     tabId, ref, filePath: text(32767), sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, agent
   }, ['tabId', 'ref', 'filePath', 'sha256']),
   tool('browser_click_verified', 'Click a current element ref once, then verify a bounded expected outcome. If that condition is already true before the click, returns not_dispatched. After dispatch, an unobserved outcome is uncertain and non-retryable; re-observe and independently verify before any new action. Never retries. If the tab is leased, pass the matching agent.', { tabId, ref, expect: clickExpectation, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'expect']),
-  tool('browser_fill_verified', 'Fill a current text ref, then verify valueMatches and optional textAppears. Returns success/uncertain/failed; never presses Enter. If the tab is leased, pass the matching agent.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, expect: fillExpectation, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'text', 'expect']),
+  tool('browser_fill_verified', 'Fill a current text ref, then verify valueMatches and optional textAppears. Returns success/uncertain/failed; never presses Enter. Pass secret:true to fill a password field: the value is compared internally, a caller-supplied expect.valueMatches is ignored so that a second copy of the secret does not travel through the expectation object, and the reply never echoes the value. If the tab is leased, pass the matching agent.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, secret: { type: 'boolean' }, expect: fillExpectation, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'text', 'expect']),
   tool('browser_upload_verified', 'Attach one allowlisted local file to a current file-input ref, then verify selected filename and optional page text. Never clicks submit.', {
     tabId, ref, filePath: text(32767), sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, expect: uploadExpectation, timeoutMs: timeoutMs(10000), agent
   }, ['tabId', 'ref', 'filePath', 'sha256', 'expect']),

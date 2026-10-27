@@ -92,6 +92,40 @@ test('capability gaps are stated instead of being hidden behind a refusal', () =
   assert.equal(debug.primary.intent, 'debug-or-breakpoint');
   assert.match(debug.primary.prefer, /script_edit_removed_by_v8/);
   assert.match(debug.primary.prefer, /Do not retry/);
+  // Replay is a capability now, so the old "Capture is read-only" line must be
+  // gone; leaving it would send an agent looking for a workaround that exists.
+  assert.equal(gaps['request replay from the Network panel'], undefined);
+  // What is still missing is replaying from a capture, which is a different
+  // feature: capture drops headers and bodies on purpose, so it cannot be the
+  // source of a request. The gap has to say which of the two is missing.
+  const fromCapture = gaps['replay a request straight out of a capture, with its original headers and body'];
+  assert.equal(fromCapture.status, 'not_implemented');
+  assert.match(fromCapture.note, /browser_replay_request/);
+  assert.match(fromCapture.note, /headers/);
+  // IndexedDB records are a gap rather than a browser block: the storage tool
+  // exposes schema only, and reading records is page-context work, so the answer
+  // has to name the substitute and the trap in it.
+  const idb = gaps['read IndexedDB records'];
+  assert.equal(idb.status, 'not_implemented');
+  assert.match(idb.note, /browser_storage_read/);
+  assert.match(idb.note, /evaluate/);
+  assert.match(idb.note, /create/i);
+  // Storage guidance has to separate the cheap discovery read from the value
+  // read, and has to state the two writes that are refused on purpose.
+  const storage = capabilityGuide({ goal: '看看这个站点 localStorage 里存了什么，顺便清掉登录 cookie' });
+  assert.equal(storage.primary.intent, 'storage-or-cookies');
+  assert.match(storage.primary.prefer, /browser_storage_read/);
+  assert.match(storage.primary.prefer, /modify_site_storage_once/);
+  assert.match(storage.primary.prefer, /verified:false/);
+  assert.match(storage.primary.prefer, /IndexedDB/);
+  // Replay guidance must say that a timeout is uncertain rather than failed,
+  // because the obvious reading of a timeout is "nothing happened" and that is
+  // exactly the reading that causes a second, real request.
+  const replay = capabilityGuide({ goal: '把这个请求重放一次看看返回什么' });
+  assert.equal(replay.primary.intent, 'network');
+  assert.match(replay.primary.prefer, /replay_request_once/);
+  assert.match(replay.primary.prefer, /replay_timeout/);
+  assert.match(replay.primary.prefer, /Never send it twice/);
 });
 
 test('launching and reloading are both advertised as background-safe', () => {
