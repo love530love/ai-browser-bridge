@@ -407,6 +407,39 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (!desktopAdapter.available) {
       return recordDesktopAudit(name, args, { status: 'unavailable', retryable: false, reason: 'desktop_adapter_unavailable', dispatched: false }, startedAt);
     }
+    // Reload is a capability, not an out-of-band manual step: resolve the target
+    // inside the same call instead of forcing the caller to run
+    // browser_desktop_windows first. Ambiguity fails closed with candidates
+    // rather than picking a window by heuristic.
+    if (name === 'browser_reload_extension' && !Number.isSafeInteger(args.windowHandle)) {
+      return Promise.resolve()
+        .then(() => desktopAdapter.listChromeWindows())
+        .catch(() => ({ status: 'failed' }))
+        .then(listed => {
+          if (listed?.status !== 'success' || !Array.isArray(listed.windows)) {
+            return recordDesktopAudit(name, args, { status: 'failed', retryable: true, reason: 'chrome_target_resolution_failed', dispatched: false,
+              message: 'Could not enumerate visible Chrome windows; no Reload action was attempted.' }, startedAt);
+          }
+          const candidates = Number.isSafeInteger(args.processId)
+            ? listed.windows.filter(window => window.processId === args.processId)
+            : listed.windows;
+          const describe = rows => rows.slice(0, 8).map(row => ({ processId: row.processId, windowHandle: row.windowHandle, title: row.title }));
+          if (!candidates.length) {
+            return recordDesktopAudit(name, args, { status: 'not_dispatched', retryable: false, reason: 'no_visible_chrome_window', dispatched: false,
+              candidates: describe(listed.windows),
+              message: 'No visible Chrome window matched; no Reload action was attempted.' }, startedAt);
+          }
+          if (candidates.length > 1) {
+            return recordDesktopAudit(name, args, { status: 'denied', retryable: false, reason: 'chrome_target_ambiguous', dispatched: false,
+              candidates: describe(candidates),
+              message: 'More than one visible Chrome window matched. Pass one processId/windowHandle pair from this list; nothing was dispatched.' }, startedAt);
+          }
+          const only = candidates[0];
+          observedDesktopTargets.set(`${only.processId}:${only.windowHandle}`, Date.now());
+          return desktopCall(name, { ...args, processId: only.processId, windowHandle: only.windowHandle })
+            .then(result => ({ ...result, targetResolution: 'single-visible-chrome-window' }));
+        });
+    }
     const targetKey = `${args.processId}:${args.windowHandle}`;
     const targetObservedAt = observedDesktopTargets.get(targetKey);
     if (!targetObservedAt || Date.now() - targetObservedAt > desktopTargetTtlMs) {

@@ -108,7 +108,11 @@ test('strict validation denies unsupported actions and unsafe URL schemes', () =
   validateCall('browser_click_verified', { tabId: 1, ref: 'a', expect: { textAppears: 'Done' } });
   validateCall('browser_desktop_windows', {});
   validateCall('browser_reload_extension', { processId: 42, windowHandle: 100, confirmation: 'reload_extension_once' });
-  assert.throws(() => validateCall('browser_reload_extension', { windowHandle: 100, confirmation: 'reload_extension_once' }), /Missing argument: processId/);
+  // Target binding is resolved inside the capability, so an explicit pair is
+  // optional; the caller attestation is not.
+  validateCall('browser_reload_extension', { confirmation: 'reload_extension_once' });
+  validateCall('browser_reload_extension', { windowHandle: 100, confirmation: 'reload_extension_once' });
+  assert.throws(() => validateCall('browser_reload_extension', {}), /Missing argument: confirmation/);
   assert.throws(() => validateCall('browser_reload_extension', { processId: 42, windowHandle: 100, confirmation: 'reload_everything' }), /allowed:/);
 });
 test('execution profile is available offline without an extension or model', async t => {

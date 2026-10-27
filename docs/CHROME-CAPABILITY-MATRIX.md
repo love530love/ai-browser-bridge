@@ -26,7 +26,7 @@ REA 明确这是静态证据：未执行扩展启动代码，动态名称、运�
 | 离线确定性执行 | execution profile + DOM/坐标回退 | 已实现 | 模型离线仍可完成普通页面操作 |
 | 重型页面预算、超时分阶段和连接保活 | reader budgets + heartbeat | 已实现 | 超预算返回 partial/可恢复状态 |
 | `chrome://extensions` 可见 Chrome 窗口枚举 | Windows UI Automation + user32 | 已实现（Windows） | 只读；返回 PID/HWND/窗口标题，标题是不可信数据 |
-| 当前项目扩展单次 Reload | 专用 UIA 脚本 + MCP broker | 已实现且本机实测（Windows；2026-10-26，0.5.22） | 必须先选定 HWND/PID 并获得用户对这一次重载的明确授权；固定 confirmation 值只是调用方声明，不是服务端人类身份认证；不同的后续调用不会自动去重，每次都需新批准；新开固定 ID详情页保留当前页，UIA联合核验目标控件；必须观察到新 Bridge 扩展会话及正确版本；超时/未知不重试 |
+| 当前项目扩展单次 Reload | 专用 UIA 脚本 + MCP broker | 已实现且本机实测（Windows；2026-10-27，0.5.24，自动目标解析路径已实测） | **目标解析在能力内部完成**：只传 `confirmation` 时现场枚举可见 Chrome 窗口——恰好一个就用它，零个返回 `not_dispatched`/`no_visible_chrome_window`，多个返回 `denied`/`chrome_target_ambiguous` 并列出候选而**不猜**；也可显式传 `processId`/`windowHandle`（仍要求近期枚举过）。固定 confirmation 值只是调用方声明，不是服务端人类身份认证；不同后续调用不会自动去重，每次需新批准；新开固定 ID 详情页保留当前页，UIA 联合核验目标控件；必须观察到新 Bridge 扩展会话及正确版本；超时/未知不重试 |
 | 停靠式 DevTools 观察、已打开面板选择 | `browser_devtools` + Windows UI Automation | 源码候选0.5.24；面板选择本机单窗口实测，完整版本匹配待部署 | 精确 PID/HWND、目标地址绑定；**不暴露 open/F12**：UIA 未观察到 DevTools 不能证明已关闭，且全局 F12 存在焦点竞态；`devtoolsState` 只报 open/unknown；面板选择要求 UIA 正向识别 + 唯一可见 TabItem + 回读选中态；分离窗口的目标标签绑定未实现 |
 | DevTools Console/Network/Sources/Performance 只读捕获 | `browser_devtools_capture` + CDP（`chrome.debugger`） | 源码候选0.5.24；单元契约 15/15，真实 Chrome 现场验收待做 | 单次 attach 内先 enable 后采集，窗口内事件才可见，空结果不证明没发生；仅该 tab target，其它 tab/worker/SW/OOPIF 不在内；有界缓冲并如实上报 dropped/truncated；网络只留方法/去 query 的 URL/状态/类型/耗时，不含 header/cookie/body；console 对象参数按类型摘要不序列化；不做请求重放、脚本编辑、断点调试 |
 | `chrome://settings` 设置读写与逐项验证 | 尚无执行适配器 | 未实现 | 按具体设置项建立 UIA 通路；尚无完整读/写/回读闭环 |

@@ -19,11 +19,14 @@
 ## 当前交接快照（2026-10-27 收口后，接手前必须复核）
 
 - 仓库：`K:\PythonProjects5\AI-Browser-Bridge`，分支 `main`，**工作树干净**（唯一未跟踪项是本地 `graphify-out/` 缓存，不属产品）。
-- 已提交并推送：`a9fc930 Add native UI snapshot, DevTools observe/select, and agent handoff`，`origin/main` 与 `sshpush/main` 都指向它。
-- 上一个已验证部署基线仍是 0.5.22；`a9fc930` 是 0.5.23 候选，其后工作树又加入 0.5.24 的 `browser_devtools_capture`，**两者都未部署**。接手后先跑 `node src/cli.js doctor` 与 `browser_queue_status` 复核服务/扩展版本，不得沿用本文的数字。
-- 候选包/扩展磁盘版本：0.5.24。上一次读取的运行状态：Bridge 服务 0.5.23 但 buildId 已因后续源码修改而过期；加载中的扩展仍为 0.5.22，队列空闲。`doctor` 因版本不匹配而失败；不得声称部署全绿。**重要：`browser_devtools_capture` 是扩展侧新代码，0.5.22 的已加载扩展里没有它**，因此真实 Chrome 验收必须先获授权 Reload 扩展，否则调用会落到 `Unknown command`。
+- 已提交并推送：`a9fc930`（0.5.23 收口）、`8a259ef`（0.5.24 只读捕获）、`91c3068`（现场验收入口）。接手后仍要复核 `git log` 与远端指针。
+- **0.5.24 已真实部署并验证**（2026-10-27）：服务重启到 0.5.24，扩展经 `browser_reload_extension` 重载并核验新会话与版本，`doctor` **10/10 通过**（service 0.5.24 = extension 0.5.24，buildId 与磁盘一致，队列空闲）。
+- 接手后仍必须先跑 `node src/cli.js doctor` 与 `browser_queue_status` 复核，不得沿用本文数字；任何源码改动都会让 `service-build-current` 变红，需要重新重启服务才算部署。
+- **Reload 已是能力，不是人工步骤**：`browser_reload_extension` 只传 `confirmation: "reload_extension_once"` 就会在现场枚举可见 Chrome 窗口——恰好一个则使用（回传 `targetResolution: "single-visible-chrome-window"`），零个 `not_dispatched`/`no_visible_chrome_window`，多个 `denied`/`chrome_target_ambiguous` 并列出候选而不猜。显式传 `processId`/`windowHandle` 的路径仍要求近期枚举过。固定 confirmation 是**调用方声明**（Agent 自己给出），不是人工点击墙；但每次重载仍需这一次调用的明确授权，且 `uncertain` 之后不得再调。
 - 已有停靠式 DevTools `browser_devtools` UIA 候选：**只有 `observe` 与 `select_panel`，不含 `open`/F12 toggle**（原因见下节未决审查点）。代码和文档位于 `src/desktop-adapter.js`、`scripts/devtools-ui.ps1`、`src/server.js`、`src/tools.js`、`docs/DEVTOOLS-EXECUTION.md`；对应测试 `test/devtools-adapter.test.js`、可选真实 Chrome 本地 fixture `test/live-devtools.js`。`devtoolsState` 只会返回 `open` 或 `unknown`，**永不推断 `closed`**。本机 Chrome 历史上曾验证过停靠 DevTools 的 F12 打开/幂等与 Elements/Console/Network 面板选择回读，但 open 通路已在当前候选撤下；select_panel 只适用于用户已自行打开 DevTools 的场景。这不覆盖 detached DevTools、Console 脚本执行、Sources 调试或其他 Chrome/UIA 版本。
-- **本轮已完成的验证（可引用）**：0.5.23 阶段 —— `node --check` 通过；`scripts/devtools-ui.ps1` 与 `scripts/native-ui-snapshot.ps1` 用 `System.Management.Automation.Language.Parser::ParseFile` 解析 0 错误；`test/devtools-adapter.test.js` 6/6。0.5.24 阶段 —— `test/cdp-capture.test.js` 15/15。**全量 `node --test --test-concurrency=1 test/*.test.js` = 168/168 通过（39 个测试文件，173s，含 `cdp-capture`）**。这是当前源码候选的验收基线。
+- **本轮已完成的验证（可引用）**：0.5.23 阶段 —— `node --check` 通过；`scripts/devtools-ui.ps1` 与 `scripts/native-ui-snapshot.ps1` 用 `System.Management.Automation.Language.Parser::ParseFile` 解析 0 错误；`test/devtools-adapter.test.js` 6/6。0.5.24 阶段 —— `test/cdp-capture.test.js` 15/15、`test/reload-target.test.js` 6/6。**全量 `node --test --test-concurrency=1 test/*.test.js` = 174/174 通过（40 个测试文件，237s）**。
+- **真实 Chrome 验收（已通过）**：`npm run test:capture` **9/9**，退出码 0；本地 fixture 页（每 400ms 重复探针）在 1500ms 窗口内捕获到 console 文本与级别、未捕获异常、`/api/ok` 的 200 完成行、被拒请求的 failed 行、inline 脚本标记，且结果不含 header/cookie/凭据；只操作并关闭自身创建的标签。
+- `browser_reload_extension` 自动目标解析路径已在真实 Chrome 实测：只传 `confirmation` 即成功，回传 `targetResolution: "single-visible-chrome-window"` 与 `expectedVersion: "0.5.24"`。
 - 工作树还有 Graphify 临时目录 `graphify-out/` 未跟踪。不得把其中缓存/临时文件加进产品提交；不要在没有审阅前删除。
 - **两个测试基础设施缺陷，本轮已定性，接手者不要再踩**：
   1. `test/watchdog.test.js` 的外层超时（原 60000ms）小于 4 次串行 `pwsh.exe` 的内层超时之和（4×30000ms），预算内部不自洽；机器有负载时单次 pwsh 超过 30s 就会假红（实测一次 148/149 失败，该文件本轮未修改，单独跑通过）。已把外层提到 180000ms，断言未动。
@@ -47,6 +50,16 @@
 - Windows UI 自动化：`src/desktop-adapter.js`、`scripts/devtools-ui.ps1`、`scripts/reload-extension.ps1`
 - 现有能力/路线图：`docs/CHROME-CAPABILITY-MATRIX.md`、`docs/PRODUCT-ROADMAP.md`、`docs/DEVTOOLS-EXECUTION.md`
 - 回归入口：`npm test`（串行全量）、`npm run test:stress`（隔离 Chromium）、`npm run test:devtools`（现有 Chrome 的 opt-in、本地 fixture，操作后仅关闭自身测试标签）、`npm run test:capture`（同上，针对 `browser_devtools_capture`；扩展未 Reload 时会报 BLOCKED，那不是通过）。
+
+## 部署循环（全部由能力驱动，不存在“必须人工点一下”的步骤）
+
+代码改动后按这三步走，每一步都是可调用、可回读、有状态证据的能力，而不是人工操作：
+
+1. `node src/cli.js doctor` —— 看 `service-build-current`。红就说明运行的服务还是旧源码：停掉 `.local/server.pid` 里的进程再跑 `start.ps1`。**不要只看版本号**，版本相同但 buildId 不同也意味着没部署。
+2. `browser_reload_extension` 带 `confirmation: "reload_extension_once"` —— 一条调用完成「解析目标窗口 → 打开固定 ID 详情页并保留当前页 → 点 Reload → 观察新扩展会话与版本」，成功回 `verified: true` 与 `targetResolution`。不需要先手工跑 `browser_desktop_windows`。
+3. `node src/cli.js doctor` 应回到 10/10；需要真实浏览器行为证据时再跑 `npm run test:capture` / `npm run test:devtools`。
+
+`confirmation` 是**调用方声明**（Agent 自己给出），不是人工点击墙；真正的约束是「每一次重载都需要这一次调用的明确授权」以及「`uncertain` 之后不得再调」。多窗口时能力不会替你猜，会返回候选让你选定。
 
 ## DevTools UIA 的未决审查点
 

@@ -46,6 +46,10 @@ const fixture = http.createServer((req, res) => {
 });
 
 const results = [];
+const startedAt = Date.now();
+// Progress goes to stderr so a hang is diagnosable instead of silent. Nothing is
+// printed on stdout until the verdict, which keeps the pass/fail block parseable.
+const step = message => console.error(`[${((Date.now() - startedAt) / 1000).toFixed(1)}s] ${message}`);
 const check = (name, fn) => {
   try { fn(); results.push({ name, ok: true }); }
   catch (error) { results.push({ name, ok: false, detail: error.message }); }
@@ -67,8 +71,10 @@ let blocked = null;
 try {
   await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${fixture.address().port}/`;
+  step('fixture listening');
   const health = await call('browser_health');
   const extensionVersion = health?.extensionVersion ?? null;
+  step(`browser_health ok, extension ${extensionVersion ?? 'unknown'}`);
   if (extensionVersion !== expectedVersion) {
     blocked = `loaded extension is ${extensionVersion ?? 'unknown'} but this source tree is ${expectedVersion}; browser_devtools_capture lives in the extension, so reload it before running this test. No tab was opened.`;
     throw new Error(blocked);
@@ -76,11 +82,14 @@ try {
   const opened = await call('browser_open', { url });
   assert.ok(opened.tabId, 'browser_open must return a tabId');
   tabId = opened.tabId;
+  step(`opened tab ${tabId}`);
   await waitTabReady(tabId);
+  step('fixture tab ready');
 
   const capture = await call('browser_devtools_capture', {
     tabId, domains: ['console', 'network', 'scripts', 'metrics'], durationMs: 1500, maxEvents: 200
   });
+  step(`capture returned status=${capture?.status} messages=${capture?.messages?.length} network=${capture?.network?.length} scripts=${capture?.scripts?.length}`);
   if (capture?.status === 'failed' && /unknown command/i.test(String(capture.reason ?? capture.error ?? ''))) {
     blocked = 'the loaded extension does not implement browser_devtools_capture; reload the 0.5.24 extension first';
   }
@@ -133,10 +142,19 @@ try {
   } else if (!blocked) {
     results.push({ name: 'fixture setup', ok: false, detail: error.message });
   }
-} finally {
-  if (tabId) await call('browser_close', { tabId }).catch(() => {});
-  await new Promise(resolve => fixture.close(resolve));
 }
+
+// Cleanup is bounded on purpose. The fixture page keeps polling, so a plain
+// server.close() waits for those keep-alive sockets and used to hang the whole
+// run after every check had already been decided.
+const bounded = (promise, ms) => Promise.race([promise, new Promise(resolve => setTimeout(resolve, ms))]);
+if (tabId) {
+  step('closing the fixture tab');
+  await bounded(call('browser_close', { tabId }).catch(() => {}), 8000);
+}
+try { fixture.closeAllConnections?.(); } catch { /* older runtimes */ }
+await bounded(new Promise(resolve => fixture.close(resolve)), 3000);
+step('cleanup done');
 
 const failed = results.filter(entry => !entry.ok);
 for (const entry of results) console.log(`${entry.ok ? 'PASS' : 'FAIL'} ${entry.name}${entry.ok ? '' : ` — ${entry.detail}`}`);

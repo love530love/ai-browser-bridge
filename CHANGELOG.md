@@ -6,6 +6,8 @@
 - 目标漂移：窗口内 URL 变化或出现 pending 导航时返回 `targetChanged` + `partialReasons`，不把两个页面的观察混成一份。
 - 未实现且不声称：请求重放、脚本编辑、断点/单步调试、Console 输入执行、分离 DevTools 窗口与被检查标签绑定。
 - 修复 `validateCall` 对 `type: 'array'` 字段完全不校验的缺口：现在校验数组类型、`minItems`/`maxItems` 与 `items.enum`，避免任意形状被透传到扩展。
+- `browser_reload_extension` 的目标解析并入能力内部，不再要求调用方先手工枚举窗口：只传 `confirmation` 时现场枚举可见 Chrome 窗口，恰好一个则使用，零个返回 `not_dispatched`/`no_visible_chrome_window`，多个返回 `denied`/`chrome_target_ambiguous` 并列出候选而不猜；成功时回传 `targetResolution: "single-visible-chrome-window"`。显式传 `processId`/`windowHandle` 的旧路径仍要求近期枚举，行为不变。
+- 部署与现场验收（2026-10-27）：服务重启到 0.5.24、扩展经 `browser_reload_extension` 重载并验证新会话与版本，`doctor` 10/10 通过；`browser_devtools_capture` 真实 Chrome 验收 9/9 通过（本地 fixture，只操作自身标签）。
 - 版本号与 manifest 同步升到 0.5.24；服务与已加载扩展尚未重新部署/重载，`doctor` 版本匹配仍会失败。
 
 ## 0.5.23 — 2026-10-26
