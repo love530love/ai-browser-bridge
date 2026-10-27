@@ -1,6 +1,6 @@
 {
   "name": "ai-browser-bridge",
-  "version": "0.5.25",
+  "version": "0.6.0",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -19,7 +19,8 @@
     "doctor": "node src/cli.js doctor",
     "test:capture": "node test/live-capture.js",
     "test:focus": "node test/focus-matrix.js",
-    "test:session": "node test/live-session.js"
+    "test:session": "node test/live-session.js",
+    "test:debugger": "node test/live-debugger.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",

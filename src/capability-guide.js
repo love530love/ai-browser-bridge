@@ -37,6 +37,12 @@ const INTENTS = [
     backgroundSafe: true,
     prefer: 'Call browser_reload_extension with confirmation only, then node src/cli.js doctor. If the reply says method:"windows_ui_automation", the extension was disconnected and that path did need the foreground.',
     fallback: ['browser_reload_extension', 'browser_queue_status'] },
+  { id: 'debug-or-breakpoint', match: /断点|单步|调试|调用栈|栈帧|breakpoint|debugger|step over|call stack|暂停执行|paused/i,
+    tools: ['browser_debugger'], focusRequired: false,
+    why: 'A long-lived CDP debugger session per tab, so a breakpoint set in one call still exists in the next. Works on a backgrounded tab. The costs are real: Chrome shows a debugging banner on that tab while the session is open, and DevTools cannot attach to it meanwhile.',
+    backgroundSafe: true,
+    prefer: 'open -> scripts (pass urlFilter to find the exact script URL; a script-heavy page hides its own document script in the unfiltered tail) -> set_breakpoint -> trigger it (schedule it with evaluate + setTimeout, because a synchronous trigger pauses inside the call that made it) -> poll status until paused -> frames -> evaluate -> step or resume -> close. While paused every other page tool returns status=waiting with reason=tab_paused_by_debugger instead of hanging; browser_health still answers and reports the pause. A paused page is frozen, so always close the session; a paused session nobody touches is resumed automatically after session.paused.autoResumeInMs.',
+    fallback: ['browser_debugger', 'browser_devtools_capture', 'browser_performance'] },
   { id: 'console-or-errors', match: /控制台|报错|异常|错误|console|error|exception|日志/i,
     tools: ['browser_devtools_capture'], focusRequired: false,
     why: 'Reads Runtime.consoleAPICalled, Runtime.exceptionThrown and Log.entryAdded over CDP inside one bounded window.',
@@ -100,15 +106,14 @@ const INTENTS = [
 const NOT_IMPLEMENTED = [
   { capability: 'read values stored in the Chrome password manager', status: 'impossible_by_design', note: 'Chrome does not expose saved password values to extensions, CDP or UI Automation. Only triggering the browser autofill is possible.' },
   { capability: 'solve image or interactive captchas automatically', status: 'not_implemented', note: 'Reading an OTP out of a web mailbox is ordinary browsing and is supported. Deciding an image challenge is not, and would need a human or an external service.' },
-  { capability: 'type into and run code in the DevTools Console', status: 'not_implemented', note: 'Console output can be captured; executing arbitrary script from the Console is not exposed.' },
-  { capability: 'breakpoints, stepping and script editing in Sources', status: 'not_implemented', note: 'Not exposed yet; a paused page has no safe resume contract in a single-slot queue.' },
+  { capability: 'edit a live script in place, the way Sources live-edit does', status: 'not_implemented', note: 'Breakpoints, stepping, call-frame inspection and evaluation are implemented through browser_debugger. Writing a modified script back into the running page (Debugger.setScriptSource) is not exposed yet.' },
   { capability: 'request replay from the Network panel', status: 'not_implemented', note: 'Capture is read-only.' },
   { capability: 'write Chrome settings, certificates or proxy', status: 'not_implemented', note: 'Planner and native snapshot exist; the write/read-back loop does not.' }
 ];
 
 const FOCUS_POLICY = {
   summary: 'Foreground is required only where the operating system, not the page, decides the target.',
-  backgroundSafeTools: ['browser_read', 'browser_find_text', 'browser_find_element', 'browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_scroll', 'browser_key', 'browser_wait', 'browser_screenshot', 'browser_performance', 'browser_network_summary', 'browser_devtools_capture', 'browser_debug', 'browser_health', ...COORDINATE, 'browser_tabs', 'browser_open', 'browser_close', 'browser_launch', 'browser_reload_extension'],
+  backgroundSafeTools: ['browser_read', 'browser_find_text', 'browser_find_element', 'browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_scroll', 'browser_key', 'browser_wait', 'browser_screenshot', 'browser_performance', 'browser_network_summary', 'browser_devtools_capture', 'browser_debug', 'browser_debugger', 'browser_health', ...COORDINATE, 'browser_tabs', 'browser_open', 'browser_close', 'browser_launch', 'browser_reload_extension'],
   foregroundRequiredTools: ['browser_desktop_windows', 'browser_native_snapshot', 'browser_devtools'],
   advisoryOnlyStates: ['tab.active', 'window.focused', 'document.visibilityState', 'document.hasFocus'],
   guidance: 'These four states are reported for diagnosis, not as a gate. A backgrounded tab is a normal working state: do not stop a DOM, CDP or coordinate task because of them. Coordinates do not need the foreground: the token is bound to the DOM element and re-hit-tested, and CDP dispatches into the target by tabId. browser_reload_extension does not either, because the extension reloads itself with chrome.runtime.reload(); only its Windows UI Automation fallback types into a real window. Pass requireForeground:true only when you specifically want foreground evidence.',

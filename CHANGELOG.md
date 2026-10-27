@@ -1,3 +1,21 @@
+## 0.6.0 — 2026-10-27（已部署，本机实测）
+
+- **F12 断点调试真正落地**：新增 `browser_debugger`——**每个标签一条长活 CDP 调试会话**，断点在多次调用之间存活，这是单次 attach 模型做不到的。14 个动作：`open`/`close`/`list`/`status`/`scripts`/`set_breakpoint`/`remove_breakpoint`/`pause`/`resume`/`step_over`/`step_into`/`step_out`/`frames`/`evaluate`。会话本身是纯状态机（`extension/cdp-session.js`，注入 `attach`/`detach`/`send`/`now`/`schedule`），因此 20 个用例可在 `node --test` 里跑，不依赖真实浏览器。
+- **代价被明写，而不是藏起来**：会话开着时 Chrome 在该标签显示调试提示条，且**手开 DevTools 无法同时附加**。该代价已由用户明确接受，并写进工具描述、`debuggerBannerVisible: true` 与能力引导。
+- **「暂停的页面绝不能被丢下」做成三条冗余保障**：① 唯一会话死亡路径 `shutdown()` 先 `Debugger.resume` 再 `Debugger.disable` 再 detach，`close`/`closeAll`/空闲回收/外部 detach 全走它；② 无人查看的暂停态在 TTL 后自动恢复，且 TTL 从**最后一次交互**算（`lastTouchedAt`），所以代理正在看栈帧时不会被打断，被放弃的标签仍会自己恢复；③ `chrome.debugger.onDetach` 外部断开时清掉会话与定时器，不留悬空状态。
+- **暂停态不再变成静默超时**：这是本轮最重要的可用性修复。渲染器被暂停时 CDP 调用会被接收但永不返回，原来的表现是调用方等到 `read_timeout`，然后误判「桥坏了」。现在页面域工具统一在一个入口判定，返回结构化 `status: "waiting"` + `reason: "tab_paused_by_debugger"` + `hitBreakpoints` + `autoResumeInMs` + `nextPollTool/nextPollArgs`。覆盖 DOM 注入、`browser_read`（含 `frame:"all"`）、`browser_find_text`、`browser_frames`、CDP 键盘/指针、`browser_screenshot`、`browser_navigate`、`browser_history`、`browser_performance`、`browser_network_summary`、`browser_devtools_capture`。
+- **`browser_health` 在暂停时必须能答**：它正是「看起来卡住了」时被调用的那个工具，如果它自己也挂住，整套容错引导就塌了。现在它会跳过会阻塞的 pageProbe，并直接回 `pageProbe.reason = "tab_paused_by_debugger"`。
+- **`browser_screenshot` / `browser_performance` / `browser_network_summary` / `browser_devtools_capture` 改为借用已开会话**（`activeSend`）。原来它们各自 `chrome.debugger.attach`，在会话存活期间会一直报 `Another debugger is already attached`——断点一开，截图和性能诊断就全废。
+- **`scripts` 支持 `urlFilter`**：现场实测一个普通页面加载了 **87 个脚本**，页面自己的内联脚本被「取最后 60 个」的窗口挤掉，而它恰恰是唯一想下断点的脚本。现在按子串（大小写不敏感）过滤，并同时回 `count`（命中数）、`totalScripts`（总数）、`truncated`。
+- **1-based 对外 / 0-based 协议**：断点行号与栈帧行号在边界处转换，调用方不用记 CDP 的下标习惯。
+- **帧摘要不泄露作用域值**：`frames` 只回 `index`/`functionName`/`url`/`lineNumber`/`columnNumber`/`scopeTypes`/`callFrameId`，要看值必须显式 `evaluate`，取值路径可审计。
+- **隐藏标签不产帧，会把截图拖成 20 秒超时**（本轮踩到并修掉的真缺陷）：给标签挂上**持久**调试会话后，隐藏标签不再产生动画帧，`Page.captureScreenshot` 就一直在等一个永远不会来的帧——实测首次截图固定 20016ms（Chrome 内部上限），正好撞上服务 20s 读超时，返回 `waiting/read_timeout`；第二次才 145ms。原来「临时 attach→截图→detach」因为 attach 本身会唤醒渲染，所以一直没暴露。**逐项实测排除**：`Page.setWebLifecycleState('active')` 无效；`Emulation.setFocusEmulationEnabled` 更差（2/2 超时）；`Emulation.setDeviceMetricsOverride` 不稳（74ms 后超时）；`requestAnimationFrame` 等待在隐藏标签上**永不 resolve**（4/4 超时）；`Page.bringToFront` 有效但会把标签切到前台，违背后台原则。**最终方案**：截图前短暂 `Page.startScreencast` 强制产帧、等到首帧（预算 1500ms）再截图、随后立即 `Page.stopScreencast`——在完全相同的失败序列下 **2/2 稳定 143–181ms**，且不抢焦点。该副作用以 `sideEffects: ["hidden_tab_frames_forced_for_capture"]` 与 `warmup` 字段如实回传。
+- **`browser_performance` 从未 enable 过 Performance 域**：`Performance.getMetrics` 在未 `Performance.enable` 时返回空数组，读起来像「没有指标」而不是「没启用」。现在先 enable，并回 `metricsDomainEnabled` 供调用方判断。
+- 新增现场验收 `test/live-debugger.js`：**38/38，连续跑三次均全绿**，在真实 Chrome 上证明——断点真命中、页面真冻结、暂停期间 DOM/截图/按键真被拒、`browser_health` 真能答、单步真换行、关会话后页面真恢复运行、`window.calls` 真的跑到 4、隐藏标签截图的产帧预热真的跑了。单元侧 `test/cdp-session.test.js` **20/20**（含「代理连续查看 36s 不被 TTL 打断」与「无人查看 30s 自动恢复」用注入时钟同时成立）。
+- 全量单测 **225/225**；现场 `test/live-session.js` 17/17、`test/focus-matrix.js` 25/25，标签数 13 → 13 无泄漏。
+- 未实现且不声称：live 脚本编辑（`Debugger.setScriptSource`）、请求重放、Application 存储读写、性能录制、Lighthouse、ServiceWorker 调试。
+- 版本号与 manifest 升到 0.6.0。
+
 ## 0.5.25 — 2026-10-27（已部署，本机实测）
 
 - **扩展自我重载**：`browser_reload_extension` 在扩展已连接时改走 `chrome.runtime.reload()`——不抢焦点、不开标签、不发按键，**彻底摆脱前台依赖**。服务端不信派发回包，而是等待一个**新的扩展会话 + 期望版本**出现才算 `verified`；超时返回 `uncertain`/`extension_reload_not_observed`，绝不把「已派发」说成「已完成」。

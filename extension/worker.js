@@ -3,6 +3,7 @@ import { withDebugger, pointer, key } from './cdp.js';
 import { createErrorJournal } from './error-journal.js';
 import { evaluatedValue, resourceSummary } from './cdp-results.js';
 import { captureDevtools, createTabSubscription } from './cdp-capture.js';
+import { createSessionManager } from './cdp-session.js';
 import { reuseKey, samePage, visibleTab, createTabOwnership } from './tab-identity.js';
 let socket = null;
 let keepalive = null;
@@ -22,6 +23,53 @@ const errorJournal = createErrorJournal(chrome.storage.local, message => {
 // Which tabs this bridge opened. Closing anything else would destroy work the
 // user did not hand over, so browser_close checks this before removing a tab.
 const tabOwnership = createTabOwnership(chrome.storage.session);
+// One long-lived debugger session per tab, which is what breakpoints need. Every
+// path out of the manager resumes a paused target before detaching: a paused tab
+// nobody owns is a frozen tab the user has to reload by hand.
+const debuggerSessions = createSessionManager({
+  attach: async tabId => { await chrome.debugger.attach({ tabId }, '1.3'); },
+  detach: async tabId => { await chrome.debugger.detach({ tabId }); },
+  send: async (tabId, method, params = {}) => chrome.debugger.sendCommand({ tabId }, method, params)
+});
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  if (Number.isInteger(source?.tabId)) debuggerSessions.handleEvent(source.tabId, method, params);
+});
+chrome.debugger.onDetach.addListener(source => {
+  if (Number.isInteger(source?.tabId)) debuggerSessions.handleDetach(source.tabId, source.reason);
+});
+// Screenshot, capture and metrics used to attach their own debugger and fail if
+// one was already attached. Reusing the open session keeps both paths working.
+async function withTabDebugger(tab, fn) {
+  const reuse = debuggerSessions.activeSend(tab.id);
+  if (reuse) return await fn(reuse);
+  return await withDebugger(tab.id, fn);
+}
+// A hidden tab produces no animation frames, and a persistent debugger
+// attachment does not change that. Page.captureScreenshot then waits for a frame
+// that never arrives: measured 20.0s - Chrome's own limit - on the first capture
+// after opening a session on an otherwise idle hidden tab, and a
+// requestAnimationFrame-based wait never resolves at all. Marking the page active
+// does not help, and Page.bringToFront does help but steals the tab, which this
+// bridge refuses to do by default.
+//
+// Page.startScreencast makes Chrome produce frames for a hidden target, so a
+// bounded wait for the first screencast frame warms the surface; capture is then
+// a steady 143-181ms. Callers stop the screencast immediately afterwards.
+async function warmFrames(tab, send, budgetMs = 1500) {
+  const started = Date.now();
+  let frames = 0;
+  const listener = source => { if (source?.tabId === tab.id) frames++; };
+  chrome.debugger.onEvent.addListener(listener);
+  try {
+    await send('Page.startScreencast', { format: 'png', everyNthFrame: 1 });
+    while (!frames && Date.now() - started < budgetMs) await sleep(25);
+  } catch {
+    // Capture below reports its own failure; a failed warm-up is not fatal.
+  } finally {
+    chrome.debugger.onEvent.removeListener(listener);
+  }
+  return { frames, warmed: frames > 0, warmupMs: Date.now() - started, budgetMs };
+}
 function reportExtensionError(source, error, category = 'EXTENSION_ERROR') {
   void errorJournal.record(source, category).then(() => errorJournal.flush()).catch(() => {});
 }
@@ -259,9 +307,10 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
         { name: 'picker-upload-bridge', tools: ['browser_pick', 'browser_choose', 'browser_upload'], useFor: 'custom selects, portal options, hidden file inputs without OS dialog', retrySafe: false },
         { name: 'cdp-input', tools: ['browser_key', 'browser_hover', 'browser_screenshot'], useFor: 'trusted browser keyboard/pointer/screenshot when DOM events are insufficient', retrySafe: false },
         { name: 'cdp-capture', tools: ['browser_devtools_capture'], useFor: 'read-only console/network/script/metrics capture inside one bounded window; not a DevTools write path', retrySafe: true },
+        { name: 'cdp-debug-session', tools: ['browser_debugger'], useFor: 'long-lived debugger session for breakpoints, stepping, call-frame inspection and evaluation; leaves a debugging banner on the tab until closed', retrySafe: false },
         { name: 'coordinate-adapter', tools: ['browser_action'], useFor: 'Open-AutoGLM style normalized coordinates as last resort with stale-URL guard', retrySafe: false }
       ],
-      fallbackOrder: ['health', 'observe', 'cdp-capture', 'dom-transaction', 'picker-upload-bridge', 'cdp-input', 'coordinate-adapter', 'human-confirmation'],
+      fallbackOrder: ['health', 'observe', 'cdp-capture', 'cdp-debug-session', 'dom-transaction', 'picker-upload-bridge', 'cdp-input', 'coordinate-adapter', 'human-confirmation'],
       concurrency: { writeLeaseTools: ['browser_claim_tab', 'browser_release_tab', 'browser_tab_lease'], rule: 'one write owner per tab; read-only tools may still observe; conflicting writes return status=waiting instead of throwing' },
       retryPolicy: 'Never replay uncertain writes automatically. Use browser_failure_help, then re-observe and choose the next safer mode.'
     };
@@ -269,6 +318,8 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   if (name === 'browser_frames') {
     const tab = await chrome.tabs.get(args.tabId);
     const config = await settings();
+    const paused = pausedGuard(tab.id);
+    if (paused) return paused;
     const frames = await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true },
       func: () => ({ url: location.href, origin: location.origin, name: name || '', readyState: document.readyState })
@@ -280,19 +331,29 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   if (name === 'browser_performance') {
     const tab = await chrome.tabs.get(args.tabId);
     checkedUrl(tab.url, config);
-    return withDebugger(tab.id, async send => {
+    // Runtime.evaluate on a paused renderer never answers: the execution context
+    // is frozen by definition. Refuse instead of waiting for the read timeout.
+    const paused = pausedGuard(tab.id);
+    if (paused) return paused;
+    return withTabDebugger(tab, async send => {
+      // Performance.getMetrics returns an empty array unless the domain was
+      // enabled first, which reads as "no metrics" rather than "not enabled".
+      const enabled = await send('Performance.enable').then(() => true).catch(() => false);
       const [metrics, layout, timing] = await Promise.all([
         send('Performance.getMetrics').catch(error => ({ error: error.message })),
         send('Page.getLayoutMetrics').catch(error => ({ error: error.message })),
         send('Runtime.evaluate', { expression: `(() => { const n = performance.getEntriesByType('navigation')[0]; const resources = performance.getEntriesByType('resource'); const longTasks = performance.getEntriesByType('longtask'); return { readyState: document.readyState, visibilityState: document.visibilityState, url: location.href, navigation: n ? { type: n.type, startTime: n.startTime, domInteractive: n.domInteractive, domContentLoaded: n.domContentLoadedEventEnd, loadEventEnd: n.loadEventEnd, responseEnd: n.responseEnd } : null, resources: resources.length, resourceTransferBytes: resources.reduce((sum, item) => sum + (item.transferSize || 0), 0), longTasks: longTasks.length, longestTaskMs: longTasks.reduce((max, item) => Math.max(max, item.duration || 0), 0) }; })()`, returnByValue: true }).catch(error => ({ error: error.message }))
       ]);
-      return { tabId: tab.id, metrics: metrics.metrics || metrics, layout, timing: timing.error ? timing : evaluatedValue(timing), contentTrust: 'untrusted webpage diagnostics' };
+      return { tabId: tab.id, metrics: metrics.metrics || metrics, metricsDomainEnabled: enabled,
+        layout, timing: timing.error ? timing : evaluatedValue(timing), contentTrust: 'untrusted webpage diagnostics' };
     });
   }
   if (name === 'browser_network_summary') {
     const tab = await chrome.tabs.get(args.tabId);
     checkedUrl(tab.url, config);
-    return withDebugger(tab.id, async send => {
+    const paused = pausedGuard(tab.id);
+    if (paused) return paused;
+    return withTabDebugger(tab, async send => {
       const limit = Math.min(200, Math.max(1, args.maxEntries ?? 100));
       const result = await send('Runtime.evaluate', { expression: `(() => ({ readyState: document.readyState, timeOrigin: performance.timeOrigin, entries: performance.getEntriesByType('resource').slice(-${limit}).map(r => ({ name: String(r.name), initiatorType: r.initiatorType, duration: Math.round(r.duration), transferSize: r.transferSize || 0, decodedBodySize: r.decodedBodySize || 0, startTime: Math.round(r.startTime) })) }))()`, returnByValue: true });
       const after = await chrome.tabs.get(tab.id);
@@ -303,7 +364,12 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   if (name === 'browser_devtools_capture') {
     const tab = await chrome.tabs.get(args.tabId);
     checkedUrl(tab.url, config);
-    return await withDebugger(tab.id, async send => captureDevtools({
+    // The capture window itself is bounded, but enabling and draining a domain
+    // against a frozen renderer is not: the useful paused-state reading is
+    // browser_debugger action:"evaluate" on the paused frame, which is exact.
+    const paused = pausedGuard(tab.id);
+    if (paused) return paused;
+    return await withTabDebugger(tab, async send => captureDevtools({
       tabId: tab.id,
       expectedUrl: tab.url,
       requested: args.domains,
@@ -392,7 +458,15 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       try { checkedUrl(tab.url, config); allowed = true; } catch (error) { allowedError = error.message; }
       try { windowFocused = !!(await chrome.windows.get(tab.windowId)).focused; } catch (error) { windowFocusError = error.message; }
       let pageProbe = null;
-      if (allowed && !tab.pendingUrl) {
+      // browser_health is the tool an agent calls precisely when something looks
+      // stuck, so it must answer on a paused tab. The probe would block forever
+      // there; report the pause instead of hiding it behind a timeout.
+      const paused = pauseSnapshot(tab.id);
+      // Spread the pause detail first: session.paused.reason is the CDP pause
+      // reason ("other", "breakpoint", ...) and must not overwrite the field the
+      // caller branches on.
+      if (paused) pageProbe = { ...paused, ok: false, skipped: true, reason: 'tab_paused_by_debugger', pauseReason: paused.reason };
+      else if (allowed && !tab.pendingUrl) {
         try {
           const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => ({
             ok: true,
@@ -462,7 +536,49 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   // Lease tools never reach the extension: the service owns and answers them.
   // Page operations below therefore execute unconditionally; conflicting writes
   // were already rejected by the service before this job was dispatched.
+  // A paused page cannot run its own script. Without this guard every DOM call
+  // would sit there until the service read timeout and come back as a vague
+  // "read_timeout", which looks like a broken bridge rather than a paused tab.
+  function pauseSnapshot(tabId) {
+    const session = debuggerSessions.get(tabId);
+    return session?.paused ? {
+      reason: session.paused.reason,
+      hitBreakpoints: session.paused.hitBreakpoints,
+      pausedAt: session.paused.at,
+      frameCount: session.paused.callFrames.length,
+      autoResumeInMs: Math.max(0, debuggerSessions.describe(session).paused?.autoResumeInMs ?? 0)
+    } : null;
+  }
+  function pausedGuard(tabId = tab.id) {
+    const snapshot = pauseSnapshot(tabId);
+    if (!snapshot) return null;
+    return {
+      status: 'waiting', retryable: true, reason: 'tab_paused_by_debugger', dispatched: false,
+      pausedAt: snapshot.pausedAt, pauseReason: snapshot.reason,
+      hitBreakpoints: snapshot.hitBreakpoints,
+      autoResumeInMs: snapshot.autoResumeInMs,
+      nextPollTool: 'browser_debugger', nextPollArgs: { tabId, action: 'status' },
+      recommendedNextAction: 'This tab is paused by an open debugger session, so page script and input cannot run. Inspect it with browser_debugger action:"frames", then resume or close the session and repeat this call.'
+    };
+  }
+  // Tools that never touch page script or renderer input, so a paused tab cannot
+  // stall them. Everything else is refused up front instead of hanging until the
+  // service read timeout and coming back as a vague "read_timeout".
+  const pauseImmune = new Set([
+    'browser_debugger', 'browser_health', 'browser_tabs', 'browser_open', 'browser_close',
+    'browser_failure_help', 'browser_reload_extension'
+  ]);
+  // One gate for the whole page domain, instead of a check inside each tool.
+  // A paused renderer accepts a CDP call and then simply never answers, so the
+  // failure mode is a silent stall, not an error. Refusing up front with a
+  // structured waiting result is the only shape the caller can act on.
+  if (!pauseImmune.has(name)) {
+    const paused = pausedGuard();
+    if (paused) return paused;
+  }
   async function page(name, input = routedArgs) {
+    const paused = pausedGuard();
+    if (paused) return paused;
     const target = Number.isInteger(input.frame) ? { tabId: tab.id, frameIds: [input.frame] } : { tabId: tab.id };
     const results = await chrome.scripting.executeScript({ target, func: pageOperation, args: [name, input, config.allowedOrigins, config.allSites] });
     const result = results[0];
@@ -564,7 +680,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     };
   }
   async function guarded(sendOperation) {
-    return withDebugger(tab.id, async send => {
+    return withTabDebugger(tab, async send => {
       const current = await chrome.tabs.get(tab.id);
       if (current.url !== tab.url || current.pendingUrl) throw new Error('Page changed before input. Read again.');
       if (!(await commandStillActive())) throw new Error('Bridge command cancelled or disconnected before input.');
@@ -676,17 +792,37 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     await tabOwnership.forget(tab.id);
     return { closed: true };
   }
+  if (name === 'browser_debugger') {
+    const action = args.action;
+    if (action === 'open') {
+      if (tab.pendingUrl && tab.pendingUrl !== tab.url) throw new Error('Navigation in progress. Wait and read again.');
+      return await debuggerSessions.open({ tabId: tab.id, expectedUrl: tab.url });
+    }
+    if (action === 'close') return await debuggerSessions.close({ tabId: tab.id });
+    if (action === 'list') return { status: 'success', sessions: debuggerSessions.list() };
+    return await debuggerSessions.call({ tabId: tab.id, action, args });
+  }
   if (name === 'browser_screenshot') {
-    const target = { tabId: tab.id };
-    await chrome.debugger.attach(target, '1.3');
-    try {
+    // Borrow an already-open debugger session instead of attaching again: a
+    // second attach fails with "Another debugger is already attached", which
+    // would make screenshots unusable for the whole lifetime of a breakpoint
+    // session.
+    return await withTabDebugger(tab, async send => {
       const now = await chrome.tabs.get(tab.id);
       if (now.url !== tab.url || now.pendingUrl) throw new Error('Page changed before screenshot.');
-      const result = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', { format: 'png' });
-      const after = await chrome.tabs.get(tab.id);
-      if (after.url !== tab.url || after.pendingUrl) throw new Error('Page changed during screenshot. Discarded.');
-      return { data: result.data, mimeType: 'image/png' };
-    } finally { await chrome.debugger.detach(target).catch(() => {}); }
+      const warmup = now.active ? null : await warmFrames(tab, send);
+      try {
+        const result = await send('Page.captureScreenshot', { format: 'png' });
+        const after = await chrome.tabs.get(tab.id);
+        if (after.url !== tab.url || after.pendingUrl) throw new Error('Page changed during screenshot. Discarded.');
+        return { data: result.data, mimeType: 'image/png',
+          // Stated, not hidden: frames were forced for this capture.
+          sideEffects: warmup ? ['hidden_tab_frames_forced_for_capture'] : [],
+          warmup: warmup ?? undefined };
+      } finally {
+        if (warmup) await send('Page.stopScreencast').catch(() => {});
+      }
+    });
   }
   if (name === 'browser_observe') {
     const observation = await page('browser_observe');

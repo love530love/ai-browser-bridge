@@ -59,7 +59,10 @@ test('capability gaps are stated instead of being hidden behind a refusal', () =
   const guide = capabilityGuide({ goal: '登录' });
   const gaps = Object.fromEntries(guide.notImplemented.map(entry => [entry.capability, entry]));
   assert.equal(gaps['read values stored in the Chrome password manager'].status, 'impossible_by_design');
-  assert.equal(gaps['breakpoints, stepping and script editing in Sources'].status, 'not_implemented');
+  // Breakpoints and stepping are a capability now (browser_debugger); only
+  // writing a modified script back into the page is still missing.
+  assert.equal(gaps['edit a live script in place, the way Sources live-edit does'].status, 'not_implemented');
+  assert.equal(gaps['breakpoints, stepping and script editing in Sources'], undefined);
   assert.match(guide.primary.prefer, /autofill/);
   // Launching a browser used to be listed here. It is a capability now, so
   // leaving it in the gap list would send agents looking for a workaround.

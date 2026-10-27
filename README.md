@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.5.25**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.6.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.6.0 把 F12 的**断点调试**真正做进来：新增 `browser_debugger`，每个标签一条长活 CDP 调试会话，断点跨调用存活，支持单步、栈帧查看与在指定帧上求值。代价是明确的——会话开着时该标签显示调试提示条，且手开 DevTools 无法同时附加。核心安全性质是「暂停的页面绝不能被丢下」：所有关闭路径先 resume 再 detach，无人查看的暂停态按最后交互时间起算 TTL 后自动恢复；暂停期间其它页面工具不再静默超时，而是回结构化 `waiting/tab_paused_by_debugger`，`browser_health` 仍能作答。现场验收 36/36。详见 [Chrome 能力矩阵](docs/CHROME-CAPABILITY-MATRIX.md)。
 
 0.5.25 把「复用优先」补到最后两个缺口：`browser_reload_extension` 在扩展已连接时改为**扩展自我重载**（`chrome.runtime.reload`，不抢焦点、不开标签、不发按键），只有扩展断连时才回退到需要前台的 Windows UI Automation 并如实标注；新增 `browser_launch`，仅在**没有任何 chrome 进程**时启动，且启动参数只有 URL、不带任何 profile 或隐身标志，因此沿用用户默认 profile 与登录态。详见 [Chrome 能力矩阵](docs/CHROME-CAPABILITY-MATRIX.md)。
 
