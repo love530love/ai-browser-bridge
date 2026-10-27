@@ -19,17 +19,23 @@ const INTENTS = [
     backgroundSafe: true,
     prefer: 'Try browser_find_element or browser_find_text first; a ref-based browser_click needs no coordinate token at all. If you must use coordinates, prepare them from the geometry browser_find_element already returned instead of guessing a point, and check the returned target.',
     fallback: ['browser_find_element', 'browser_screenshot', 'browser_scan_overlays'] },
+  { id: 'launch-browser', match: /启动浏览器|浏览器没启动|浏览器未启动|没开浏览器|没有浏览器|launch|start chrome|chrome.*not running|not running/i,
+    tools: ['browser_launch', 'browser_queue_status'], focusRequired: false,
+    why: 'browser_launch starts the user\'s own Chrome with no profile directory and no incognito flag, so the same cookies and logins apply. It refuses when any chrome process already exists, because a second instance means a second profile and that is what kicks accounts out.',
+    backgroundSafe: true,
+    prefer: 'Call browser_launch and read extensionConnected. If it returns not_dispatched/chrome_already_running, the browser is already up: use browser_open instead of launching again.',
+    fallback: ['browser_launch', 'browser_wait_until_ready', 'browser_queue_status'] },
   { id: 'open-or-reuse-tab', match: /新标签|新窗口|复用|重复标签|隐身|无痕|incognito|open tab|new tab|reuse|打开(?![\s\S]*chrome:\/\/|[\s\S]*devtools:\/\/)/i,
     tools: ['browser_tabs', 'browser_open'], focusRequired: false,
     why: 'browser_open matches an existing tab by page identity (ignoring a #fragment and a trailing slash, keeping the query string), so it does not create duplicates. It never creates a window, never opens an incognito tab, and does not move the window to the front unless you pass active:true.',
     backgroundSafe: true,
-    prefer: 'Call browser_open without active:true. Every primitive works on a background tab, so stealing focus buys nothing and interrupts the user. Incognito tabs are excluded from browser_tabs and are never opened implicitly.',
-    fallback: ['browser_tabs', 'browser_open'] },
+    prefer: 'Call browser_open without active:true. Every primitive works on a background tab, so stealing focus buys nothing and interrupts the user. Incognito tabs are excluded from browser_tabs and are never opened implicitly. If browser_open answers extension_disconnected, the browser itself is not running: call browser_launch first.',
+    fallback: ['browser_tabs', 'browser_open', 'browser_launch'] },
   { id: 'extension-reload-or-deploy', match: /重载|reload|部署|deploy|版本不匹配|version mismatch|doctor/i,
     tools: ['browser_reload_extension'], focusRequired: false,
-    why: 'Target binding is resolved inside the call: one visible Chrome window is used, several return candidates instead of guessing.',
+    why: 'When the extension is connected it reloads itself through chrome.runtime.reload(): no window is focused, no tab is opened, no keystroke is sent, and the service verifies the reload by observing a new session with the expected version. Only when the extension is disconnected does it fall back to Windows UI Automation, and that fallback reports focusRequired:true.',
     backgroundSafe: true,
-    prefer: 'Call browser_reload_extension with confirmation only, then node src/cli.js doctor.',
+    prefer: 'Call browser_reload_extension with confirmation only, then node src/cli.js doctor. If the reply says method:"windows_ui_automation", the extension was disconnected and that path did need the foreground.',
     fallback: ['browser_reload_extension', 'browser_queue_status'] },
   { id: 'console-or-errors', match: /控制台|报错|异常|错误|console|error|exception|日志/i,
     tools: ['browser_devtools_capture'], focusRequired: false,
@@ -92,7 +98,6 @@ const INTENTS = [
 ];
 
 const NOT_IMPLEMENTED = [
-  { capability: 'launch a browser when none is running', status: 'not_implemented', note: 'The bridge drives an already-running Chrome. Launching must reuse the existing profile so cookies and logins survive; it is not implemented yet.' },
   { capability: 'read values stored in the Chrome password manager', status: 'impossible_by_design', note: 'Chrome does not expose saved password values to extensions, CDP or UI Automation. Only triggering the browser autofill is possible.' },
   { capability: 'solve image or interactive captchas automatically', status: 'not_implemented', note: 'Reading an OTP out of a web mailbox is ordinary browsing and is supported. Deciding an image challenge is not, and would need a human or an external service.' },
   { capability: 'type into and run code in the DevTools Console', status: 'not_implemented', note: 'Console output can be captured; executing arbitrary script from the Console is not exposed.' },
@@ -103,10 +108,10 @@ const NOT_IMPLEMENTED = [
 
 const FOCUS_POLICY = {
   summary: 'Foreground is required only where the operating system, not the page, decides the target.',
-  backgroundSafeTools: ['browser_read', 'browser_find_text', 'browser_find_element', 'browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_scroll', 'browser_key', 'browser_wait', 'browser_screenshot', 'browser_performance', 'browser_network_summary', 'browser_devtools_capture', 'browser_debug', 'browser_health', ...COORDINATE, 'browser_tabs', 'browser_open', 'browser_close'],
-  foregroundRequiredTools: ['browser_desktop_windows', 'browser_native_snapshot', 'browser_devtools', 'browser_reload_extension'],
+  backgroundSafeTools: ['browser_read', 'browser_find_text', 'browser_find_element', 'browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_scroll', 'browser_key', 'browser_wait', 'browser_screenshot', 'browser_performance', 'browser_network_summary', 'browser_devtools_capture', 'browser_debug', 'browser_health', ...COORDINATE, 'browser_tabs', 'browser_open', 'browser_close', 'browser_launch', 'browser_reload_extension'],
+  foregroundRequiredTools: ['browser_desktop_windows', 'browser_native_snapshot', 'browser_devtools'],
   advisoryOnlyStates: ['tab.active', 'window.focused', 'document.visibilityState', 'document.hasFocus'],
-  guidance: 'These four states are reported for diagnosis, not as a gate. A backgrounded tab is a normal working state: do not stop a DOM, CDP or coordinate task because of them. Only Windows UI Automation still needs the foreground, because it types into the real screen. Coordinates do not: the token is bound to the DOM element and re-hit-tested, and CDP dispatches into the target by tabId. Pass requireForeground:true only when you specifically want foreground evidence.',
+  guidance: 'These four states are reported for diagnosis, not as a gate. A backgrounded tab is a normal working state: do not stop a DOM, CDP or coordinate task because of them. Coordinates do not need the foreground: the token is bound to the DOM element and re-hit-tested, and CDP dispatches into the target by tabId. browser_reload_extension does not either, because the extension reloads itself with chrome.runtime.reload(); only its Windows UI Automation fallback types into a real window. Pass requireForeground:true only when you specifically want foreground evidence.',
   evidence: 'test/focus-matrix.js exercises every read/write/diagnostic/coordinate primitive against a genuinely backgrounded tab: 25/25, including a Tap that really moves a DOM counter.'
 };
 

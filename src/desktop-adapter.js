@@ -9,6 +9,7 @@ export const RELOAD_EXTENSION_CONFIRMATION = 'reload_extension_once';
 export const BRIDGE_EXTENSION_ID = 'mmopbppoabmhliflinadkgnedjpmbgig';
 const SCRIPT_PATH = fileURLToPath(new URL('../scripts/reload-extension.ps1', import.meta.url));
 const DEVTOOLS_SCRIPT = fileURLToPath(new URL('../scripts/devtools-ui.ps1', import.meta.url));
+const LAUNCH_SCRIPT = fileURLToPath(new URL('../scripts/launch-chrome.ps1', import.meta.url));
 const POWERSHELL_EXE = (process.env.PATH ?? '').split(delimiter)
   .map(directory => join(directory.replace(/^"|"$/g, ''), 'pwsh.exe'))
   .find(candidate => existsSync(candidate)) ?? 'pwsh.exe';
@@ -71,7 +72,12 @@ function mapReloadResult(result, expectedVersion) {
   };
   if (result.code === 0) return {
     status: 'success', retryable: false, reason: 'extension_reload_verified', dispatched: true,
-    verified: true, extensionId: BRIDGE_EXTENSION_ID, expectedVersion
+    verified: true, extensionId: BRIDGE_EXTENSION_ID, expectedVersion,
+    // The UI Automation path opens a temporary chrome://extensions tab so the
+    // user's own tab is never navigated away. Whether it managed to close that
+    // tab again is real information for the caller, and it is only knowable from
+    // the script's own output.
+    temporaryTabClosed: /Closed the temporary chrome:\/\/extensions tab/.test(result.stdout ?? '')
   };
   if (result.code === 2) return {
     status: 'not_dispatched', retryable: false, reason: 'desktop_target_not_unique_or_unavailable', dispatched: false,
@@ -89,10 +95,44 @@ export function createDesktopAdapter({
   scriptPath = SCRIPT_PATH,
   expectedVersion = VERSION,
   timeoutMs = 45000,
-  runScript = runPowerShell
+  runScript = runPowerShell,
+  launchScriptPath = LAUNCH_SCRIPT
 } = {}) {
   const available = platform === 'win32';
   const run = (args, limit = timeoutMs) => runScript(scriptPath, args, limit);
+
+  // Launching is only for the case where no browser exists. The script refuses
+  // when any chrome process is alive, so this can never create a competing
+  // instance or a second profile. It also passes no profile flags, which is what
+  // keeps the user's cookies and logins intact.
+  async function launchChrome({ url } = {}) {
+    if (!available) return unavailable();
+    if (url !== undefined && url !== '' && !/^https?:\/\//i.test(String(url))) {
+      return { status: 'denied', retryable: false, reason: 'unsupported_url_scheme', dispatched: false,
+        message: 'Only http(s) URLs can be opened at launch; nothing was launched.' };
+    }
+    const args = ['-AsJson'];
+    if (url) args.push('-Url', String(url));
+    let result;
+    try { result = await runScript(launchScriptPath, args, 45000); }
+    catch { return { status: 'uncertain', retryable: false, reason: 'desktop_process_result_unknown', dispatched: null,
+      message: 'The launcher failed after spawn may have started. Inspect whether Chrome is running before calling again.' }; }
+    if (!result.spawned && result.error) return unavailable('desktop_process_unavailable');
+    if (result.timedOut) {
+      return { status: 'uncertain', retryable: false, reason: 'desktop_action_timeout', dispatched: null,
+        message: 'The launcher timed out. Check whether Chrome started before calling again; a second launch opens another window.' };
+    }
+    try {
+      const value = JSON.parse(result.stdout.trim());
+      // Never infer success from process exit alone: the script's own verdict is
+      // the only thing that counts, and an unrecognised shape is a failure.
+      if (value && ['success', 'not_dispatched', 'uncertain', 'denied', 'failed'].includes(value.status) &&
+          typeof value.dispatched === 'boolean') {
+        return { retryable: value.status === 'not_dispatched' ? true : false, ...value };
+      }
+    } catch { /* fall through */ }
+    return { status: 'failed', retryable: true, reason: 'chrome_launch_result_invalid', dispatched: false };
+  }
 
   async function listChromeWindows() {
     if (!available) return unavailable();
@@ -161,8 +201,8 @@ export function createDesktopAdapter({
       reason: 'devtools_result_unverified', dispatched: action !== 'observe' && result.spawned ? null : false, retryable: false };
   }
   const implementedActions = available
-    ? ['reload_extension', 'observe_devtools', 'select_devtools_panel']
+    ? ['reload_extension', 'launch_chrome', 'observe_devtools', 'select_devtools_panel']
     : [];
-  return { available, implementedActions, listChromeWindows, reloadExtension, devtools,
+  return { available, implementedActions, listChromeWindows, reloadExtension, launchChrome, devtools,
     nativeSnapshot: target => nativeUiSnapshot(target, { platform }) };
 }

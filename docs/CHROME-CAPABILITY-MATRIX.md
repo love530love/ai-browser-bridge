@@ -27,7 +27,7 @@ REA 明确这是静态证据：未执行扩展启动代码，动态名称、运�
 | 离线确定性执行 | execution profile + DOM/坐标回退 | 已实现 | 模型离线仍可完成普通页面操作 |
 | 重型页面预算、超时分阶段和连接保活 | reader budgets + heartbeat | 已实现 | 超预算返回 partial/可恢复状态 |
 | `chrome://extensions` 可见 Chrome 窗口枚举 | Windows UI Automation + user32 | 已实现（Windows） | 只读；返回 PID/HWND/窗口标题，标题是不可信数据 |
-| 当前项目扩展单次 Reload | 专用 UIA 脚本 + MCP broker | 已实现且本机实测（Windows；2026-10-27，0.5.24，自动目标解析路径已实测） | **目标解析在能力内部完成**：只传 `confirmation` 时现场枚举可见 Chrome 窗口——恰好一个就用它，零个返回 `not_dispatched`/`no_visible_chrome_window`，多个返回 `denied`/`chrome_target_ambiguous` 并列出候选而**不猜**；也可显式传 `processId`/`windowHandle`（仍要求近期枚举过）。固定 confirmation 值只是调用方声明，不是服务端人类身份认证；不同后续调用不会自动去重，每次需新批准；新开固定 ID 详情页保留当前页，UIA 联合核验目标控件；必须观察到新 Bridge 扩展会话及正确版本；超时/未知不重试 |
+| 当前项目扩展单次 Reload | 扩展自我重载（`chrome.runtime.reload`）优先；Windows UI Automation 兜底 | 已实现且本机实测（2026-10-27，0.5.25，两条路径各跑通一次） | **已连接时不需要前台**：扩展自己重启，不开标签不发按键，服务端以「新会话 + 期望版本」为唯一成功证据，未观测到则 `uncertain`。**断连时**才回退 UIA（`focusRequired: true`），目标解析在能力内部完成——恰好一个可见窗口就用，零个 `not_dispatched`，多个 `denied` + 候选**不猜**；UIA 路径事后在「前台窗口句柄 + 地址栏仍为 chrome://extensions」双重复核下关闭临时标签，任一不符就保留并说明。固定 confirmation 只是调用方声明；每次调用需新批准；`uncertain` 后不重放 |
 | 停靠式 DevTools 观察、已打开面板选择 | `browser_devtools` + Windows UI Automation | 源码候选0.5.24；面板选择本机单窗口实测，完整版本匹配待部署 | 精确 PID/HWND、目标地址绑定；**不暴露 open/F12**：UIA 未观察到 DevTools 不能证明已关闭，且全局 F12 存在焦点竞态；`devtoolsState` 只报 open/unknown；面板选择要求 UIA 正向识别 + 唯一可见 TabItem + 回读选中态；分离窗口的目标标签绑定未实现 |
 | DevTools Console/Network/Sources/Performance 只读捕获 | `browser_devtools_capture` + CDP（`chrome.debugger`） | 源码候选0.5.24；单元契约 15/15，真实 Chrome 现场验收待做 | 单次 attach 内先 enable 后采集，窗口内事件才可见，空结果不证明没发生；仅该 tab target，其它 tab/worker/SW/OOPIF 不在内；有界缓冲并如实上报 dropped/truncated；网络只留方法/去 query 的 URL/状态/类型/耗时，不含 header/cookie/body；console 对象参数按类型摘要不序列化；不做请求重放、脚本编辑、断点调试 |
 | `chrome://settings` 设置读写与逐项验证 | 尚无执行适配器 | 未实现 | 按具体设置项建立 UIA 通路；尚无完整读/写/回读闭环 |
@@ -50,6 +50,8 @@ REA 明确这是静态证据：未执行扩展启动代码，动态名称、运�
 | `browser_devtools_capture` | 可用，能读到后台标签的 console 输出 |
 | `browser_prepare_coordinate` | 可用，签发 token，返回 `evidenceQuality` |
 | `browser_action` `Tap` / `Hover` | 可用，**点击真实落到预备的 DOM 目标**（计数器 1→2） |
+| `browser_reload_extension` | 可用且**不需要前台**：扩展自我重载（`chrome.runtime.reload`），服务端以新会话+版本为证据 |
+| `browser_launch` | 与焦点无关：只在无 chrome 进程时启动，且不带任何 profile 标志 |
 | `requireForeground:true` 下的上述坐标工具 | 按请求拒绝，返回 `waiting`/`page_not_foreground`，且不签发、不销毁 token |
 
 **门禁分层**（`extension/worker.js` `pointerForeground()`）：
@@ -76,8 +78,10 @@ REA 明确这是静态证据：未执行扩展启动代码，动态名称、运�
 | 隐身 | `browser_tabs` 默认排除隐身标签并回 `incognito`；扩展也无法静默创建隐身标签（独立 cookie 罐，会表现为未登录） | 同上 |
 | 关标签 | 只关本桥创建的标签。归属记在 `chrome.storage.session`（worker 挂起后仍有效，浏览器关闭即清）。非本桥标签返回 `denied`/`tab_not_created_by_bridge`，需 `force:true` | `test/tab-identity.test.js` |
 | 会话保持 | manifest 未申请 `cookies`/`browsingData`，全仓库无清 cookie、清存储、生产 `--disable-*`；服务启停不触碰用户标签 | 静态审计 |
+| 启动浏览器 | `browser_launch` 仅在**没有任何 chrome 进程**时启动；已有进程一律 `not_dispatched`/`chrome_already_running` 并回候选。启动参数**只有 URL**，不带 `--user-data-dir`/`--profile-directory`/`--incognito`，因此沿用用户默认 profile | `test/launch-chrome.test.js` 8/8、现场 `not_dispatched` |
+| 扩展重载 | 已连接时用 `chrome.runtime.reload()` **自我重载**（无焦点、无标签、无按键），服务端等新会话+版本才判 `verified`；断连时回退 UIA 并标注 `focusRequired: true`；UIA 路径事后在双重复核下关掉临时标签 | `test/reload-native.test.js` 5/5、现场两条路各跑通一次 |
 
-**未实现**：浏览器没在运行时主动拉起（必须用**同一个** profile，否则丢 Cookie 导致账号互踢）；`browser_reload_extension` 每次用 `Alt+Enter` 新开一个 `chrome://extensions` 标签且事后不关闭，属于「创建优于复用」的反例。
+**仍然未实现**：`--profile-directory` 的场景无法可靠探测——若用户平时用非默认 profile 启动 Chrome，裸 `chrome.exe` 会落到 Chrome 记住的上次使用 profile，可能与预期不同；这一点在 `browser_launch` 的返回里没有假装能识别。
 
 ## 推荐执行策略
 

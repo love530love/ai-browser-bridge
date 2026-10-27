@@ -16,3 +16,6 @@ bridge-autostart.cmd
 
 # graphify code-graph output (generated, machine-local)
 graphify-out/
+
+# Scratch files used while working; never commit these.
+.tmp-*

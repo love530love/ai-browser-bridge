@@ -443,6 +443,18 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     await tabOwnership.mark(tab.id);
     return { tabId: tab.id, url: targetUrl, reused: false, activated: wantActive, incognito: false, loading: true };
   }
+  if (name === 'browser_reload_extension') {
+    // chrome.runtime.reload() restarts this extension in place. No window is
+    // brought forward, no tab is opened, no keystroke is synthesised, so the
+    // reload has no focus dependency at all - unlike the Windows UI Automation
+    // path, which has to type into a real chrome://extensions tab.
+    //
+    // The reply must leave before the worker is torn down, hence the delay.
+    setTimeout(() => { try { chrome.runtime.reload(); } catch { /* the service reports an unverified reload */ } }, 80);
+    return { status: 'success', retryable: false, reason: 'extension_reload_dispatched', dispatched: true,
+      verified: false, method: 'chrome.runtime.reload',
+      nextStep: 'This worker unloads and reloads, then reconnects with a new session id. The service confirms it by observing that new session and version.' };
+  }
   if (!Number.isInteger(args.tabId) || args.tabId < 1) throw new Error('Invalid tabId');
   const tab = await chrome.tabs.get(args.tabId);
   checkedUrl(tab.url, config);

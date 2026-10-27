@@ -1,3 +1,16 @@
+## 0.5.25 — 2026-10-27（已部署，本机实测）
+
+- **扩展自我重载**：`browser_reload_extension` 在扩展已连接时改走 `chrome.runtime.reload()`——不抢焦点、不开标签、不发按键，**彻底摆脱前台依赖**。服务端不信派发回包，而是等待一个**新的扩展会话 + 期望版本**出现才算 `verified`；超时返回 `uncertain`/`extension_reload_not_observed`，绝不把「已派发」说成「已完成」。
+- **优雅降级**：扩展未连接（或旧 worker 没有自我重载分支）时自动回退到 Windows UI Automation 路径，并在结果里明确 `method: "windows_ui_automation"`、`focusRequired: true`、`fallbackReason`。两条路都可观测、可区分，不假装一致。
+- **UIA 路径不再遗留标签**：该路径用 `Alt+Enter` 新开 `chrome://extensions` 标签以免导航掉用户当前页；现在成功后会在**重新校验前台窗口句柄 + 地址栏仍为 `chrome://extensions`** 的前提下用 `Ctrl+W` 关掉它，并把 `temporaryTabClosed` 回传给调用方。任一校验不通过就保留标签并如实说明——遗留一个标签的代价，远小于关错一个用户页面。
+- **浏览器进程生命周期**：新增 `browser_launch`。仅在**没有任何 chrome 进程**时启动；已有进程一律 `not_dispatched`/`chrome_already_running` 并回进程数与窗口候选（复用优先）。启动参数**只有 URL**——不带 `--user-data-dir`、不带 `--profile-directory`、不带 `--incognito`，因此用的是用户默认 profile，Cookie 与登录态连续。启动后等待扩展回连，回 `extensionConnected: true` 才算成功；浏览器起来了但扩展没连上则返回 `uncertain`。
+- 修复 `test/focus-matrix.js` 的标签泄漏：原清理只关了被重新赋值为「后台标签」的那一个，第二个 fixture 标签**每跑一次漏一个**（本轮实测已积累 7 个，已按标题+URL 双重确认后清理）。现在记录所有打开的标签并逐个关闭。
+- 服务端把任务入队逻辑抽成 `enqueueJob`，让自我重载走同一套优先级与超时；新增 `reloadVerifyTimeoutMs` / `launchConnectTimeoutMs` 两个可注入超时，使「未观测到新会话」这条分支可被测试而不是靠猜。
+- 新增测试：`test/reload-native.test.js` 5/5（自我重载成功、旧扩展降级、未连接走 UIA、写入进行中拒绝重载、未观测到新会话返回 uncertain）、`test/launch-chrome.test.js` 8/8（已运行拒绝、成功回传、非 http 拒绝、无可见窗口 uncertain、超时 uncertain、非法输出失败、非 Windows unavailable）。
+- 现场实测（2026-10-27）：服务 `buildId f0f435fe…`，`doctor` 10/10。第一次 reload 走 UIA 回退（`fallbackReason: extension_cannot_self_reload`，旧 worker 无该分支），第二次 reload 走 `chrome.runtime.reload`（`focusRequired: false`，会话 id 已变）——两条路都在真实 Chrome 上跑通。`browser_launch` 在 Chrome 已运行时正确返回 `not_dispatched/chrome_already_running`。
+- 回归：`test/focus-matrix.js` 25/25、`test/live-session.js` 17/17、`test/live-capture.js` 9/9。
+- 版本号与 manifest 升到 0.5.25。
+
 ## 0.5.24 — 2026-10-27（已部署，本机实测）
 
 - 新增只读捕获原语 `browser_devtools_capture`：在一次 debugger attach 内先 enable 再采集一个有界窗口，覆盖 DevTools Console（`Runtime.consoleAPICalled`、`Runtime.exceptionThrown`、`Log.entryAdded`）、Network（请求/响应/完成/失败合并为一行）、Sources 脚本列表（`Debugger.scriptParsed`）与 Performance 指标（`Performance.getMetrics`）。

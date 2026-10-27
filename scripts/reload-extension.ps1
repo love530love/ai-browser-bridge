@@ -198,6 +198,41 @@ do {
     $newSessionObserved = -not [string]::IsNullOrWhiteSpace($sessionId) -and $sessionId -ne $baselineSessionId
     if ($status.connected -eq $true -and $status.extensionVersion -eq $expectedVersion -and $newSessionObserved) {
       Write-Host "A new extension connection is healthy (version $($status.extensionVersion))."
+      # Alt+Enter above opened a dedicated chrome://extensions tab precisely so
+      # the user's own tab was never navigated away. Close that tab again,
+      # otherwise every reload leaves one behind and the browser slowly fills up
+      # with them.
+      #
+      # Closing the wrong tab would destroy the user's work, so the identity of
+      # the tab is re-established first: the same window must still be in front,
+      # and the focused address bar must still read chrome://extensions. Any
+      # doubt leaves the tab open and says so - a leftover tab is cheap, a
+      # discarded user page is not.
+      try {
+        $stillForeground = [NativeWindow]::GetForegroundWindow() -eq $chromeWindow.Handle
+        $addressIsExtensions = $false
+        if ($stillForeground) {
+          $editCondition = [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Edit)
+          $root = [System.Windows.Automation.AutomationElement]::FromHandle($chromeWindow.Handle)
+          foreach ($edit in @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCondition))) {
+            try {
+              $value = [string]$edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
+              if (-not $edit.Current.IsOffscreen -and $value.StartsWith('chrome://extensions')) { $addressIsExtensions = $true }
+            } catch { }
+          }
+        }
+        if ($stillForeground -and $addressIsExtensions) {
+          $shell.SendKeys('^w')
+          Start-Sleep -Milliseconds 300
+          Write-Host 'Closed the temporary chrome://extensions tab opened for this reload.'
+        } else {
+          Write-Host 'Left the temporary chrome://extensions tab open: the foreground window or the address bar could not be re-verified.'
+        }
+      } catch {
+        Write-Host 'Left the temporary chrome://extensions tab open after a cleanup error.'
+      }
       exit 0
     }
   } catch { }

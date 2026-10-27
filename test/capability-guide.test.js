@@ -31,7 +31,7 @@ test('coordinates no longer claim to need the foreground, and Windows UI Automat
   assert.equal(capabilityGuide({ goal: 'reload the extension' }).focusRequired, false);
   const policy = capabilityGuide({ goal: '' }).focusPolicy;
   for (const tool of ['browser_prepare_coordinate', 'browser_action']) assert.ok(policy.backgroundSafeTools.includes(tool), tool);
-  for (const tool of ['browser_native_snapshot', 'browser_devtools', 'browser_reload_extension']) {
+  for (const tool of ['browser_native_snapshot', 'browser_devtools']) {
     assert.ok(policy.foregroundRequiredTools.includes(tool), tool);
   }
   assert.doesNotMatch(policy.guidance, /block the coordinate path/);
@@ -59,9 +59,22 @@ test('capability gaps are stated instead of being hidden behind a refusal', () =
   const guide = capabilityGuide({ goal: '登录' });
   const gaps = Object.fromEntries(guide.notImplemented.map(entry => [entry.capability, entry]));
   assert.equal(gaps['read values stored in the Chrome password manager'].status, 'impossible_by_design');
-  assert.equal(gaps['launch a browser when none is running'].status, 'not_implemented');
   assert.equal(gaps['breakpoints, stepping and script editing in Sources'].status, 'not_implemented');
   assert.match(guide.primary.prefer, /autofill/);
+  // Launching a browser used to be listed here. It is a capability now, so
+  // leaving it in the gap list would send agents looking for a workaround.
+  assert.equal(gaps['launch a browser when none is running'], undefined);
+});
+
+test('launching and reloading are both advertised as background-safe', () => {
+  const launch = capabilityGuide({ goal: '浏览器没启动，帮我拉起来' });
+  assert.equal(launch.primary.intent, 'launch-browser');
+  assert.equal(launch.focusRequired, false);
+  assert.match(launch.primary.why, /second profile|incognito/);
+  const policy = capabilityGuide({ goal: '' }).focusPolicy;
+  assert.ok(policy.backgroundSafeTools.includes('browser_launch'));
+  assert.ok(policy.backgroundSafeTools.includes('browser_reload_extension'));
+  assert.ok(!policy.foregroundRequiredTools.includes('browser_reload_extension'));
 });
 
 test('reload guidance points at the capability itself, not at a manual step', () => {

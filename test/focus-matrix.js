@@ -73,6 +73,7 @@ const waitReady = async tabId => {
 
 let foregroundTab = null;
 let backgroundTab = null;
+const openedTabs = [];
 let blocked = null;
 try {
   await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
@@ -84,8 +85,10 @@ try {
   }
   const first = await call('browser_open', { url: base });
   foregroundTab = first.tabId;
+  openedTabs.push(first.tabId);
   await waitReady(foregroundTab);
   const second = await call('browser_open', { url: `${base}second` });
+  openedTabs.push(second.tabId);
   await waitReady(second.tabId);
   // Activating the second tab makes the first one a real background tab.
   await call('browser_history', { tabId: second.tabId, action: 'activate' });
@@ -194,8 +197,14 @@ try {
   if (!blocked) record('fixture setup', 'ok', 'error', error.message);
 }
 
-if (backgroundTab) { step('closing fixture tabs'); await bounded(call('browser_close', { tabId: backgroundTab }).catch(() => {}), 8000); }
-if (foregroundTab && foregroundTab !== backgroundTab) await bounded(call('browser_close', { tabId: foregroundTab }).catch(() => {}), 8000);
+// Every tab this script opens is tracked here. An earlier version only closed
+// the tab it had reassigned as "the background one", so the second fixture tab
+// leaked on every run - which is precisely the kind of leftover the ownership
+// rule exists to make visible.
+if (openedTabs.length) step('closing fixture tabs');
+for (const tabId of [...new Set(openedTabs)]) {
+  await bounded(call('browser_close', { tabId }).catch(() => {}), 8000);
+}
 try { fixture.closeAllConnections?.(); } catch { /* older runtimes */ }
 await bounded(new Promise(resolve => fixture.close(resolve)), 3000);
 step('cleanup done');
