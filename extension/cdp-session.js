@@ -20,6 +20,10 @@ const MAX_HITS = 50;
 const MAX_FRAMES = 40;
 const MAX_RESULT_CHARS = 4000;
 const MAX_EXPRESSION_CHARS = 4000;
+// A replacement script is whole-file text, so it is bounded far higher than an
+// expression. It is refused rather than truncated: a truncated script would be
+// applied as a corrupt edit, which is worse than not editing at all.
+const MAX_SCRIPT_SOURCE_CHARS = 2000000;
 
 function clampText(value, limit = MAX_RESULT_CHARS) {
   const text = typeof value === 'string' ? value : String(value ?? '');
@@ -415,8 +419,116 @@ export function createSessionManager({
       };
     }
 
+    if (action === 'set_script_source') {
+      const scriptId = typeof args.scriptId === 'string' ? args.scriptId.trim() : '';
+      if (!scriptId) {
+        return { status: 'denied', retryable: false, reason: 'invalid_script_id', dispatched: false,
+          message: 'set_script_source needs scriptId: the scriptId that action:"scripts" reports for the script to edit.' };
+      }
+      if (typeof args.source !== 'string' || !args.source.trim()) {
+        return { status: 'denied', retryable: false, reason: 'empty_source', dispatched: false,
+          message: 'set_script_source needs source: the complete replacement text for that script. Blank or non-string source is refused rather than sent, because it would blank the script.' };
+      }
+      if (args.source.length > MAX_SCRIPT_SOURCE_CHARS) {
+        return { status: 'denied', retryable: false, reason: 'source_too_large', dispatched: false,
+          sourceChars: args.source.length, limit: MAX_SCRIPT_SOURCE_CHARS,
+          message: `The replacement source is ${args.source.length} characters, over the ${MAX_SCRIPT_SOURCE_CHARS} limit. It was not truncated: a truncated script would be applied as a corrupt edit.` };
+      }
+      // Applying is the default; dryRun is only ever what the caller asked for,
+      // so the payload can state which of the two happened without guessing.
+      const dryRun = args.dryRun === true;
+      let result;
+      try {
+        result = await send(tabId, 'Debugger.setScriptSource', { scriptId, scriptSource: args.source, dryRun });
+      } catch (error) {
+        // Deliberately not retried. A second attempt cannot distinguish a failed
+        // edit from one that already landed, and re-applying a half-applied
+        // source edit is not a harmless retry.
+        const detail = String(error?.message ?? 'unknown error');
+        // Measured, not inferred. Current Chrome answers this command with the
+        // ServerError "setScriptSource functionality no longer available", and
+        // V8's own inspector returns it from an unconditional stub:
+        // src/inspector/v8-debugger-agent-impl.cc,
+        // V8DebuggerAgentImpl::setScriptSource -> `return Response::ServerError(
+        // "setScriptSource functionality no longer available")` before any
+        // parameter is looked at. So no argument combination can make it work,
+        // and the reason is reported separately from a generic failure: a caller
+        // that sees "set_script_source_failed" would keep trying.
+        const removedByV8 = /setScriptSource functionality no longer available/i.test(detail);
+        return { status: 'failed', retryable: false,
+          reason: removedByV8 ? 'script_edit_removed_by_v8' : 'set_script_source_failed',
+          dispatched: true,
+          scriptId, dryRun, applied: false, cdpStatus: null, exceptionDetails: null, callFrames: [], frameCount: 0,
+          targetPaused: Boolean(paused),
+          ...(removedByV8 ? {
+            blockedBy: 'v8_inspector',
+            blockedCommand: 'Debugger.setScriptSource',
+            measuredEvidence: 'V8DebuggerAgentImpl::setScriptSource in src/inspector/v8-debugger-agent-impl.cc returns ServerError("setScriptSource functionality no longer available") unconditionally, and this browser returned exactly that text. Changing scriptId, source or dryRun cannot change the outcome.',
+            alternatives: [
+              'Runtime.evaluate can redefine a function or a global right now (for example `window.tick = function (n) { return n * 300; }`). That changes what the page runs immediately, but it is a value assignment, not a source edit: the script text, its line numbers and its source map stay as they were.',
+              'Page.addScriptToEvaluateOnNewDocument runs a script before the page\'s own scripts on the next navigation, which is a reload, not a live edit.',
+              'Fetch.requestPaused + Fetch.fulfillRequest can serve a modified response body for a network resource, which is how DevTools overrides work. It is not implemented here, and it also only takes effect on a new request.'
+            ]
+          } : {}),
+          message: removedByV8
+            ? 'Chrome refused Debugger.setScriptSource: V8 has replaced the command with a stub, so live source editing is not reachable over CDP on this browser. Nothing was changed. It was sent once and not retried.'
+            : `CDP rejected Debugger.setScriptSource: ${detail}. It was sent once and not retried.`,
+          recommendedNextAction: removedByV8
+            ? 'Do not send the edit again with different arguments: the command is a stub, so the result cannot change. Use action:"evaluate" to redefine the function for immediate effect, or accept that the source text itself cannot be rewritten.'
+            : 'Check that the script still exists with action:"scripts" and whether the page still runs before sending another edit.' };
+      }
+      const cdpStatus = typeof result?.status === 'string' ? result.status : null;
+      // "Ok" is the only status that means CDP accepted the edit. An unknown or
+      // missing status is reported as not applied, because a response that did
+      // not throw is not proof that anything changed.
+      const accepted = cdpStatus === 'Ok';
+      const applied = accepted && !dryRun;
+      const details = result?.exceptionDetails;
+      const exceptionDetails = details ? {
+        text: clampText(details.text ?? '', 800),
+        lineNumber: Number.isSafeInteger(details.lineNumber) ? details.lineNumber + 1 : null,
+        columnNumber: Number.isSafeInteger(details.columnNumber) ? details.columnNumber + 1 : null,
+        url: clampText(details.url ?? '', 300)
+      } : null;
+      const callFrames = Array.isArray(result?.callFrames)
+        ? result.callFrames.slice(0, MAX_FRAMES).map(summarizeFrame) : [];
+      const payload = {
+        status: accepted ? 'success' : 'failed',
+        retryable: false,
+        dispatched: true,
+        scriptId,
+        // The envelope "status" above says whether the bridge call succeeded;
+        // this is CDP's own status, verbatim, because only it distinguishes a
+        // compile error from a blocked edit from an applied one.
+        cdpStatus,
+        dryRun,
+        applied,
+        exceptionDetails,
+        callFrames,
+        frameCount: callFrames.length,
+        framesTruncated: Array.isArray(result?.callFrames) && result.callFrames.length > callFrames.length,
+        // A source edit against a frozen page is a different situation from one
+        // against a running page, and the caller has to know which it got.
+        targetPaused: Boolean(paused),
+        contentTrust: 'untrusted webpage data'
+      };
+      if (!accepted) {
+        return { ...payload, reason: 'script_edit_not_applied',
+          message: exceptionDetails
+            ? `CDP did not accept the edit (status "${cdpStatus ?? 'missing'}"): ${exceptionDetails.text} The page still runs its original script.`
+            : `CDP did not accept the edit (status "${cdpStatus ?? 'missing'}"). The page still runs its original script.`,
+          recommendedNextAction: 'Fix the reported problem and send the edit again, or pass dryRun:true to validate the source before applying it.' };
+      }
+      return { ...payload,
+        note: dryRun
+          ? 'dryRun was set, so CDP compiled the source but the page keeps its original script. Repeat the call without dryRun to apply it.'
+          : (paused
+            ? 'The page is paused at a breakpoint, so the edit landed while execution is frozen. The new source runs after resume.'
+            : undefined) };
+    }
+
     return { status: 'denied', retryable: false, reason: 'unsupported_debugger_action', dispatched: false,
-      supported: ['status', 'scripts', 'set_breakpoint', 'remove_breakpoint', 'pause', 'resume', 'step_over', 'step_into', 'step_out', 'frames', 'evaluate'] };
+      supported: ['status', 'scripts', 'set_breakpoint', 'remove_breakpoint', 'pause', 'resume', 'step_over', 'step_into', 'step_out', 'frames', 'evaluate', 'set_script_source'] };
   }
 
   async function closeAll(reason = 'shutdown') {
@@ -429,4 +541,4 @@ export function createSessionManager({
     list: () => [...sessions.values()].map(describe), size: () => sessions.size };
 }
 
-export const DEBUGGER_SESSION_LIMITS = { MAX_SCRIPTS, MAX_SCRIPT_LIST, MAX_HITS, MAX_FRAMES, MAX_RESULT_CHARS, MAX_EXPRESSION_CHARS };
+export const DEBUGGER_SESSION_LIMITS = { MAX_SCRIPTS, MAX_SCRIPT_LIST, MAX_HITS, MAX_FRAMES, MAX_RESULT_CHARS, MAX_EXPRESSION_CHARS, MAX_SCRIPT_SOURCE_CHARS };

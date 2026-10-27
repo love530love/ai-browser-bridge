@@ -8,10 +8,15 @@ try {
 try { $startupOwned = $startupMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $startupOwned = $true }
 if (-not $startupOwned) { Write-Host 'Bridge startup is already in progress. Check doctor after it completes.'; exit 0 }
 $pauseFile = Join-Path $projectRoot '.local/service-paused'
-# Guarded on purpose: a hard Remove-Item on a path that is not there is a no-op
-# for PowerShell, but any filesystem shim that fails closed on delete turns the
-# normal "no pause marker" case into a startup failure.
-if (Test-Path -LiteralPath $pauseFile) { Remove-Item -LiteralPath $pauseFile -Force -ErrorAction SilentlyContinue }
+# Deleted through the .NET API rather than Remove-Item on purpose. A pause
+# marker left behind by stop.ps1 must never be able to block a start: any
+# filesystem shim that fails closed on delete turns this cleanup into a fatal
+# startup error (measured here: SAFE_DELETE_FAIL_CLOSED / trash-failed), and a
+# cmdlet shim can shadow Remove-Item but not [System.IO.File].
+if ([System.IO.File]::Exists($pauseFile)) {
+  try { [System.IO.File]::Delete($pauseFile) }
+  catch { Write-Host "Pause marker could not be cleared and was left in place: $($_.Exception.Message)" }
+}
 $nodePath = (Get-Command node.exe -ErrorAction Stop).Source
 & $nodePath (Join-Path $projectRoot 'src\cli.js') setup
 if ($LASTEXITCODE -ne 0) { throw 'Setup failed' }

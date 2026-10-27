@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.7.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.8.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.8.0 补上了 0.7.0 留下的那个缺口：**从 Chrome 自己的密码管理器读回单个站点密码**（`browser_password_manager_reveal`）。用 Windows UI Automation 驱动 `chrome://password-manager/passwords`，像人一样搜站点、开条目、点「显示密码」，把明文读回来——这不是绕过浏览器，而是使用浏览器：CDP 对任何 `chrome://` 页面硬阻断（`Cannot access a chrome:// URL`），内容脚本进不去（`match_origin_as_fallback` 只覆盖 `about:`/`data:`/`blob:`/`filesystem:`），`chrome.passwordsPrivate` 只发给组件扩展。边界写死在代码里：一次一个站点、条目名精确匹配、详情页再按 scheme+host+port 绑一次 origin、审计只记站点哈希不记值、Chrome 把揭示交给操作系统提示时只报 `waiting_for_user_auth` 并请用户完成而绝不绕过。同一轮里试做 **live 脚本编辑**（`browser_debugger` 的 `set_script_source`），结果是一个必须说清的否定结论：V8 已把 `Debugger.setScriptSource` 换成无条件返回 `ServerError("setScriptSource functionality no longer available")` 的空壳，换任何参数都不会变，因此该动作如实返回 `reason:"script_edit_removed_by_v8"`、`blockedBy:"v8_inspector"` 并附替代路径，而不是假装能改。现场验收 56/56。详见 [Chrome 能力矩阵](docs/CHROME-CAPABILITY-MATRIX.md)。
 
 0.7.0 做的是**自动登录闭环**：`browser_login_state` 判断当前处于凭据、验证码还是已登录阶段（只报字段有没有值，不回传任何值），`browser_otp_fetch` 从已登录的邮箱标签里抽验证码并**刻意返回多个候选**、每个带发件人与主题，`browser_credential_lookup` 读本机 Chrome 已保存的登录。同时把可访问名计算按 ARIA 规范重写（补上原先完全没读的 `aria-labelledby`）。**一个必须说清的事实**：在这台机器的 Chrome 154 上，读密码库**读不到已保存密码**——同一个 profile、同一把 key 能解开该 profile 自己的 cookies（12/12），但 177 条登录行一条都不通过认证，另用一台没有 app-bound key 的 Canary 复现同样结果，说明 Chrome 对密码用的不是这把 key。因此失败被拆成三种处置相反的原因（`app_bound_encryption` / `password_key_not_available` / `legacy_key_mismatch`），并附 `keyValidation` 用同 profile 的 cookie 反证 key。现场验收 30/30。详见 [Chrome 能力矩阵](docs/CHROME-CAPABILITY-MATRIX.md)。
 
@@ -30,7 +32,9 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 - 通过 DOM、Accessibility、Debugger、截图和坐标适配器进行分层兜底；没有 GPT 时仍可使用本地确定性工具链。
 - Windows 0.5.24 候选支持停靠式 DevTools 观察，以及在用户已打开 DevTools 后选择 Elements/Console/Network 面板；由于 UIA 负证据与全局 F12 焦点竞态，当前候选不自动打开 DevTools。
 - `browser_devtools_capture` 通过 CDP 在单次 attach 的有界窗口内只读捕获 Console 消息、异常、Network 请求行、Sources 脚本列表和 Performance 指标；空结果不证明没有发生，网络记录不含 header/cookie/body，缓冲溢出以 `dropped`/`truncated` 计数上报。
-- 仍未实现：请求重放、脚本编辑、断点调试、Console 输入执行、Chrome 设置修改、分离 DevTools 绑定和下载落盘核验。
+- `browser_password_manager_reveal` 读回 Chrome 自己保存的单个站点密码：用 Windows UI Automation 打开 `chrome://password-manager/passwords`、搜索、打开条目、点「显示密码」，再把明文交给调用方。一次只处理一个站点，条目名精确匹配（绝不做子串匹配），详情页再按 scheme+host+port 绑一次 origin 挡 lookalike；`siteCandidates` 会处理 `com.cn`/`co.uk` 这类多段公共后缀与 IPv4。返回 `success` / `waiting_for_user_auth` / `not_found`（附 `visibleEntries`）/ `uncertain` / `unavailable` / `denied`；Chrome 把揭示交给操作系统提示时只报 `waiting_for_user_auth` 并要求用户自己完成，之后用 `action:"read"` 再取，绝不绕过。代价是 `focusRequired: true`、`method: "windows_ui_automation"`，会短暂占用前台；打开用地址栏 `^l` + Alt+Enter 新标签（命令行传 `chrome://` 会被 Chrome 拒绝，只会开一个 New Tab），关标签前重读地址栏确认仍停在密码管理器，否则保留并说明。明文只回给调用方，不落盘不写日志，审计只记工具名与站点哈希前 16 位，结果里的 `handling` 说明这一点。
+- `browser_debugger` 的 `action:"set_script_source"` 已接线，但**被浏览器拒绝**，这是实测结论而不是没做：Chrome 对 `Debugger.setScriptSource` 返回 `ServerError("setScriptSource functionality no longer available")`，该错误来自 V8 里的一个无条件空壳（`V8DebuggerAgentImpl::setScriptSource`，看任何参数之前就返回）。因此该动作回 `reason:"script_edit_removed_by_v8"` + `blockedBy:"v8_inspector"` + `measuredEvidence` + 三条替代路径，`applied` 恒为 `false`，且**绝不重试**——换 `scriptId`/`source`/`dryRun` 都不可能改变结果。要改运行中页面的行为，用 `action:"evaluate"` 重定义函数或全局变量：立刻生效，但**改的是行为不是脚本文本**，行号与 source map 不变。
+- 仍未实现：请求重放、Console 输入执行、Chrome 设置修改、分离 DevTools 绑定和下载落盘核验；live 脚本编辑受浏览器限制不可达（见上）。
 - 支持多 Agent 队列、优先级、等待状态、标签页写租约、租约续期和服务重启恢复。
 - 支持上传目录白名单、SHA256 校验、Agent 作用域、origin 白名单、内容边界和审计脱敏。
 - 提供 `doctor`、`browser_health`、`browser_execution_profile`、网络/性能诊断和本地滚动日志。
@@ -190,7 +194,7 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 }
 ```
 
-MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 45 个工具，`browser_screenshot` 返回 MCP 图片内容。
+MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 61 个工具，`browser_screenshot` 返回 MCP 图片内容。
 
 ### CLI 客户端
 

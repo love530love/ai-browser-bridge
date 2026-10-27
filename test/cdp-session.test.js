@@ -297,3 +297,161 @@ test('closing everything resumes each paused target first', async () => {
   assert.equal(h.manager.size(), 0);
   assert.equal(h.timers.size, 0);
 });
+
+test('a source edit reports the CDP status verbatim and only claims applied when CDP said Ok', async () => {
+  const sent = [];
+  const h = harness({
+    responses: {
+      'Debugger.setScriptSource': params => {
+        sent.push(params);
+        return { scriptId: 's1', status: 'Ok', callFrames: pausedEvent().callFrames };
+      }
+    }
+  });
+  await h.manager.open({ tabId: 7 });
+  const result = await h.manager.call({ tabId: 7, action: 'set_script_source',
+    args: { scriptId: 's1', source: 'function f() { return 2; }' } });
+  assert.equal(result.status, 'success');
+  assert.equal(result.cdpStatus, 'Ok');
+  assert.equal(result.applied, true);
+  assert.equal(result.dryRun, false, 'the payload must never leave it ambiguous whether the edit landed');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].scriptId, 's1');
+  assert.equal(sent[0].scriptSource, 'function f() { return 2; }');
+  assert.equal(sent[0].dryRun, false, 'applying is the default when the caller omits the flag');
+  // The refreshed frames use the same shape action:"frames" reports, so a
+  // caller does not have to learn a second frame schema.
+  assert.equal(result.frameCount, 2);
+  assert.equal(result.callFrames[0].lineNumber, 10);
+  assert.deepEqual(result.callFrames[0].scopeTypes, ['local', 'closure', 'global']);
+  assert.equal(JSON.stringify(result.callFrames).includes('"value"'), false,
+    'a scope can hold megabytes and secrets, so frames must not dump it here either');
+});
+
+test('dryRun is passed through and the result says nothing was applied', async () => {
+  const sent = [];
+  const h = harness({
+    responses: { 'Debugger.setScriptSource': params => { sent.push(params); return { scriptId: 's1', status: 'Ok' }; } }
+  });
+  await h.manager.open({ tabId: 7 });
+  const result = await h.manager.call({ tabId: 7, action: 'set_script_source',
+    args: { scriptId: 's1', source: 'let a = 1;', dryRun: true } });
+  assert.equal(sent[0].dryRun, true, 'the flag must reach CDP, not just the response');
+  assert.equal(result.dryRun, true);
+  assert.equal(result.applied, false, 'a dry run compiled the source but the page still runs the old one');
+  assert.equal(result.cdpStatus, 'Ok');
+  assert.match(result.note, /dryRun/);
+});
+
+test('a compile error is surfaced instead of being reported as a successful edit', async () => {
+  const h = harness({
+    responses: {
+      'Debugger.setScriptSource': () => ({ scriptId: 's1', status: 'CompileError',
+        exceptionDetails: { text: 'Uncaught SyntaxError: Unexpected token', lineNumber: 4, columnNumber: 2, url: 'https://a.example/app.js' } })
+    }
+  });
+  await h.manager.open({ tabId: 7 });
+  const result = await h.manager.call({ tabId: 7, action: 'set_script_source',
+    args: { scriptId: 's1', source: 'function (' } });
+  // A response that did not throw is not proof the edit took effect.
+  assert.equal(result.status, 'failed');
+  assert.equal(result.applied, false);
+  assert.equal(result.cdpStatus, 'CompileError');
+  assert.equal(result.exceptionDetails.text.includes('SyntaxError'), true, 'the reason must not be swallowed');
+  assert.equal(result.exceptionDetails.lineNumber, 5, 'the protocol counts lines from 0, humans from 1');
+  assert.equal(result.exceptionDetails.columnNumber, 3);
+  assert.match(result.message, /CompileError/);
+  assert.equal(result.retryable, false);
+});
+
+test('the V8 stub for setScriptSource is reported as a browser limit, not a retryable failure', async () => {
+  // Measured on the real browser and confirmed in V8's source: this command is
+  // an unconditional ServerError stub, so "failed" would invite a caller to try
+  // again with a different scriptId or without dryRun - and it can never work.
+  const h = harness({ responses: { 'Debugger.setScriptSource': () => {
+    throw new Error('{"code":-32000,"message":"setScriptSource functionality no longer available"}');
+  } } });
+  await h.manager.open({ tabId: 7 });
+  const result = await h.manager.call({ tabId: 7, action: 'set_script_source',
+    args: { scriptId: 's1', source: 'let a = 1;' } });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'script_edit_removed_by_v8');
+  assert.equal(result.blockedBy, 'v8_inspector');
+  assert.equal(result.blockedCommand, 'Debugger.setScriptSource');
+  assert.match(result.measuredEvidence, /unconditional/i);
+  assert.equal(result.applied, false);
+  assert.equal(result.retryable, false);
+  assert.match(result.message, /stub/);
+  assert.match(result.recommendedNextAction, /Do not send the edit again/);
+  // The substitute has to be named, otherwise the caller is left with a dead end.
+  assert.equal(Array.isArray(result.alternatives), true);
+  assert.match(result.alternatives.join(' '), /Runtime\.evaluate/);
+  assert.equal(h.log.filter(entry => entry === 'Debugger.setScriptSource').length, 1);
+});
+
+test('a rejected CDP call is a structured failure and is never retried', async () => {
+  const h = harness({ responses: { 'Debugger.setScriptSource': () => { throw new Error('Inspector.detached'); } } });
+  await h.manager.open({ tabId: 7 });
+  const result = await h.manager.call({ tabId: 7, action: 'set_script_source',
+    args: { scriptId: 's1', source: 'let a = 1;' } });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'set_script_source_failed');
+  assert.equal(result.retryable, false);
+  assert.equal(result.applied, false);
+  assert.equal(result.dispatched, true);
+  assert.match(result.message, /Inspector\.detached/);
+  assert.equal(h.log.filter(entry => entry === 'Debugger.setScriptSource').length, 1,
+    'repeating a half-applied source edit is not a safe retry');
+});
+
+test('an empty or non-string source is refused without sending anything', async () => {
+  const h = harness();
+  await h.manager.open({ tabId: 7 });
+  const blank = await h.manager.call({ tabId: 7, action: 'set_script_source', args: { scriptId: 's1', source: '   ' } });
+  assert.equal(blank.status, 'denied');
+  assert.equal(blank.reason, 'empty_source');
+  assert.equal(blank.dispatched, false);
+  const wrongType = await h.manager.call({ tabId: 7, action: 'set_script_source', args: { scriptId: 's1', source: 42 } });
+  assert.equal(wrongType.reason, 'empty_source');
+  const noScript = await h.manager.call({ tabId: 7, action: 'set_script_source', args: { source: 'let a = 1;' } });
+  assert.equal(noScript.reason, 'invalid_script_id');
+  assert.match(noScript.message, /scriptId/);
+  assert.equal(h.log.includes('Debugger.setScriptSource'), false, 'a malformed edit must never reach Chrome');
+});
+
+test('an oversized source is refused rather than truncated into a corrupt edit', async () => {
+  const h = harness();
+  await h.manager.open({ tabId: 7 });
+  const source = 'a'.repeat(DEBUGGER_SESSION_LIMITS.MAX_SCRIPT_SOURCE_CHARS + 1);
+  const result = await h.manager.call({ tabId: 7, action: 'set_script_source', args: { scriptId: 's1', source } });
+  assert.equal(result.status, 'denied');
+  assert.equal(result.reason, 'source_too_large');
+  assert.equal(result.sourceChars, source.length);
+  assert.equal(h.log.includes('Debugger.setScriptSource'), false);
+});
+
+test('editing source without an open session returns the no-session shape', async () => {
+  const h = harness();
+  const result = await h.manager.call({ tabId: 7, action: 'set_script_source',
+    args: { scriptId: 's1', source: 'let a = 1;' } });
+  assert.equal(result.status, 'not_dispatched');
+  assert.equal(result.reason, 'no_debugger_session');
+  assert.equal(result.dispatched, false);
+  assert.equal(result.nextPollArgs.action, 'open');
+  assert.equal(h.log.includes('Debugger.setScriptSource'), false);
+});
+
+test('editing while paused is allowed and reports that the page is frozen', async () => {
+  const h = harness({
+    responses: { 'Debugger.setScriptSource': () => ({ scriptId: 's1', status: 'Ok', callFrames: pausedEvent().callFrames }) }
+  });
+  await h.manager.open({ tabId: 7 });
+  h.manager.handleEvent(7, 'Debugger.paused', pausedEvent());
+  const result = await h.manager.call({ tabId: 7, action: 'set_script_source',
+    args: { scriptId: 's1', source: 'function f() { return 2; }' } });
+  assert.equal(result.applied, true);
+  assert.equal(result.targetPaused, true, 'the caller has to know the page was frozen while the edit landed');
+  assert.match(result.note, /paused/);
+  assert.equal(h.manager.get(7).paused !== null, true, 'an edit must not resume the target behind the caller');
+  assert.equal(h.log.includes('Debugger.resume'), false);
+});

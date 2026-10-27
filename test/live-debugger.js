@@ -233,7 +233,82 @@ try {
     typeof liveRead?.url === 'string' && Array.isArray(liveRead?.elements),
     `url=${liveRead?.url ?? 'none'} elements=${liveRead?.elements?.length ?? 'none'} status=${liveRead?.status ?? 'absent'}`);
 
-  // 14. Closing must leave the page running, and the session must be gone.
+  // 14. Live script editing: this section asserts the measured answer, not the
+  //     hoped-for one. V8 replaced Debugger.setScriptSource with an
+  //     unconditional ServerError stub, so the only honest acceptance test is
+  //     "the browser refuses it, says why, and nothing is left half-applied" -
+  //     plus proof that the named substitute really does change behaviour.
+  //     The source is read back from the page instead of rebuilt from `lines`:
+  //     a reconstructed string that differs by one whitespace character would
+  //     still compile and the test would pass while editing nothing real.
+  //     document.scripts[0] is not necessarily ours (an extension-injected tag
+  //     can sit first and carries no textContent), so the script is selected by
+  //     its own content rather than by index.
+  const rawSource = await call('browser_debugger', {
+    tabId, action: 'evaluate',
+    expression: '[...document.scripts].map(s => s.textContent).find(t => t.includes("window.tick")) ?? ""'
+  });
+  const originalSource = String(rawSource?.value ?? '');
+  record('the page script source can be read back verbatim', true,
+    originalSource.includes('return n * 2;'), `chars=${originalSource.length}`);
+  const editedSource = originalSource.replace('return n * 2;', 'return n * 300;');
+  record('the edit target exists exactly once', true,
+    editedSource !== originalSource && !editedSource.includes('return n * 2;'), 'return n * 2; -> return n * 300;');
+
+  const dry = await call('browser_debugger', { tabId, action: 'set_script_source', scriptId: target?.scriptId, source: editedSource, dryRun: true });
+  record('the source edit reaches Chrome and is refused', 'failed', dry?.status, `reason=${dry?.reason ?? 'none'} dispatched=${dry?.dispatched}`);
+  record('the refusal names the browser as the cause', 'script_edit_removed_by_v8', dry?.reason, 'reason');
+  record('the refusal names which component blocks it', 'v8_inspector', dry?.blockedBy, `blockedCommand=${dry?.blockedCommand ?? 'none'}`);
+  record('the refusal carries the evidence, not just a verdict', true,
+    /unconditional/i.test(String(dry?.measuredEvidence ?? '')), `measuredEvidence=${String(dry?.measuredEvidence ?? '').slice(0, 90)}`);
+  record('a refused edit is never reported as applied', false, dry?.applied, `dryRun=${dry?.dryRun}`);
+  record('a refused edit is never marked retryable', false, dry?.retryable, 'retryable');
+  record('the refusal names the substitute', true,
+    Array.isArray(dry?.alternatives) && dry.alternatives.join(' ').includes('Runtime.evaluate'),
+    `alternatives=${Array.isArray(dry?.alternatives) ? dry.alternatives.length : 'none'}`);
+
+  // The source text must be untouched: a stub that half-applied would be worse
+  // than one that refused.
+  const afterDry = await call('browser_debugger', { tabId, action: 'evaluate', expression: 'window.tick(3)' });
+  record('a refused source edit leaves the page on its original script', 6, afterDry?.value,
+    'window.tick(3) with the original `return n * 2;`');
+  const reread = await call('browser_debugger', {
+    tabId, action: 'evaluate',
+    expression: '[...document.scripts].map(s => s.textContent).find(t => t.includes("window.tick")) ?? ""'
+  });
+  record('the script text on the page is byte-identical afterwards', originalSource.length,
+    String(reread?.value ?? '').length, 'character count');
+
+  // Applying for real must fail the same way, and must not be silently retried
+  // into a different answer.
+  const applied = await call('browser_debugger', { tabId, action: 'set_script_source', scriptId: target?.scriptId, source: editedSource });
+  record('applying is refused for the same reason', 'script_edit_removed_by_v8', applied?.reason, `status=${applied?.status}`);
+  record('the refusal reports which script was targeted', target?.scriptId, applied?.scriptId, 'scriptId');
+  record('the refusal does not claim the page was paused', false, applied?.targetPaused, 'targetPaused');
+
+  // The substitute that the refusal names has to actually work, otherwise the
+  // guidance is pointing at another dead end.
+  const redefined = await call('browser_debugger', {
+    tabId, action: 'evaluate', expression: 'window.tick = function (n) { return n * 300; }; "redefined"'
+  });
+  record('the substitute runs without a reload', 'redefined', redefined?.value, `type=${redefined?.type}`);
+  const afterRedefine = await call('browser_debugger', { tabId, action: 'evaluate', expression: 'window.tick(3)' });
+  record('the redefined function takes effect immediately', 900, afterRedefine?.value,
+    'window.tick(3) after evaluate, no reload and no source edit');
+  const textAfterRedefine = await call('browser_debugger', {
+    tabId, action: 'evaluate',
+    expression: '[...document.scripts].map(s => s.textContent).find(t => t.includes("window.tick")) ?? ""'
+  });
+  record('the substitute changes behaviour but not the script text', originalSource.length,
+    String(textAfterRedefine?.value ?? '').length,
+    'the guidance says so, and this is what makes the difference observable');
+
+  // A blank source is refused before it is sent, because applying it would blank
+  // the script. The check is client-side, and this proves it is wired up live.
+  const blank = await call('browser_debugger', { tabId, action: 'set_script_source', scriptId: target?.scriptId, source: '   ' });
+  record('a blank source is refused without dispatching', 'denied', blank?.status, `reason=${blank?.reason ?? 'none'} dispatched=${blank?.dispatched}`);
+
+  // 15. Closing must leave the page running, and the session must be gone.
   const closed = await call('browser_debugger', { tabId, action: 'close' });
   sessionOpen = false;
   record('the session closes', 'success', closed?.status, `reason=${closed?.closeReason ?? 'none'} resumedBeforeClose=${closed?.resumedBeforeClose}`);

@@ -64,20 +64,34 @@ test('capability gaps are stated instead of being hidden behind a refusal', () =
   assert.equal(gaps['read values stored in the Chrome password manager'], undefined);
   assert.equal(gaps['trigger the Chrome password autofill popup'].status, 'not_implemented');
   // Measured, not assumed: the profile key still opens the profile's own cookies
-  // but not one login row, so the limit has to be stated as the browser's.
-  const blocked = gaps['read a saved password on a Chrome build that keeps the password key out of reach'];
+  // but not one login row, so offline decryption stays a stated limit - while the
+  // same value is reachable through the browser's own UI.
+  const blocked = gaps['decrypt saved passwords offline from the profile files'];
   assert.equal(blocked.status, 'blocked_by_browser');
   assert.match(blocked.note, /cookies/);
   assert.match(blocked.note, /password_key_not_available/);
-  // Breakpoints and stepping are a capability now (browser_debugger); only
-  // writing a modified script back into the page is still missing.
-  assert.equal(gaps['edit a live script in place, the way Sources live-edit does'].status, 'not_implemented');
-  assert.equal(gaps['breakpoints, stepping and script editing in Sources'], undefined);
+  assert.match(blocked.note, /browser_password_manager_reveal/);
+  assert.match(guide.primary.prefer, /browser_password_manager_reveal/);
   assert.match(guide.primary.prefer, /browser_login_state/);
   assert.match(guide.primary.prefer, /browser_credential_lookup/);
   // Launching a browser used to be listed here. It is a capability now, so
   // leaving it in the gap list would send agents looking for a workaround.
   assert.equal(gaps['launch a browser when none is running'], undefined);
+  // Breakpoints and stepping are a capability now (browser_debugger). Rewriting
+  // a script's source is not, and the reason is a browser limit that was
+  // measured, so it belongs in the gap list rather than in the feature list.
+  assert.equal(gaps['breakpoints, stepping and script editing in Sources'], undefined);
+  const liveEdit = gaps['edit a live script in place, the way Sources live-edit does'];
+  assert.equal(liveEdit.status, 'blocked_by_browser');
+  assert.match(liveEdit.note, /setScriptSource/);
+  assert.match(liveEdit.note, /script_edit_removed_by_v8/);
+  assert.match(liveEdit.note, /evaluate/);
+  // The guidance must send the caller to evaluate and must not let it retry a
+  // command the browser has stubbed out.
+  const debug = capabilityGuide({ goal: '给这个页面打个断点，然后改一下脚本' });
+  assert.equal(debug.primary.intent, 'debug-or-breakpoint');
+  assert.match(debug.primary.prefer, /script_edit_removed_by_v8/);
+  assert.match(debug.primary.prefer, /Do not retry/);
 });
 
 test('launching and reloading are both advertised as background-safe', () => {

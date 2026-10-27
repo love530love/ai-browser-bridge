@@ -24,8 +24,15 @@ if ($Method -eq 'StartupFolder') {
   New-Item -Path $runKey -Force | Out-Null
   Set-ItemProperty -LiteralPath $runKey -Name AIBrowserBridge -Value ('"' + $pwsh + '" ' + $arguments)
 }
-Remove-Item -LiteralPath (Join-Path $root '.local/watchdog-disabled') -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $root '.local/service-paused') -ErrorAction SilentlyContinue
+# Cleared through the .NET API, not Remove-Item: a filesystem shim that fails
+# closed on delete would otherwise abort the install on a path that may not even
+# exist, and the shim can shadow the cmdlet but not [System.IO.File].
+foreach ($stale in @('.local/watchdog-disabled', '.local/service-paused')) {
+  $stalePath = Join-Path $root $stale
+  if ([System.IO.File]::Exists($stalePath)) {
+    try { [System.IO.File]::Delete($stalePath) } catch { Write-Host "Left $stale in place: $($_.Exception.Message)" }
+  }
+}
 Start-Process -FilePath $pwsh -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Hidden | Out-Null
 Write-Host 'Health supervisor installed and launched. Check .local/watchdog-status.json and npm run doctor.'
 Write-Host 'stop.ps1 pauses recovery; start.ps1 resumes it. uninstall-autostart.ps1 disables the supervisor.'

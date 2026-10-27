@@ -18,6 +18,7 @@ import { capabilityGuide } from './capability-guide.js';
 import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
 import { lookupCredential, credentialOriginHash, CREDENTIAL_LOOKUP_CONFIRMATION } from './credential-store.js';
+import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMATION } from './password-manager.js';
 
 function equal(a, b) {
   return typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -428,6 +429,51 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
           message: String(error?.message ?? error).slice(0, 200), dispatched: false };
       });
   }
+  // Chrome's password manager is driven through Windows UI Automation, which is
+  // the only route left once CDP and extension APIs are excluded, so this call
+  // takes the desktop single-flight lock instead of the browser job queue.
+  function passwordManagerCall(args) {
+    const startedAt = Date.now();
+    const site = typeof args.site === 'string' ? args.site
+      : typeof args.url === 'string' ? args.url
+        : typeof args.origin === 'string' ? args.origin : '';
+    const siteHash = passwordManagerSiteHash(site);
+    if (args.confirmation !== PASSWORD_MANAGER_CONFIRMATION) {
+      throw new Error(`Invalid confirmation: ${JSON.stringify(args.confirmation)}. allowed: ${PASSWORD_MANAGER_CONFIRMATION}; expected string`);
+    }
+    if (desktopOperation) {
+      return Promise.resolve({ status: 'waiting', retryable: true, dispatched: false,
+        reason: 'service_busy', note: 'Another desktop operation is in progress; retry when it finishes.' });
+    }
+    return revealSavedPassword({
+      site, url: args.url, origin: args.origin, action: args.action,
+      windowHandle: args.windowHandle, processId: args.processId,
+      closeTab: args.closeTab, confirmation: args.confirmation
+    })
+      .then(result => {
+        audit({
+          time: new Date().toISOString(), id: randomUUID(), tool: 'browser_password_manager_reveal',
+          tabId: null, agent: args.agent ?? null,
+          outcome: result?.status === 'success' ? 'ok' : result?.status === 'denied' ? 'denied' : result?.status ?? 'error',
+          resultStatus: result?.status ?? null, dispatched: result?.dispatched === true,
+          errorCategory: typeof result?.reason === 'string' ? result.reason.slice(0, 80) : null,
+          siteHash,
+          credentialMatched: result?.status === 'success' ? 1 : 0,
+          durationMs: Date.now() - startedAt
+        });
+        return result;
+      })
+      .catch(error => {
+        audit({
+          time: new Date().toISOString(), id: randomUUID(), tool: 'browser_password_manager_reveal',
+          tabId: null, agent: args.agent ?? null, outcome: 'error', resultStatus: 'failed',
+          dispatched: false, errorCategory: 'password_manager_reveal_failed',
+          siteHash, durationMs: Date.now() - startedAt
+        });
+        return { status: 'failed', retryable: false, reason: 'password_manager_reveal_failed',
+          message: String(error?.message ?? error).slice(0, 200), dispatched: false };
+      });
+  }
   function desktopCall(name, args) {
     const startedAt = Date.now();
     if (name === 'browser_desktop_windows') {
@@ -679,6 +725,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (name === 'browser_reload_extension') return reloadCall(name, args, tool);
     if (name === 'browser_launch') return launchCall(name, args);
     if (name === 'browser_credential_lookup') return credentialCall(args);
+    if (name === 'browser_password_manager_reveal') return passwordManagerCall(args);
     if (name === 'browser_desktop_windows' || name === 'browser_devtools' || name === 'browser_native_snapshot') return desktopCall(name, args);
     if (LEASE_TOOLS.has(name)) return leaseCall(name, args, decision);
     if (!WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) leases.heartbeat(args.tabId, args.agent ?? null, name);
