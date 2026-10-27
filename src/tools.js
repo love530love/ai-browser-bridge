@@ -103,6 +103,13 @@ export const TOOLS = [
   tool('browser_performance', 'Read-only Chrome DevTools performance snapshot: navigation timing, layout metrics, long-task hints, and page readiness. Use to diagnose heavy SPA pages before choosing a read budget or screenshot.', { tabId, agent }, ['tabId'], true),
   tool('browser_network_summary', 'Read current main-frame Resource Timing buffer, including entries from before extension attachment if still retained. Empty does not prove no requests occurred. Omits query strings, credentials, headers and bodies. Not a network capture; other frames/workers and evicted records are excluded.', { tabId, maxEntries: { type: 'integer', minimum: 1, maximum: 200 }, agent }, ['tabId'], true),
   tool('browser_scan_overlays', 'Read-only scan for dialogs, ads, cookie banners, guide overlays, chat widgets, transparent blockers, close buttons, hit-test blockers, and scrollable containers. Use before clicking through complex or ad-heavy pages.', { tabId, agent }, ['tabId'], true),
+  tool('browser_devtools_capture', 'Read-only CDP capture of what a human reads in the DevTools Console, Network, Sources script list and Performance metrics for one tab, inside one bounded observation window. Domains are enabled only after the debugger attaches, so events emitted earlier are invisible and an empty list is not proof that nothing happened. Only this tab target is observed; other tabs, workers, service workers and out-of-process iframes are separate targets. Console object arguments are summarised by type and never serialised; network records exclude headers, cookies and bodies. Buffer overflow is reported as dropped/truncated counters. This is not request replay, not script editing, and not breakpoint debugging. If another debugger already owns the tab the call fails without dispatching.', {
+    tabId,
+    domains: { type: 'array', items: { type: 'string', enum: ['console', 'network', 'scripts', 'metrics'] }, minItems: 1, maxItems: 4 },
+    durationMs: { type: 'integer', minimum: 0, maximum: 5000 },
+    maxEvents: { type: 'integer', minimum: 1, maximum: 200 },
+    agent
+  }, ['tabId'], true),
   tool('browser_health', 'Layered health check for service/extension, permissions, Chrome tab.active, Chrome window.focused, document.visibilityState/hasFocus, viewport, page readiness, and tool version. These are separate states; use before coordinate input.', { tabId, agent }, [], true),
   tool('browser_bridge_modes', 'Read available browser-control modes and their fallback order: DOM, verified transactions, picker/upload bridges, CDP keyboard/pointer, screenshot, and coordinate adapter. Use to choose the least fragile mode.', { tabId, agent }, [], true),
   tool('browser_failure_help', 'Read-only retry guidance after a failed browser action. Classifies the failure, recommends the next safest bridge mode, and states whether retry is allowed or human confirmation is required.', {
@@ -203,6 +210,11 @@ function argSummary(name, schema) {
 function constraints(property) {
   const notes = [];
   if (property.enum) notes.push(`allowed: ${property.enum.join(' | ')}`);
+  if (property.type === 'array') {
+    notes.push('expected array');
+    if (property.minItems !== undefined || property.maxItems !== undefined) notes.push(`items ${property.minItems ?? 0}..${property.maxItems ?? 'unbounded'}`);
+    if (property.items?.enum) notes.push(`each item one of: ${property.items.enum.join(' | ')}`);
+  }
   if (property.type === 'number' || property.type === 'integer') notes.push(`expected ${property.type}${property.minimum !== undefined || property.maximum !== undefined ? ` in [${property.minimum ?? '-Infinity'}, ${property.maximum ?? 'Infinity'}]` : ''}`);
   if (property.type === 'string') {
     notes.push('expected string');
@@ -237,6 +249,16 @@ export function validateCall(name, args) {
     if (p.type === 'integer' && (!Number.isInteger(value) || value < p.minimum || value > (p.maximum ?? Number.MAX_SAFE_INTEGER))) fail();
     if (p.type === 'string' && (typeof value !== 'string' || value.length < (p.minLength ?? 0) || value.length > p.maxLength)) fail();
     if (p.type === 'boolean' && typeof value !== 'boolean') fail();
+    // Array schemas were previously accepted without any check, so a caller could
+    // pass any shape to an array field and have it forwarded to the extension.
+    if (p.type === 'array') {
+      if (!Array.isArray(value) || value.length < (p.minItems ?? 0) || value.length > (p.maxItems ?? Number.MAX_SAFE_INTEGER)) fail();
+      const item = p.items;
+      if (item) for (const entry of value) {
+        if (item.enum && !item.enum.includes(entry)) fail(`each item must be one of ${item.enum.join(' | ')}`);
+        if (item.type === 'string' && (typeof entry !== 'string' || entry.length < (item.minLength ?? 0) || entry.length > (item.maxLength ?? Number.MAX_SAFE_INTEGER))) fail('each item must be a string');
+      }
+    }
     if (p.pattern && !new RegExp(p.pattern).test(value)) fail();
   }
   if (name === 'browser_action') {

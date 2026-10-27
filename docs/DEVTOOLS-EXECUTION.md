@@ -25,4 +25,32 @@ Agent 判断任务意图与授权，工具不增加新的人工确认口令。�
 
 现场复测仅完成 observe：1 项通过、6 项面板选择/重复选择跳过，整体为 partial，不再报告整套通过。新增 acceptance-report 模块要求必测场景逐项记账；缺失/跳过不会转为成功，重复/无关场景不能充数。定向 Node 测试 9/9 通过。
 
-优先开发缺口仍是窗口内精确绑定的 DevTools 打开动作，随后才能自动覆盖面板选择验收。旧快捷键候选的历史成功不替代当前版本验收。新的验收模块与 live fixture 变更尚未提交或推送。
+优先开发缺口仍是窗口内精确绑定的 DevTools 打开动作，随后才能自动覆盖面板选择验收。旧快捷键候选的历史成功不替代当前版本验收。验收模块与 live fixture 变更已在提交 `a9fc930` 中推送。
+
+# 只读捕获增量：`browser_devtools_capture`（0.5.24，2026-10-27）
+
+这是与 `browser_devtools` 完全不同的通路：`browser_devtools` 走 Windows UIA 操作**界面**，`browser_devtools_capture` 走 CDP（`chrome.debugger`）读**数据**。两者不共享状态，也不互相替代。
+
+## 语义
+
+- 一次调用 = 一次 attach → enable 选定 domain → 有界观察窗口 → 读取结果 → detach。`domains` 可选 `console` / `network` / `scripts` / `metrics`，默认 `['console','network']`。
+- `durationMs` 上限 5000、`maxEvents` 上限 200，服务端 schema 与扩展内双重收敛。
+- 结果结构：`messages`（console/exception/log，按到达顺序）、`network`（每个 requestId 合并成一行，`state` 为 `completed`/`failed`/`pending`）、`scripts`（按 scriptId 去重）、`metrics`、`counts`、`dropped`、`truncated`、`pendingAtWindowEnd`、`partial`、`partialReasons`、`negativeEvidence`。
+
+## 必须如实转述的负证据
+
+- domain enable **之前**的事件不可见；空列表不是「没有发生」。
+- 只观察该 tab target；其它 tab、dedicated worker、Service Worker、OOPIF 是独立 target。
+- 缓冲有界，`dropped`/`truncated` 是真实计数，不是装饰。
+- 网络记录只有方法、去 query/fragment/凭据的 URL、状态、类型、耗时、编码长度；**没有** header、cookie、请求体、响应体。
+- console 对象参数按类型摘要（`[object]`、`[array]`、`[node]`），不序列化内容；但 console 文本本身是页面写的，可能包含页面自己的秘密。
+- `targetChanged: true` 表示窗口内 URL 变化或出现 pending 导航，此时结果可能是两个页面的混合观察。
+
+## 明确不做
+
+请求重放（`Network.replay`）、脚本编辑、断点/单步调试、Console 输入执行、分离 DevTools 窗口与被检查标签绑定。这些仍是缺口，不要用本工具冒充。
+
+## 验证状态
+
+- 单元契约 15/15（`test/cdp-capture.test.js`）：console 字段边界与对象不序列化、网络敏感字段拒绝、失败请求保留、pending 不冒充完成、溢出计数、脚本去重与 inline 标记、单 domain enable 失败报 failed、全部失败不编造数据、导航漂移、跨 tab 事件不归属、非法 domain 不订阅不调用、预算收敛、URL 脱敏、数组 schema 校验。
+- **尚未做真实 Chrome 现场验收**。CDP 事件行为在不同 Chrome 版本可能不同，验收必须用本地 fixture 页面而不是用户业务页面。

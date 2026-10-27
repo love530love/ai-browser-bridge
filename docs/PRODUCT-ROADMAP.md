@@ -4,9 +4,9 @@
 
 评价标准不是工具数量，而是能否用一句话委托目标、选到正确执行表面、完成操作并验证结果，以及在页面/浏览器/权限拒绝时给出可恢复状态。
 
-## 当前源码候选：0.5.23（2026-10-27）
+## 当前源码候选：0.5.24（2026-10-27）
 
-0.5.22 是已验证的上一个完整部署基线；当前源码已包含 0.5.23 的停靠 DevTools UIA 阶段，但仍处于候选验收。此前运行服务曾加载过 DevTools 候选，而本轮随后修改了策略热加载实现，故服务 build ID 需要重新核对/维护部署；Chrome 加载扩展仍为 0.5.22，`doctor` 的版本匹配检查未通过。不要把源码版本、服务版本和扩展版本混称为已完成发布。`npm run doctor` 检查版本、连接、构建摘要和工具 schema；它不证明每项业务能力已完成现场验收。验证范围见 [部署记录](DEPLOYMENT-2026-10-26.md)。
+0.5.22 是已验证的上一个完整部署基线；0.5.23 加入停靠 DevTools UIA 阶段（已撤下 open/F12），0.5.24 加入 CDP 只读捕获 `browser_devtools_capture`。两者都仍处于**候选验收**，未重新部署。此前运行服务曾加载过 DevTools 候选，而本轮随后修改了策略热加载实现，故服务 build ID 需要重新核对/维护部署；Chrome 加载扩展仍为 0.5.22，`doctor` 的版本匹配检查未通过。不要把源码版本、服务版本和扩展版本混称为已完成发布。`npm run doctor` 检查版本、连接、构建摘要和工具 schema；它不证明每项业务能力已完成现场验收。验证范围见 [部署记录](DEPLOYMENT-2026-10-26.md)。
 
 - 本地 HTTP/WebSocket 桥接与 Chrome 扩展连接
 - 服务与扩展版本匹配检查
@@ -194,9 +194,15 @@ GPT、其他云端模型和本地模型都只能作为可选的规划、视觉�
 
 ### 0.5.23 DevTools 工作区增量（2026-10-26）
 
-停靠式 DevTools 状态观察、打开和面板选择已加入 0.5.23。Windows UIA 在本机真实 Chrome 本地测试标签上完成开/已开幂等、Console/Network/Elements 选择及选后回读验证；当前候选代码测试结果会在完整回归记录中更新。服务端尚待受控部署。
+停靠式 DevTools 状态观察与面板选择已加入 0.5.23。Windows UIA 在本机真实 Chrome 本地测试标签上完成 Console/Network/Elements 选择及选后回读验证。服务端尚待受控部署。
 
-**实现边界：**只支持停靠 DevTools。UIA 观察完整且将 DevTools 状态正向判为 closed 才允许一次 F12；open 不再派发；UIA partial/unknown、同进程 detached DevTools 歧义均 fail-closed。面板只在选中状态回读验证后报告 success。分离 DevTools 绑定、Console/脚本执行、断点、设置写入、下载事件闭环仍未实现。
+**实现边界：**只支持停靠 DevTools。**当前候选已撤下 open/F12**：UIA 缺少可证明完整的「DevTools 已关闭」负证据，且全局 `SendKeys('{F12}')` 存在前台焦点竞态；`devtoolsState` 只报 `open`/`unknown`。面板只在选中状态回读验证后报告 success。分离 DevTools 绑定、Console/脚本执行、断点、设置写入、下载事件闭环仍未实现。
+
+### 0.5.24 CDP 只读捕获增量（2026-10-27）
+
+新增 `browser_devtools_capture`：一次 debugger attach 内先 enable 再采集一个有界窗口，覆盖 Console（含异常与 Log 条目）、Network（每个请求合并为一行）、Sources 脚本列表与 Performance 指标。
+
+**实现边界：**domain enable 之前的事件不可见，空列表不证明没有发生；只观察该 tab target；缓冲有界并上报 `dropped`/`truncated`；网络记录不含 header/cookie/body，URL 去 query/fragment/凭据；console 对象参数按类型摘要不序列化。窗口内导航漂移会返回 `targetChanged`，不把两个页面混成一份。请求重放、脚本编辑、断点调试、Console 输入执行仍**未实现**。单元契约已建立，真实 Chrome 现场验收待做。
 
 ## 下一阶段交付顺序与验收门槛
 

@@ -2,6 +2,7 @@ import { pageOperation } from './page.js';
 import { withDebugger, pointer, key } from './cdp.js';
 import { createErrorJournal } from './error-journal.js';
 import { evaluatedValue, resourceSummary } from './cdp-results.js';
+import { captureDevtools, createTabSubscription } from './cdp-capture.js';
 let socket = null;
 let keepalive = null;
 let connectDeadline = null;
@@ -253,9 +254,10 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
         { name: 'dom-transaction', tools: ['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'], useFor: 'preferred writes with explicit expected outcome', retrySafe: false },
         { name: 'picker-upload-bridge', tools: ['browser_pick', 'browser_choose', 'browser_upload'], useFor: 'custom selects, portal options, hidden file inputs without OS dialog', retrySafe: false },
         { name: 'cdp-input', tools: ['browser_key', 'browser_hover', 'browser_screenshot'], useFor: 'trusted browser keyboard/pointer/screenshot when DOM events are insufficient', retrySafe: false },
+        { name: 'cdp-capture', tools: ['browser_devtools_capture'], useFor: 'read-only console/network/script/metrics capture inside one bounded window; not a DevTools write path', retrySafe: true },
         { name: 'coordinate-adapter', tools: ['browser_action'], useFor: 'Open-AutoGLM style normalized coordinates as last resort with stale-URL guard', retrySafe: false }
       ],
-      fallbackOrder: ['health', 'observe', 'dom-transaction', 'picker-upload-bridge', 'cdp-input', 'coordinate-adapter', 'human-confirmation'],
+      fallbackOrder: ['health', 'observe', 'cdp-capture', 'dom-transaction', 'picker-upload-bridge', 'cdp-input', 'coordinate-adapter', 'human-confirmation'],
       concurrency: { writeLeaseTools: ['browser_claim_tab', 'browser_release_tab', 'browser_tab_lease'], rule: 'one write owner per tab; read-only tools may still observe; conflicting writes return status=waiting instead of throwing' },
       retryPolicy: 'Never replay uncertain writes automatically. Use browser_failure_help, then re-observe and choose the next safer mode.'
     };
@@ -293,6 +295,24 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       if (after.url !== tab.url || after.pendingUrl) throw new Error('Page changed during network diagnostic. Observe again.');
       return { tabId: tab.id, ...resourceSummary(result) };
     });
+  }
+  if (name === 'browser_devtools_capture') {
+    const tab = await chrome.tabs.get(args.tabId);
+    checkedUrl(tab.url, config);
+    return await withDebugger(tab.id, async send => captureDevtools({
+      tabId: tab.id,
+      expectedUrl: tab.url,
+      requested: args.domains,
+      durationMs: args.durationMs,
+      maxEvents: args.maxEvents,
+      send,
+      subscribe: createTabSubscription(chrome.debugger, tab.id),
+      // A pending navigation must not be reported as a stable same-page window.
+      readUrl: async () => {
+        const now = await chrome.tabs.get(tab.id);
+        return now.pendingUrl ? `pending:${now.pendingUrl}` : now.url;
+      }
+    }));
   }
   if (name === 'browser_failure_help') {
     const err = String(args.error || '');

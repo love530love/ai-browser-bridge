@@ -16,14 +16,14 @@
 4. 实施前先加可复现测试/独立 oracle，改动保持单一能力边界；不得同时操作真实用户浏览器和隔离 fixture。真实 Chrome 操作必须经过 Bridge、限制在本次创建的测试标签/窗口，任何扩展 Reload、用户设置变更、安装/删除扩展都需要本次具体动作的明确授权。
 5. 交付时记录变更文件、确切命令/结果、真实 Chrome 覆盖范围、未覆盖边界、工作树和提交/部署状态；更新本文件与任务板。未明确要求时不要擅自推送、部署或重载扩展。
 
-## 当前交接快照（2026-10-27，接手前必须复核）
+## 当前交接快照（2026-10-27 收口后，接手前必须复核）
 
-- 仓库：`K:\PythonProjects5\AI-Browser-Bridge`，分支 `main`，工作树有未提交的 0.5.23 DevTools 阶段候选改动。
-- 最近本地/`origin/main`：`fddcb1d Align capability matrix and roadmap with verified 0.5.22 deployment`。
-- 当时 `sshpush/main` 指向 `5313232 Stabilize Windows process and browser stress fixtures`，与 `origin/main` 的指针不同；推送前先检查提交图、不要盲目推送或重写历史。
-- 候选包/扩展磁盘版本：0.5.23。最新读取的运行状态：Bridge 服务 0.5.23、buildId 与当时工作树一致；加载中的扩展仍为 0.5.22，session `96c1ce0e-3fa3-4e61-87d6-8c7d808179f3`，队列空闲。`doctor` 因版本不匹配而失败；不得声称部署全绿。扩展本轮仅有 manifest 版本字段变化，没有新扩展代码；是否 Reload 需按发布操作与授权另行决定。
+- 仓库：`K:\PythonProjects5\AI-Browser-Bridge`，分支 `main`，**工作树干净**（唯一未跟踪项是本地 `graphify-out/` 缓存，不属产品）。
+- 已提交并推送：`a9fc930 Add native UI snapshot, DevTools observe/select, and agent handoff`，`origin/main` 与 `sshpush/main` 都指向它。
+- 上一个已验证部署基线仍是 0.5.22；`a9fc930` 是 0.5.23 候选，其后工作树又加入 0.5.24 的 `browser_devtools_capture`，**两者都未部署**。接手后先跑 `node src/cli.js doctor` 与 `browser_queue_status` 复核服务/扩展版本，不得沿用本文的数字。
+- 候选包/扩展磁盘版本：0.5.24。上一次读取的运行状态：Bridge 服务 0.5.23 但 buildId 已因后续源码修改而过期；加载中的扩展仍为 0.5.22，队列空闲。`doctor` 因版本不匹配而失败；不得声称部署全绿。**重要：`browser_devtools_capture` 是扩展侧新代码，0.5.22 的已加载扩展里没有它**，因此真实 Chrome 验收必须先获授权 Reload 扩展，否则调用会落到 `Unknown command`。
 - 已有停靠式 DevTools `browser_devtools` UIA 候选：**只有 `observe` 与 `select_panel`，不含 `open`/F12 toggle**（原因见下节未决审查点）。代码和文档位于 `src/desktop-adapter.js`、`scripts/devtools-ui.ps1`、`src/server.js`、`src/tools.js`、`docs/DEVTOOLS-EXECUTION.md`；对应测试 `test/devtools-adapter.test.js`、可选真实 Chrome 本地 fixture `test/live-devtools.js`。`devtoolsState` 只会返回 `open` 或 `unknown`，**永不推断 `closed`**。本机 Chrome 历史上曾验证过停靠 DevTools 的 F12 打开/幂等与 Elements/Console/Network 面板选择回读，但 open 通路已在当前候选撤下；select_panel 只适用于用户已自行打开 DevTools 的场景。这不覆盖 detached DevTools、Console 脚本执行、Sources 调试或其他 Chrome/UIA 版本。
-- **本轮已完成的验证（可引用）**：撤下 open/F12 后，`node --check` 四个改动源文件通过；`scripts/devtools-ui.ps1` 用 `System.Management.Automation.Language.Parser::ParseFile` 解析 0 错误；`test/devtools-adapter.test.js` 6/6、`test/protected-ui.test.js` + `devtools-adapter` 组合 12/12；**全量 `node --test --test-concurrency=1 test/*.test.js` = 153/153 通过（38 个测试文件全部跑完，271s）**。这是 0.5.23 源码候选的当前验收基线。
+- **本轮已完成的验证（可引用）**：0.5.23 阶段 —— `node --check` 通过；`scripts/devtools-ui.ps1` 与 `scripts/native-ui-snapshot.ps1` 用 `System.Management.Automation.Language.Parser::ParseFile` 解析 0 错误；`test/devtools-adapter.test.js` 6/6。0.5.24 阶段 —— `test/cdp-capture.test.js` 15/15。**全量 `node --test --test-concurrency=1 test/*.test.js` = 168/168 通过（39 个测试文件，173s，含 `cdp-capture`）**。这是当前源码候选的验收基线。
 - 工作树还有 Graphify 临时目录 `graphify-out/` 未跟踪。不得把其中缓存/临时文件加进产品提交；不要在没有审阅前删除。
 - **两个测试基础设施缺陷，本轮已定性，接手者不要再踩**：
   1. `test/watchdog.test.js` 的外层超时（原 60000ms）小于 4 次串行 `pwsh.exe` 的内层超时之和（4×30000ms），预算内部不自洽；机器有负载时单次 pwsh 超过 30s 就会假红（实测一次 148/149 失败，该文件本轮未修改，单独跑通过）。已把外层提到 180000ms，断言未动。
@@ -32,9 +32,9 @@
 
 ## 本阶段任务板与优先顺序
 
-1. **稳定并收尾 0.5.23 DevTools 阶段**：当前负责人 team-lead。复核完整测试失败，运行新鲜全量回归；审查 UIA 负证据和 F12 焦点竞态；校正文档。发布、推送、部署分别由负责人按实际状态和用户授权推进。
-2. **建立跨 Agent 交接**：由本文件、根 `AGENTS.md`、共享协作区 task list 完成；接手者应先验证以上快照。
-3. **扩充 DevTools 面板原语**：Elements 检查/样式编辑；Console 输入/运行/输出；Sources 断点、单步与编辑；Network 捕获/过滤/重放；Application 存储；Performance/Lighthouse；ServiceWorker。按小步落地，逐动作提供目标、派发状态和结果证据；“打开面板”不等于完成面板任务。
+1. **稳定并收尾 0.5.23 DevTools 阶段**：已完成（撤下 open/F12、全量回归、文档校准、提交 `a9fc930` 并推送）。
+2. **建立跨 Agent 交接**：已完成；由本文件、根 `AGENTS.md`、共享协作区 task list 承载，接手者应先验证以上快照。
+3. **扩充 DevTools 面板原语**：**进行中**。已完成只读捕获切片 `browser_devtools_capture`（Console/Network/Sources 元数据/Performance，单元契约见 `test/cdp-capture.test.js`），真实 Chrome 验收待扩展 Reload 授权。**未做**：Console 输入执行、Sources 断点/单步/编辑、请求重放、Application 存储、Lighthouse、ServiceWorker 调试。按小步落地，逐动作提供目标、派发状态和结果证据；“打开面板”不等于完成面板任务。
 4. **Chrome 原生 UI**：逐项实现设置读写与回读、证书/代理、扩展管理、下载完成和落盘证据、上传、剪贴板、权限对话框、多窗口/标签。精确目标（尤其扩展 ID、窗口 PID/HWND、下载 ID/文件路径）；不确定的副作用不重放。
 5. **统一执行上下文**：DOM/视觉/网络/页面快照、trace/audit、可扩展 before/after hooks、可分类异常与恢复建议、可暂停/续接的检查点；与现有队列/lease/写超时语义兼容。
 
@@ -43,6 +43,7 @@
 - 工具定义/schema：`src/tools.js`
 - 服务端 dispatch、policy、queue、audit、desktop mutex：`src/server.js`、`src/policy.js`、`src/leases.js`
 - 扩展 DOM/Chrome API/CDP：`extension/worker.js`、`extension/page.js`、`extension/cdp.js`
+- CDP 只读捕获（`browser_devtools_capture`）：`extension/cdp-capture.js`（`createRecorder` / `createTabSubscription` / `captureDevtools`，纯函数、无 chrome 依赖，可直接单测）、`test/cdp-capture.test.js`
 - Windows UI 自动化：`src/desktop-adapter.js`、`scripts/devtools-ui.ps1`、`scripts/reload-extension.ps1`
 - 现有能力/路线图：`docs/CHROME-CAPABILITY-MATRIX.md`、`docs/PRODUCT-ROADMAP.md`、`docs/DEVTOOLS-EXECUTION.md`
 - 回归入口：`npm test`（串行全量）、`npm run test:stress`（隔离 Chromium）、`npm run test:devtools`（现有 Chrome 的 opt-in、本地 fixture，操作后仅关闭自身测试标签）。

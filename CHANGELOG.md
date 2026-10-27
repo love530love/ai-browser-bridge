@@ -1,3 +1,13 @@
+## 0.5.24 — 2026-10-27（源码候选，未部署）
+
+- 新增只读捕获原语 `browser_devtools_capture`：在一次 debugger attach 内先 enable 再采集一个有界窗口，覆盖 DevTools Console（`Runtime.consoleAPICalled`、`Runtime.exceptionThrown`、`Log.entryAdded`）、Network（请求/响应/完成/失败合并为一行）、Sources 脚本列表（`Debugger.scriptParsed`）与 Performance 指标（`Performance.getMetrics`）。
+- 明确负证据：domain enable 之前的事件不可见，空列表不证明没有发生；只观察该 tab target，其它 tab、worker、Service Worker、OOPIF 是独立 target；缓冲有界，溢出以 `dropped`/`truncated` 计数上报而不是静默丢弃。
+- 隐私边界：网络记录只保留方法、去 query/fragment/凭据的 URL、状态、类型与耗时，不含 header、cookie、请求体、响应体；console 对象参数按类型摘要（`[object]`/`[array]`），不序列化对象内容；console 文本是页面自己写的内容，可能含页面秘密，已在此说明。
+- 目标漂移：窗口内 URL 变化或出现 pending 导航时返回 `targetChanged` + `partialReasons`，不把两个页面的观察混成一份。
+- 未实现且不声称：请求重放、脚本编辑、断点/单步调试、Console 输入执行、分离 DevTools 窗口与被检查标签绑定。
+- 修复 `validateCall` 对 `type: 'array'` 字段完全不校验的缺口：现在校验数组类型、`minItems`/`maxItems` 与 `items.enum`，避免任意形状被透传到扩展。
+- 版本号与 manifest 同步升到 0.5.24；服务与已加载扩展尚未重新部署/重载，`doctor` 版本匹配仍会失败。
+
 ## 0.5.23 — 2026-10-26
 
 - 增加停靠式 DevTools UIA 通路：observe/select_panel；仅在用户已打开且 UIA 正向识别的 DevTools 中选择面板，回读选中状态后才报成功。
