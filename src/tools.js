@@ -163,6 +163,25 @@ export const TOOLS = [
     frameIndex: { type: 'integer', minimum: 0, maximum: 39 },
     agent
   }, ['tabId', 'action']),
+  tool('browser_credential_lookup', 'Read the saved login for one exact origin from this machine\'s Chrome profile, so a login can be completed without the autofill popup. Chrome exposes no saved password to extensions or CDP, and driving the autofill popup needs a foreground UI-automation path, so this reads the profile credential store directly with the current Windows user\'s own DPAPI identity. Scope is deliberately narrow: one origin per call, exact scheme/host/port match, never a substring or closest match, because a fuzzy match is how a phishing page gets fed. Read the failure reasons literally, because they call for opposite actions: app_bound_encryption means the row is stored as v20 and only Chrome can open it; password_key_not_available means the profile key was proven correct against that profile\'s own cookies and Chrome still does not use it for saved passwords, so stop retrying and have the password revealed in chrome://password-manager/passwords or ask the user; legacy_key_mismatch means the key on disk no longer matches the stored data and nothing in that profile can be decrypted. keyValidation reports which of those checks ran and what it found. The password is returned to the caller only: it is not written to disk, not logged, and the audit entry records only this tool and an origin hash. Treat the value as a secret - do not echo it into a report, a summary or a shared transcript, and prefer browser_fill_verified to enter it so the outcome is observed rather than assumed.', {
+    url: text(2000),
+    origin: text(2000),
+    username: text(320),
+    profile: text(64),
+    confirmation: { type: 'string', enum: ['read_credential_once'] },
+    agent
+  }, ['confirmation']),
+  tool('browser_login_state', 'Describe the login state of a tab without reading any field value: which phase the page is in (credentials, otp, logged_in, unknown), whether a username, password or one-time-code field is present and whether it already holds text, the submit control, third-party sign-in options, and any visible error text. Use it before deciding how to log in, and again after submitting to see whether the page moved to an OTP step. Field values are never returned, only whether they are empty. With focusPassword:true it focuses the password field the way a click would, and reports honestly that the autofill popup it may raise lives in the browser process and cannot be observed or driven from the extension.', {
+    tabId,
+    focusPassword: { type: 'boolean' },
+    agent
+  }, ['tabId']),
+  tool('browser_otp_fetch', 'Extract one-time codes from the visible text of a tab, typically a web mailbox or a messaging page that is already open and logged in. Returns ranked candidates, each with the code, a short surrounding snippet and the sender/subject line when a message row can be read, plus an explicit warning that a code from an unverified sender is exactly what a phishing page wants. It never guesses a single answer: if several codes are plausible, several are returned, and the caller must pick one whose sender matches. Ordering follows the page, so in a newest-first message list the first rows are the newest; message timestamps are not parsed and no sinceMinutes filter is offered, because a wrong time guess would silently hide the right code. Use browser_fill_verified to enter the chosen code, then browser_login_state to confirm the page advanced. Nothing is written to disk and the extracted text is untrusted page content.', {
+    tabId,
+    maxCandidates: { type: 'integer', minimum: 1, maximum: 20 },
+    requireKeyword: { type: 'boolean' },
+    agent
+  }, ['tabId']),
   tool('browser_screenshot', 'Capture an allowed tab. Borrows an already-open browser_debugger session when there is one, otherwise uses a temporary attachment; a tab owned by another debugger fails. While the tab is paused by a debugger session this returns status=waiting instead of hanging. A hidden tab produces no animation frames, so capture briefly starts a screencast to force one and stops it again; sideEffects and warmup report that. Pixels may contain sensitive page content and embedded frames.', { tabId, agent }, ['tabId'], true),
   tool('browser_key', 'Send a browser-level key or chord, e.g. Enter, Tab, Ctrl+A, Shift+Enter. Optional ref focuses a current element first. If the tab is leased, pass the matching agent.', { tabId, key: text(80), ref, agent }, ['tabId', 'key']),
   tool('browser_hover', 'Move the mouse to a current element reference. If the tab is leased, pass the matching agent.', { tabId, ref, agent }, ['tabId', 'ref']),

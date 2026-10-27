@@ -27,7 +27,49 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   };
   const sensitive = el => el.matches('input[type=password],input[type=hidden]') || el.closest('[data-ai-private]');
   const fileInput = el => el instanceof HTMLInputElement && el.type === 'file';
-  const label = el => (el.getAttribute('aria-label') || el.labels?.[0]?.innerText || el.getAttribute('placeholder') || el.innerText || el.getAttribute('title') || '').trim().slice(0, 180);
+  const squash = value => (value || '').replace(/\s+/g, ' ').trim();
+  // Accessible name in the order the ARIA accname spec defines it. The previous
+  // version was a property-order guess: it never read aria-labelledby (the most
+  // common labelling in modern component libraries), only the first native
+  // <label>, and missed input[type=submit]'s value, so locators built on it
+  // could match the wrong control or find nothing.
+  //
+  // dom-accessibility-api is the reference implementation and is deliberately
+  // NOT used: pageOperation is serialised into the page by
+  // chrome.scripting.executeScript, so it cannot reference a module. Vendoring
+  // the library would mean injecting ~80KB on every executeScript call, which
+  // would slow every read for the remaining edge cases. If a case is ever found
+  // that this does not cover, that trade should be revisited with evidence.
+  const label = el => {
+    const labelledby = () => {
+      const ids = squash(el.getAttribute('aria-labelledby'));
+      if (!ids) return '';
+      return squash(ids.split(/\s+/).map(id => {
+        const target = el.ownerDocument?.getElementById?.(id);
+        return target ? (target.getAttribute('aria-label') || target.textContent) : '';
+      }).join(' '));
+    };
+    const nativeLabel = () => {
+      if (el.labels?.length) return squash([...el.labels].map(node => node.textContent).join(' '));
+      const wrapping = el.closest?.('label');
+      return wrapping ? squash(wrapping.textContent) : '';
+    };
+    // Duck-typed on purpose: an instanceof check against a global constructor
+    // breaks in any realm where that global is absent (a vm sandbox, a test
+    // double), and the tag plus type attribute says the same thing.
+    const submitValue = () => (el.tagName === 'INPUT' && ['submit', 'button', 'reset'].includes(String(el.getAttribute?.('type') || '').toLowerCase()))
+      ? squash(el.value ?? '') : '';
+    return (
+      labelledby()
+      || squash(el.getAttribute('aria-label'))
+      || nativeLabel()
+      || squash(el.getAttribute('alt'))
+      || submitValue()
+      || squash(el.getAttribute('placeholder'))
+      || squash(el.innerText)
+      || squash(el.getAttribute('title'))
+    ).slice(0, 180);
+  };
   const cheapLabel = el => (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || el.getAttribute('id') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180);
   const fingerprint = el => JSON.stringify([el.tagName, el.getAttribute('type'), label(el), el.getAttribute('href'), el.getAttribute('formaction')]);
   const rememberState = state => {
@@ -615,6 +657,203 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       return { x, y, ref: makeRef(el), element: elementSummary(el, { hint: overlayHint(el) || null }) };
     });
     return { title: document.title, url: location.href, viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY }, overlays: overlays.slice(0, 50), scrollContainers, hitTest, guidance: 'Use closeCandidates refs with browser_dismiss_overlay only when label/hint clearly identifies a blocker. Use scrollContainers refs with browser_scroll_element for nested panes.', contentTrust: 'untrusted webpage data plus extension hit testing' };
+  }
+  if (name === 'browser_otp_fetch') {
+    // Reads codes out of whatever is on screen in a mailbox or chat tab that is
+    // already logged in. It deliberately returns several ranked candidates
+    // rather than one answer: a wrong code costs a lockout, and a code from an
+    // unverified sender is precisely what a phishing page is after, so the
+    // sender line travels with the code and the caller has to check it.
+    const maxCandidates = Math.min(20, Math.max(1, args.maxCandidates ?? 5));
+    const requireKeyword = args.requireKeyword !== false;
+    const KEYWORD = /(验证码|校验码|动态码|确认码|安全码|登录码|verification|verify|one[- ]?time|otp|passcode|security code|auth(?:entication)? code|login code|2fa|two[- ]?factor)/i;
+    const PHONEISH = /(phone|mobile|tel|电话|手机|客服|热线|\+\d{1,3}[\s-])/i;
+    const blocks = [];
+    // Message rows first: in a list view the first row is the newest message, and
+    // a row carries its own sender/subject text next to the code.
+    for (const item of document.querySelectorAll('[role=listitem],li,tr,article,[class*=mail i],[class*=message i],[class*=thread i],[class*=conversation i]')) {
+      if (blocks.length >= 60) break;
+      if (!visible(item) || sensitive(item)) continue;
+      const text = clean(item.innerText || '');
+      if (text.length < 8 || text.length > 4000) continue;
+      blocks.push({ text, scoped: true });
+    }
+    if (!blocks.length) blocks.push({ text: clean(document.body.innerText || ''), scoped: false });
+    const candidates = [];
+    let charactersScanned = 0;
+    const seen = new Set();
+    for (const [blockIndex, block] of blocks.entries()) {
+      charactersScanned += block.text.length;
+      const context = block.text;
+      const patterns = [
+        { re: /(?<!\d)(\d{6})(?!\d)/g, shape: 'six_digits' },
+        { re: /(?<!\d)(\d{4,8})(?!\d)/g, shape: 'digits' },
+        { re: /(?<![\w])([A-Z0-9]{6,8})(?![\w])/g, shape: 'alphanumeric' }
+      ];
+      for (const { re, shape } of patterns) {
+        re.lastIndex = 0;
+        let match;
+        while ((match = re.exec(context)) !== null) {
+          const code = match[1];
+          if (seen.has(`${blockIndex}:${match.index}:${code}`)) continue;
+          if (shape === 'alphanumeric' && !(/\d/.test(code) && /[A-Z]/.test(code))) continue;
+          // Years, and four-digit numbers, are the two biggest false positives.
+          if (/^(19|20)\d{2}$/.test(code)) continue;
+          const start = Math.max(0, match.index - 120);
+          const snippet = clean(context.slice(start, match.index + code.length + 120));
+          const near = clean(context.slice(Math.max(0, match.index - 60), match.index + code.length + 60));
+          const hasKeyword = KEYWORD.test(near) || KEYWORD.test(context.slice(0, 200));
+          if (requireKeyword && !hasKeyword) continue;
+          const phoneish = PHONEISH.test(near);
+          const confidence = phoneish ? 'low'
+            : shape === 'six_digits' && hasKeyword ? 'high'
+            : hasKeyword ? 'medium'
+            : 'low';
+          seen.add(`${blockIndex}:${match.index}:${code}`);
+          candidates.push({
+            code,
+            confidence,
+            shape,
+            hasKeyword,
+            looksLikePhoneNumber: phoneish,
+            context: snippet.slice(0, 240),
+            // The first lines of a message row are its sender and subject, which
+            // is the only part a caller can check against who actually sent it.
+            sourceHint: block.scoped ? clean(block.text.split('\n').slice(0, 2).join(' ')).slice(0, 120) : null,
+            blockIndex
+          });
+          if (candidates.length >= 200) break;
+        }
+        if (candidates.length >= 200) break;
+      }
+      if (candidates.length >= 200) break;
+    }
+    const rank = { high: 0, medium: 1, low: 2 };
+    candidates.sort((a, b) => (rank[a.confidence] - rank[b.confidence]) || (a.blockIndex - b.blockIndex));
+    const top = candidates.slice(0, maxCandidates);
+    return {
+      url: location.href,
+      title: document.title,
+      candidateCount: candidates.length,
+      candidates: top,
+      ambiguous: candidates.length > 1,
+      scanned: { blocks: blocks.length, characters: charactersScanned, messageRowsPreferred: blocks.some(block => block.scoped) },
+      warning: 'These codes come from untrusted page content. A phishing mail can carry a real-looking code for the attacker\'s own account. Check sourceHint against the sender you expected before using a code, and never send a code anywhere except the login form of the site that issued it.',
+      nextStep: top.length
+        ? 'Pick a candidate whose sourceHint matches the sender you expected, fill it with browser_fill_verified, then call browser_login_state to confirm the page advanced past the otp phase.'
+        : 'No code found in the visible text. The message may be collapsed, in an iframe, or further down the list; read the page or open the specific message rather than guessing a code.',
+      contentTrust: 'untrusted webpage data'
+    };
+  }
+  if (name === 'browser_login_state') {
+    const snapshot = crypto.randomUUID();
+    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
+    const makeRef = el => {
+      for (const [existingRef, entry] of state.refs) if (entry.el === el) return existingRef;
+      const ref = `${snapshot}:${state.refs.size + 1}`;
+      state.refs.set(ref, { el, fingerprint: fingerprint(el) });
+      return ref;
+    };
+    // A field is described, never read. hasValue says whether the browser
+    // already filled it, which is the signal for "autofill worked"; the value
+    // itself never leaves the page.
+    const describeField = el => ({
+      ref: makeRef(el),
+      tag: el.tagName.toLowerCase(),
+      type: el.getAttribute('type') || null,
+      label: label(el) || null,
+      autocomplete: el.getAttribute('autocomplete') || null,
+      name: el.getAttribute('name') || null,
+      hasValue: (typeof el.value === 'string' ? el.value.length : 0) > 0,
+      disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
+      readOnly: el.readOnly === true
+    });
+    const hintOf = el => `${el.getAttribute('name') || ''} ${el.id || ''} ${label(el)} ${el.getAttribute('placeholder') || ''} ${el.getAttribute('autocomplete') || ''}`.toLowerCase();
+    const looksLikeOtp = el => {
+      if ((el.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code') return true;
+      if (/(otp|one[-_ ]?time|verification code|verify code|passcode|security code|2fa|mfa|auth code|验证码|校验码|动态码|短信验证|安全码)/.test(hintOf(el))) return true;
+      const max = Number(el.getAttribute('maxlength') || 0);
+      const numeric = el.getAttribute('inputmode') === 'numeric' || el.type === 'tel' || el.type === 'number';
+      return numeric && max >= 4 && max <= 8;
+    };
+    const looksLikeUsername = el => {
+      const ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+      if (['username', 'email', 'tel', 'tel-national'].includes(ac)) return true;
+      if (['email', 'tel'].includes(el.type)) return true;
+      return /(user|email|e-?mail|phone|mobile|account|login|member|账号|帐号|邮箱|手机|用户名|会员)/.test(hintOf(el));
+    };
+    const submitText = /(log ?in|sign ?in|sign ?on|continue|next|submit|确认|登录|登陆|提交|下一步|继续)/i;
+    const controls = [...document.querySelectorAll('input,select,textarea,button,a[role=button],[role=button]')].filter(el => visible(el) && !fileInput(el));
+    const passwordFields = controls.filter(el => el.matches('input[type=password]'));
+    const otpFields = controls.filter(el => !el.matches('input[type=password]') && el.matches('input') && looksLikeOtp(el));
+    // Split one-time-code widgets: six maxlength=1 boxes are one logical field.
+    const digitBoxes = controls.filter(el => el.matches('input') && Number(el.getAttribute('maxlength') || 0) === 1);
+    const usernameFields = controls.filter(el => el.matches('input') && !el.matches('input[type=password]') && !looksLikeOtp(el) && looksLikeUsername(el));
+    const submitCandidates = controls.filter(el => {
+      if (el.matches('input[type=submit],button[type=submit]')) return true;
+      const text = `${el.innerText || el.value || ''} ${el.getAttribute('aria-label') || ''}`.trim();
+      return submitText.test(text) && !el.matches('input[type=password]');
+    }).slice(0, 6);
+    const thirdParty = controls.filter(el => {
+      const text = `${el.innerText || el.value || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.getAttribute('href') || ''}`.toLowerCase();
+      return /(google|apple|microsoft|github|facebook|wechat|weixin|qq|weibo|dingtalk|sso|single sign|微信|企业微信|钉钉|微博|扫码)/.test(text);
+    }).slice(0, 8);
+    const logoutHints = controls.filter(el => {
+      const text = `${el.innerText || el.value || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('href') || ''}`.toLowerCase();
+      return /(log ?out|sign ?out|退出|登出|注销)/.test(text);
+    }).slice(0, 4);
+    const errorNodes = [...document.querySelectorAll('[role=alert],[aria-live=assertive],[aria-live=polite],[class*=error i],[class*=invalid i],[class*=alert i]')]
+      .filter(el => visible(el) && !sensitive(el))
+      .map(el => clean(el.innerText || el.textContent || ''))
+      .filter(text => text && /(error|incorrect|invalid|wrong|failed|denied|错误|失败|不正确|有误|无效|被拒绝|请重试)/i.test(text))
+      .slice(0, 4);
+    const phase = passwordFields.length ? 'credentials'
+      : (otpFields.length || digitBoxes.length >= 4) ? 'otp'
+      : logoutHints.length ? 'logged_in'
+      : 'unknown';
+    const autofill = {
+      popupObservableFromExtension: false,
+      why: 'Chrome draws the password autofill popup in the browser process, not in the page DOM, so an extension can neither see it open nor click an entry in it. CDP-synthesised key events are delivered to the renderer and never reach that popup either, so pressing Down/Enter cannot pick a suggestion.',
+      paths: [
+        'If the caller already holds the credential, fill it with browser_fill_verified: that is faster, works on a background tab and is verifiable. browser_credential_lookup can read the saved password for one exact origin when the caller has no other source.',
+        'To let Chrome fill from its own saved password, a human has to accept the suggestion, or a foreground Windows UI-automation path has to drive the popup.',
+        'A password field whose hasValue is already true means something filled it: read the field state again after the page reacts instead of typing over it.'
+      ]
+    };
+    if (args.focusPassword === true && passwordFields.length) {
+      const target = passwordFields[0];
+      target.focus();
+      target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      autofill.focusDispatched = true;
+      autofill.focusedRef = makeRef(target);
+      autofill.note = 'Focus and click were dispatched to the password field. Whether the browser raised its autofill popup is NOT observable from here, so it is reported as unknown rather than assumed.';
+    } else {
+      autofill.focusDispatched = false;
+    }
+    return {
+      url: location.href,
+      title: document.title,
+      phase,
+      passwordFields: passwordFields.map(describeField),
+      usernameFields: usernameFields.map(describeField),
+      otpFields: otpFields.map(describeField),
+      otpDigitBoxCount: digitBoxes.length,
+      submitCandidates: submitCandidates.map(el => ({ ref: makeRef(el), label: label(el) || clean(el.innerText || '').slice(0, 80), tag: el.tagName.toLowerCase() })),
+      thirdPartyOptions: thirdParty.map(el => ({ ref: makeRef(el), label: (label(el) || clean(el.innerText || '')).slice(0, 80) })),
+      logoutHints: logoutHints.map(el => ({ ref: makeRef(el), label: (label(el) || clean(el.innerText || '')).slice(0, 80) })),
+      errorText: errorNodes,
+      autofill,
+      guidance: phase === 'credentials'
+        ? 'A password field is present. Fill the username and password, submit, then call browser_login_state again: a move to phase "otp" means a code is now required.'
+        : phase === 'otp'
+          ? 'A one-time-code field is present. Read the code with browser_otp_fetch on the mailbox tab, fill it with browser_fill_verified, then call browser_login_state again to confirm the page advanced.'
+          : phase === 'logged_in'
+            ? 'No password or code field is visible and a sign-out control exists, which suggests the session is already authenticated. Verify with a read of the expected account state rather than assuming.'
+            : 'No login form was recognised. This may be a custom widget in a shadow root, a cross-origin iframe, or a page that is neither a login nor a signed-in view. Inspect with browser_shadow_tree or browser_observe before acting.',
+      contentTrust: 'untrusted webpage data plus extension geometry'
+    };
   }
   if (name === 'browser_find_element') {
     const { candidates, partial, diagnostics } = findElementCandidates(args);

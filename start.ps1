@@ -7,7 +7,11 @@ $startupOwned = $false
 try {
 try { $startupOwned = $startupMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $startupOwned = $true }
 if (-not $startupOwned) { Write-Host 'Bridge startup is already in progress. Check doctor after it completes.'; exit 0 }
-Remove-Item -LiteralPath (Join-Path $projectRoot '.local/service-paused') -ErrorAction SilentlyContinue
+$pauseFile = Join-Path $projectRoot '.local/service-paused'
+# Guarded on purpose: a hard Remove-Item on a path that is not there is a no-op
+# for PowerShell, but any filesystem shim that fails closed on delete turns the
+# normal "no pause marker" case into a startup failure.
+if (Test-Path -LiteralPath $pauseFile) { Remove-Item -LiteralPath $pauseFile -Force -ErrorAction SilentlyContinue }
 $nodePath = (Get-Command node.exe -ErrorAction Stop).Source
 & $nodePath (Join-Path $projectRoot 'src\cli.js') setup
 if ($LASTEXITCODE -ne 0) { throw 'Setup failed' }

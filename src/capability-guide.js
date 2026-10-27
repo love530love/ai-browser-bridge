@@ -70,11 +70,17 @@ const INTENTS = [
     prefer: 'browser_upload_verified with an allowlisted path and its SHA256. Download completion and on-disk hash are not implemented yet.',
     fallback: ['browser_upload_verified'] },
   { id: 'login', match: /登录|登陆|sign in|login|账号|密码|验证码|验证|otp|2fa/i,
-    tools: ['browser_find_element', 'browser_fill', 'browser_click', 'browser_wait'], focusRequired: false,
-    why: 'Login is ordinary form work: find the field, fill it, click submit, wait for the expected text.',
+    tools: ['browser_login_state', 'browser_credential_lookup', 'browser_otp_fetch', 'browser_fill_verified', 'browser_click', 'browser_wait'], focusRequired: false,
+    why: 'Login is ordinary form work plus two things the base can now do directly: read the saved password for one exact origin, and pull a one-time code out of an already-open mailbox tab.',
     backgroundSafe: true,
-    prefer: 'Fill the username, then let Chrome autofill the password by focusing the field and accepting the suggestion, or fill it yourself if you already hold the value. Chrome does not expose stored password values to extensions or CDP, so a base cannot read them; it can only trigger the browser autofill the same way a human does.',
-    fallback: ['browser_find_element', 'browser_choose', 'browser_wait', 'browser_devtools_capture'] },
+    prefer: 'browser_login_state first: it reports the phase (credentials, otp, logged_in, unknown) and which fields exist, without reading any field value. For the credentials phase, either fill a credential you already hold, or call browser_credential_lookup with confirmation:"read_credential_once" to read the saved password for that exact origin, then enter it with browser_fill_verified so the outcome is observed. If it answers reason "password_key_not_available", stop retrying: the profile key was proven correct against that profile\'s own cookies, and Chrome simply does not use it for saved passwords - reveal the password in chrome://password-manager/passwords or ask the user. Submit, then call browser_login_state again: a move to phase "otp" means a code is needed. Read it with browser_otp_fetch on the mailbox tab, check the candidate\'s sourceHint against the sender you expected, fill it, and confirm the phase moved on. Chrome still does not expose the autofill popup to extensions or CDP, so triggering the browser\'s own suggestion needs a human or a foreground UI-automation path.',
+    fallback: ['browser_login_state', 'browser_find_element', 'browser_choose', 'browser_wait', 'browser_devtools_capture'] },
+  { id: 'one-time-code', match: /验证码|校验码|动态码|otp|one[- ]?time|2fa|mfa|短信码/i,
+    tools: ['browser_otp_fetch', 'browser_login_state', 'browser_fill_verified'], focusRequired: false,
+    why: 'Codes are read from the visible text of a mailbox or chat tab that is already logged in, with the sender line attached so a phishing code can be told apart.',
+    backgroundSafe: true,
+    prefer: 'Open or reuse the mailbox tab, call browser_otp_fetch, and pick a candidate whose sourceHint matches the sender you expected. It returns several ranked candidates rather than one answer, because a wrong code costs a lockout and a code from an unknown sender is the attack. Fill it with browser_fill_verified and confirm with browser_login_state.',
+    fallback: ['browser_otp_fetch', 'browser_read', 'browser_find_text'] },
   { id: 'select-or-picker', match: /下拉|选择|选项|select|dropdown|combobox|picker/i,
     tools: PICK, focusRequired: false,
     why: 'Native selects and portal pickers are driven by DOM events and verified by reading the resulting value.',
@@ -104,8 +110,9 @@ const INTENTS = [
 ];
 
 const NOT_IMPLEMENTED = [
-  { capability: 'read values stored in the Chrome password manager', status: 'impossible_by_design', note: 'Chrome does not expose saved password values to extensions, CDP or UI Automation. Only triggering the browser autofill is possible.' },
-  { capability: 'solve image or interactive captchas automatically', status: 'not_implemented', note: 'Reading an OTP out of a web mailbox is ordinary browsing and is supported. Deciding an image challenge is not, and would need a human or an external service.' },
+  { capability: 'trigger the Chrome password autofill popup', status: 'not_implemented', note: 'The popup is drawn by the browser process, not the page, so an extension cannot open it, see it, or click an entry in it, and CDP-synthesised keys never reach it. Reading the saved password directly (browser_credential_lookup) and typing it is the working route; driving the popup itself would need a foreground UI-automation path.' },
+  { capability: 'read a saved password on a Chrome build that keeps the password key out of reach', status: 'blocked_by_browser', note: 'Measured on Chrome 154 and on a Canary build that has no app-bound key at all: the profile key from Local State still decrypts that profile\'s own cookies (12 of 12, plaintext carrying the expected SHA256(host_key) prefix), yet not one login row authenticates with it, so Chrome encrypts password_value with a key it does not store in user-readable form. browser_credential_lookup reports this as reason "password_key_not_available" with keyValidation attached, rather than guessing. Revealing the password in chrome://password-manager/passwords, or asking the user, is what remains.' },
+  { capability: 'solve image or interactive captchas automatically', status: 'not_implemented', note: 'Reading an OTP out of a web mailbox is ordinary browsing and is supported by browser_otp_fetch. Deciding an image challenge is not, and would need a human or an external service.' },
   { capability: 'edit a live script in place, the way Sources live-edit does', status: 'not_implemented', note: 'Breakpoints, stepping, call-frame inspection and evaluation are implemented through browser_debugger. Writing a modified script back into the running page (Debugger.setScriptSource) is not exposed yet.' },
   { capability: 'request replay from the Network panel', status: 'not_implemented', note: 'Capture is read-only.' },
   { capability: 'write Chrome settings, certificates or proxy', status: 'not_implemented', note: 'Planner and native snapshot exist; the write/read-back loop does not.' }
@@ -113,7 +120,7 @@ const NOT_IMPLEMENTED = [
 
 const FOCUS_POLICY = {
   summary: 'Foreground is required only where the operating system, not the page, decides the target.',
-  backgroundSafeTools: ['browser_read', 'browser_find_text', 'browser_find_element', 'browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_scroll', 'browser_key', 'browser_wait', 'browser_screenshot', 'browser_performance', 'browser_network_summary', 'browser_devtools_capture', 'browser_debug', 'browser_debugger', 'browser_health', ...COORDINATE, 'browser_tabs', 'browser_open', 'browser_close', 'browser_launch', 'browser_reload_extension'],
+  backgroundSafeTools: ['browser_read', 'browser_find_text', 'browser_find_element', 'browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_scroll', 'browser_key', 'browser_wait', 'browser_screenshot', 'browser_performance', 'browser_network_summary', 'browser_devtools_capture', 'browser_debug', 'browser_debugger', 'browser_health', 'browser_login_state', 'browser_otp_fetch', 'browser_credential_lookup', ...COORDINATE, 'browser_tabs', 'browser_open', 'browser_close', 'browser_launch', 'browser_reload_extension'],
   foregroundRequiredTools: ['browser_desktop_windows', 'browser_native_snapshot', 'browser_devtools'],
   advisoryOnlyStates: ['tab.active', 'window.focused', 'document.visibilityState', 'document.hasFocus'],
   guidance: 'These four states are reported for diagnosis, not as a gate. A backgrounded tab is a normal working state: do not stop a DOM, CDP or coordinate task because of them. Coordinates do not need the foreground: the token is bound to the DOM element and re-hit-tested, and CDP dispatches into the target by tabId. browser_reload_extension does not either, because the extension reloads itself with chrome.runtime.reload(); only its Windows UI Automation fallback types into a real window. Pass requireForeground:true only when you specifically want foreground evidence.',

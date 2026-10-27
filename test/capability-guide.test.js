@@ -58,12 +58,23 @@ test('an unknown goal still returns a usable chain instead of nothing', () => {
 test('capability gaps are stated instead of being hidden behind a refusal', () => {
   const guide = capabilityGuide({ goal: '登录' });
   const gaps = Object.fromEntries(guide.notImplemented.map(entry => [entry.capability, entry]));
-  assert.equal(gaps['read values stored in the Chrome password manager'].status, 'impossible_by_design');
+  // Reading the saved password is a capability now (browser_credential_lookup).
+  // What remains impossible is driving Chrome's own autofill popup, which lives
+  // in the browser process, so that is the gap that must be stated.
+  assert.equal(gaps['read values stored in the Chrome password manager'], undefined);
+  assert.equal(gaps['trigger the Chrome password autofill popup'].status, 'not_implemented');
+  // Measured, not assumed: the profile key still opens the profile's own cookies
+  // but not one login row, so the limit has to be stated as the browser's.
+  const blocked = gaps['read a saved password on a Chrome build that keeps the password key out of reach'];
+  assert.equal(blocked.status, 'blocked_by_browser');
+  assert.match(blocked.note, /cookies/);
+  assert.match(blocked.note, /password_key_not_available/);
   // Breakpoints and stepping are a capability now (browser_debugger); only
   // writing a modified script back into the page is still missing.
   assert.equal(gaps['edit a live script in place, the way Sources live-edit does'].status, 'not_implemented');
   assert.equal(gaps['breakpoints, stepping and script editing in Sources'], undefined);
-  assert.match(guide.primary.prefer, /autofill/);
+  assert.match(guide.primary.prefer, /browser_login_state/);
+  assert.match(guide.primary.prefer, /browser_credential_lookup/);
   // Launching a browser used to be listed here. It is a capability now, so
   // leaving it in the gap list would send agents looking for a workaround.
   assert.equal(gaps['launch a browser when none is running'], undefined);
