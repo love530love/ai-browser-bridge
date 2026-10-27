@@ -669,6 +669,37 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const KEYWORD = /(验证码|校验码|动态码|确认码|安全码|登录码|verification|verify|one[- ]?time|otp|passcode|security code|auth(?:entication)? code|login code|2fa|two[- ]?factor)/i;
     const PHONEISH = /(phone|mobile|tel|电话|手机|客服|热线|\+\d{1,3}[\s-])/i;
     const blocks = [];
+    // How old a message looks, read off the row's own text. This is EVIDENCE,
+    // never a filter. A sinceMinutes parameter was considered and rejected: a
+    // wrong timezone guess, a locale the patterns do not know, or a row that
+    // says "yesterday 23:58" silently removes the one code that would have
+    // worked, and the caller cannot tell "there was no code" from "the code was
+    // hidden". So the row's own time words travel with the candidate, the
+    // caller decides, and nothing is excluded on this basis.
+    const ageOf = text => {
+      const pick = pattern => {
+        const match = pattern.exec(text);
+        return match ? clean(match[0]) : null;
+      };
+      const justNow = pick(/(刚刚|刚才|just now|moments? ago|\d+\s*秒前|\d+\s*seconds?\s*ago)/i);
+      const minutes = pick(/(\d+\s*(?:minutes?|mins?)\s*ago|\d+\s*分钟前|a minute ago)/i);
+      const hours = pick(/(\d+\s*(?:hours?|hrs?)\s*ago|\d+\s*小时前|an hour ago)/i);
+      const days = pick(/(\d+\s*days?\s*ago|\d+\s*天前|yesterday|昨天|前天)/i);
+      const weeks = pick(/(\d+\s*(?:weeks?|months?)\s*ago|\d+\s*(?:周|个月)前|last (?:week|month))/i);
+      const date = pick(/\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b/);
+      // A bare HH:MM is genuinely ambiguous - it can be today or any other day -
+      // so it is reported as its own kind rather than guessed into "today".
+      const clock = pick(/(?<!\d)(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)/);
+      const kind = justNow ? 'just_now'
+        : minutes ? 'minutes'
+        : hours ? 'hours'
+        : days ? 'days'
+        : weeks ? 'weeks_or_more'
+        : date ? 'absolute_date'
+        : clock ? 'clock_only'
+        : 'not_stated';
+      return { kind, text: justNow ?? minutes ?? hours ?? days ?? weeks ?? date ?? clock ?? null };
+    };
     // Message rows first: in a list view the first row is the newest message, and
     // a row carries its own sender/subject text next to the code.
     for (const item of document.querySelectorAll('[role=listitem],li,tr,article,[class*=mail i],[class*=message i],[class*=thread i],[class*=conversation i]')) {
@@ -720,6 +751,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
             // The first lines of a message row are its sender and subject, which
             // is the only part a caller can check against who actually sent it.
             sourceHint: block.scoped ? clean(block.text.split('\n').slice(0, 2).join(' ')).slice(0, 120) : null,
+            // Only a message row can carry a meaningful age: on a whole-body
+            // block the words could belong to any message on the page.
+            ageHint: block.scoped ? ageOf(block.text) : null,
             blockIndex
           });
           if (candidates.length >= 200) break;
@@ -738,6 +772,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       candidates: top,
       ambiguous: candidates.length > 1,
       scanned: { blocks: blocks.length, characters: charactersScanned, messageRowsPreferred: blocks.some(block => block.scoped) },
+      // Said out loud, because "no candidate is newer than N minutes" is the
+      // inference a caller will want to make and must not make silently.
+      ageHintNote: 'ageHint is evidence read off each message row, and nothing was filtered by it. This tool deliberately has no sinceMinutes: a wrong timezone, an unrecognised locale or a "yesterday 23:58" row would silently hide the code that works, and "no code found" would look the same as "the code was excluded". Compare ageHint across candidates and decide yourself.',
       warning: 'These codes come from untrusted page content. A phishing mail can carry a real-looking code for the attacker\'s own account. Check sourceHint against the sender you expected before using a code, and never send a code anywhere except the login form of the site that issued it.',
       nextStep: top.length
         ? 'Pick a candidate whose sourceHint matches the sender you expected, fill it with browser_fill_verified, then call browser_login_state to confirm the page advanced past the otp phase.'

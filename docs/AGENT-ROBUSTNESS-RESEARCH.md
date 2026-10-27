@@ -90,10 +90,15 @@
 ## 4. 还没做、但值得做的（按性价比排序）
 
 1. ~~**离线任务套件（最高性价比）**~~ **已在 0.12.0 做完**，见第 5 节。结论比预期更有用：它当场抓出两个真实缺陷（普通「Sign out」链接不被识别、`click_verified` 在导航提交上报 `uncertain`），而不是只产出一张好看的表。
-2. **`click_verified` 分不清「成功」与「失败但也换了页」**。0.10 解决了「等相位」，但一次点击之后如果页面跳转到了错误页，`expect.textAppears` 在新文档里根本没被求值。建议：点击后若发生导航，返回 `status: navigated` + `finalUrl`，并要求调用方用 `browser_login_state` / `browser_read` 确认，而不是让 `verified:true` 混过去。**0.11 已在 recipe 里这么做（`status: 'navigated'`），单次点击还没跟上。**
-3. **`browser_otp_fetch` 的时效**。刻意不做 `sinceMinutes`（错误的时区/相对时间猜测会静默藏掉正确的码）。可行的替代：把「这条消息看起来是新的/旧的」作为**证据**返回（`ageHint` + `parsed: false`），而不是用来过滤。
-4. **DevTools Console 脚本输入**。`browser_debugger action:"evaluate"` 已有等价能力，缺的是「像人一样在 Console 里敲一行并看到输出」的通道；优先级低于 1–3。
-5. **chrome://settings 读写 / 性能录制 / Lighthouse / ServiceWorker 调试**。都属于「人类能点，但扩展与 CDP 各有硬墙」的区域，必须逐项实测可达性再写实现（0.9 的 `DOMStorage` 教训：**先探测域是否可达，再写代码**）。
+2. ~~**`click_verified` 分不清「成功」与「失败但也换了页」**~~ **已在 0.12.0 做完**。现在 URL 变了就报 `status:"navigated"` + `navigation.from/to`，并明说「期望值从未被求值，请在新页面确认」。判断放在 service worker：页面侧代码已随旧文档消失，只有 `chrome.tabs` 知道 URL 变了。
+3. ~~**`browser_otp_fetch` 的时效**~~ **已在 0.13.0 做完**。每个候选带 `ageHint`（`just_now / minutes / hours / days / weeks_or_more / absolute_date / clock_only / not_stated` + 页面原话），**只作证据、绝不过滤**，顶层 `ageHintNote` 把「没有 sinceMinutes，以及为什么」写进返回值。`clock_only` 单独一类，因为裸 `14:32` 可能是今天也可能是别的日子，猜成「今天」正是这个字段要避免的静默推断。
+4. **DevTools Console 脚本输入**。`browser_debugger action:"evaluate"` 已有等价能力（实测在普通页可用），缺的只是「像人一样在 Console 里敲一行并看到输出」的界面通道。**结论：不实现**——它增加的是拟人外观，不是能力，而每多一条注入通道就多一处要审计的代码。
+5. **chrome://settings 读写 / 性能录制 / Lighthouse / ServiceWorker 调试**。**0.13.0 已实测可达性，结论如下**：
+   - `browser_open` 直接拒绝 `chrome://settings/`（`Only HTTP(S) URLs without credentials are allowed`），所以连页面都到不了；
+   - 而 `browser_protected_ui_plan` 早已给出诚实回答：`status:"desktop_adapter_required"`、`supportedActions` 不含 `chrome_settings_changes`、`adapterAvailability:"not_implemented_for_action"`。也就是说这不是一个「没人注意到的缺口」，而是一个**有方案、故意没实现**的能力。
+   - 真正的实现路径是把 `chrome_settings_changes` 做成 desktop adapter 的一个动作（Windows UI Automation，与 `browser_password_manager_reveal` 同一条通道）：绑定精确目标 → 读当前值 → 改一次 → 重读 → 记录旧值。**这是一整块工作，不适合塞进一个收尾版本**，留作独立一轮。
+   - Lighthouse 需要 lighthouse 包 + 独立 remote-debugging-port 的 Chrome，属于「基座之外的评测工具」，不引入。
+   - 性能录制与 ServiceWorker 调试：`browser_performance` / `browser_devtools` 已覆盖常用面，未做的部分价值低于上面这块。
 6. **从捕获记录直接重放**。`browser_devtools_capture` 刻意丢弃 header/body，所以做不到；要做就得先决定「要不要在磁盘上存请求体」——那是隐私决定，不是技术决定。
 
 ---

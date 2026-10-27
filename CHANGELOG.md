@@ -1,3 +1,12 @@
+## 0.13.0 — 2026-10-27（已部署，本机实测）
+
+- **`browser_otp_fetch` 的「时效」做成证据，而不是过滤器**。刻意不做 `sinceMinutes`：时区猜错、locale 不认识、或者一行写着「昨天 23:58」，都会**静默藏掉那个能用的码**，而回复只会说「没找到码」——和「邮箱里确实没有」长得一模一样，代价是调用方去重新申请、白烧一次频控。现在每个候选带 `ageHint`：`kind` 为 `just_now / minutes / hours / days / weeks_or_more / absolute_date / clock_only / not_stated`，`text` 是页面自己的原话，中英文都认（`刚刚 / 3分钟前 / yesterday / 3 weeks ago`）。**裸 `14:32` 单独归为 `clock_only`**，因为那可能是今天也可能是别的日子，猜成「今天」正是这个字段要避免的静默推断。
+- **顶层 `ageHintNote` 把「为什么没有 sinceMinutes」写进返回值本身**，而不是只写在文档里。调用方最想做的推断是「没有比 N 分钟更新的候选」，这个推断必须由它自己做，不能在基座里悄悄做掉。
+- **`ageHint` 只在消息行上给**（`block.scoped`）：整页兜底块里的时间词可能属于页面上任何一条消息，给它一个 `ageHint` 等于编造。
+- 新增 `test/otp-age.test.js`（8 条）：七种 kind 的分类、中文相对时间、`clock_only` 不猜成今天、无时间词时 `not_stated` 且 `text: null`、**三周前的候选仍然被返回**（这条是「只作证据不过滤」的正面证明）、以及两个不同年龄的候选同时出现（如果被误加了过滤只会剩一个）。
+- **顺手把调研文档第 4 节的剩余待办结清并留下实测证据**：`browser_debugger action:"evaluate"` 实测在普通页可用，Console 拟人输入**决定不实现**（增加的是外观不是能力，多一条注入通道就多一处要审计的代码）；`chrome://settings` 实测 `browser_open` 直接拒绝（`Only HTTP(S) URLs without credentials are allowed`），而 `browser_protected_ui_plan` 早已回答 `desktop_adapter_required` + `adapterAvailability:"not_implemented_for_action"`——**这是有方案、故意没实现的缺口，不是没人注意到的缺口**；实现路径是把 `chrome_settings_changes` 做成 desktop adapter 的一个动作（Windows UIA，与 `browser_password_manager_reveal` 同一条通道），那是一整块工作，留作独立一轮。Lighthouse 需要独立 remote-debugging-port 的 Chrome，属于基座之外的评测工具，不引入。
+- 全量单测 **360/360**；`doctor` 10/10 全绿；扩展与服务同为 0.13.0；工具数仍为 68。
+
 ## 0.12.0 — 2026-10-27（已部署，本机实测）
 
 - **本轮做的是「度量」，不是「加能力」**。0.11 说 recipe 能让弱 agent 把事做完，但那句话在当时不可证伪：所有验收都在回答「这个能力对不对」，没有一条在回答「一个读不懂页面的调用方能不能把任务做完」。新增 `test/bench/`（`npm run test:bench`）：5 个任务 × 3 种调用风格 = 13 次运行，全跑本地 fixture，不碰真实账号。

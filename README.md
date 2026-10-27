@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.12.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.13.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.13.0 只改一件事，但它是个反复被提的坑：`browser_otp_fetch` 要不要按「几分钟内」过滤。答案是**不要**——时区猜错、locale 不认识、或者一行写着「昨天 23:58」，都会静默藏掉那个能用的码，而回复只会说「没找到码」，和「邮箱里确实没有」长得一模一样。所以改成**证据**：每个候选带 `ageHint`（`just_now / minutes / hours / days / weeks_or_more / absolute_date / clock_only / not_stated` + 页面原话），并把这个理由写进返回值本身。
 
 0.12.0 做的是**度量**，不是加能力。0.11 说 recipe 能让弱 agent 把事做完，但那句话当时不可证伪：所有验收都在回答「这个能力对不对」，没有一条在回答「一个读不懂页面的调用方能不能把任务做完」。新增的 `test/bench/` 把三个数字变成可复现的：完成率、确认率、危险动作数（点错目标、重复提交），而且 `completed` 与 `danger` 一律取自 fixture 服务端自己的记录，不采信调用方的自述。首次实测：`blind` 完成 2/5 并造成 2 次实际损害，`guarded` 完成 4/5 且零损害，`recipe` 用更少的步数达到同样结果。它还当场抓出两个真实缺陷——普通「Sign out」链接不被识别导致 `untilPhase:"logged_in"` 在最需要它的应用上失效，以及 `click_verified` 在导航型提交上报 `uncertain`（现在报 `navigated` 并说明期望值从未被求值）。两个都修了。详见 [调研文档第 5 节](docs/AGENT-ROBUSTNESS-RESEARCH.md)。
 
