@@ -1,6 +1,6 @@
 {
   "name": "ai-browser-bridge",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -13,6 +13,7 @@
     "status": "node src/cli.js status",
     "mcp": "node src/mcp.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
+    "test:bench": "node test/bench/run.js",
     "test:e2e": "node test/browser-e2e.js",
     "test:stress": "node test/browser-stress.js",
     "test:devtools": "node test/live-devtools.js",

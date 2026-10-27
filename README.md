@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.11.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.12.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.12.0 做的是**度量**，不是加能力。0.11 说 recipe 能让弱 agent 把事做完，但那句话当时不可证伪：所有验收都在回答「这个能力对不对」，没有一条在回答「一个读不懂页面的调用方能不能把任务做完」。新增的 `test/bench/` 把三个数字变成可复现的：完成率、确认率、危险动作数（点错目标、重复提交），而且 `completed` 与 `danger` 一律取自 fixture 服务端自己的记录，不采信调用方的自述。首次实测：`blind` 完成 2/5 并造成 2 次实际损害，`guarded` 完成 4/5 且零损害，`recipe` 用更少的步数达到同样结果。它还当场抓出两个真实缺陷——普通「Sign out」链接不被识别导致 `untilPhase:"logged_in"` 在最需要它的应用上失效，以及 `click_verified` 在导航型提交上报 `uncertain`（现在报 `navigated` 并说明期望值从未被求值）。两个都修了。详见 [调研文档第 5 节](docs/AGENT-ROBUSTNESS-RESEARCH.md)。
 
 0.11.0 回答的是另一个问题：**一个看不懂页面的 agent，凭什么能把事做完？** 先做调研再动手，结论写在 [让「很弱的 agent」也能把事做完](docs/AGENT-ROBUSTNESS-RESEARCH.md)：弱 agent 做不完事，通常不是因为不够聪明，而是因为**每一步都要它做决定**。所以这一轮把决定挪走——`browser_recipe_save` / `browser_recipe_run` / `browser_recipe_list` / `browser_recipe_delete` 让流程**想过一次就能按数据重放**。每步存的不是动作也不是选择器，而是一个**耐久描述符**（tag / role / accessible name / 可见文本 / id / name 属性 / selector），运行时按七级身份阶梯重新解析（`role+name → name → id → name-attribute → selector → text → fuzzy-name`），所以跨得过框架重建（id 每次都换）、跨得过快照淘汰（ref 会死，accessible name 不会）。四条硬规则都是「宁可拒绝也不猜」：命中多个可见元素就拒绝、变量在 step 1 之前全量校验、secret 步骤拒绝存字面量（否则 recipe 文件就是明文密码库）、拒绝记录导航/上传/坐标步骤。调研里**明确不采纳**的也有理由：AI 兜底定位（基座必须在无模型时可用，且模型判断不可复现）、set-of-marks 截图标注（真实账号的像素不该进上下文）、云端反爬与 CAPTCHA。详见 [Chrome 能力矩阵](docs/CHROME-CAPABILITY-MATRIX.md)。
 
@@ -230,7 +232,10 @@ node src/cli.js call browser_tabs
 ```powershell
 npm test
 npm run test:e2e
+npm run test:bench
 ```
+
+`npm run test:bench` 是**能力之外的另一种验收**：5 个任务 × 3 种调用风格（blind / guarded / recipe），度量「一个读不懂页面的调用方能不能把事做完、会不会弄坏东西」，输出完成率、确认率、步数与危险动作数。它不调用任何模型——注入的是失败模式，不是推理能力。数字和「这个套件不证明什么」都写在 [调研文档第 5 节](docs/AGENT-ROBUSTNESS-RESEARCH.md)。
 
 自动测试使用独立临时 Chromium 配置和本地测试网页，不读取个人 Chrome 数据。端到端测试通过 MCP 完成打开、读取、填写、点击、截图、导航、暂停、恢复及关闭，并由独立 HTTP 客户端验证第二条接入路径。截图与报告在 `output/playwright/`。
 

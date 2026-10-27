@@ -27,7 +27,7 @@ import { pageOperation } from '../extension/page.js';
 const HREF = 'https://fixture.test/login';
 const ORIGIN = 'https://fixture.test';
 
-function build({ controls = [], accounts = [], errors = [] } = {}) {
+function build({ controls = [], accounts = [], errors = [], links = [] } = {}) {
   const make = (spec) => {
     const attrs = { ...(spec.attrs ?? {}) };
     const tag = spec.tag ?? 'INPUT';
@@ -70,13 +70,16 @@ function build({ controls = [], accounts = [], errors = [] } = {}) {
   const nodes = controls.map(make);
   const accountNodes = accounts.map(make);
   const errorNodes = errors.map(make);
+  const linkNodes = links.map(make);
   const document = {
     title: 'fixture',
-    // The login block issues three different queries; answering all of them with
+    // The login block issues four different queries; answering all of them with
     // one list would let an avatar element count as a password field.
     querySelectorAll: selector => {
-      if (String(selector).startsWith('[class*=avatar')) return accountNodes;
-      if (String(selector).startsWith('[role=alert')) return errorNodes;
+      const s = String(selector);
+      if (s.startsWith('[class*=avatar')) return accountNodes;
+      if (s.startsWith('[role=alert')) return errorNodes;
+      if (s === 'a[href]') return linkNodes;
       return nodes;
     },
     getElementById: () => null
@@ -148,6 +151,31 @@ test('a visible sign-out control is strong logged_in evidence', async () => {
   const state = await stateOf(build({ controls: [signOutButton] }));
   assert.equal(state.phase, 'logged_in');
   assert.equal(state.phaseConfidence, 'strong');
+});
+
+test('a plain sign-out link is logged_in evidence, though it is not a control', async () => {
+  // The most common sign-out control in the world is <a href="/logout">Sign
+  // out</a>, and the controls list excludes plain links because they are not
+  // submit candidates. Scanning controls only reported "unknown" on an app home
+  // page whose header says "Sign out", which made untilPhase:"logged_in"
+  // unusable on exactly the apps it exists for.
+  const state = await stateOf(build({ links: [{ tag: 'A', attrs: { href: '/logout' }, text: 'Sign out' }] }));
+  assert.equal(state.phase, 'logged_in');
+  assert.equal(state.phaseConfidence, 'strong');
+  assert.ok(state.phaseEvidence.some(item => /sign-out link/.test(item)), JSON.stringify(state.phaseEvidence));
+  assert.equal(state.logoutHints.length, 1);
+});
+
+test('a footer sign-out link does not override an identifier field', async () => {
+  // A marketing header or footer carries "Sign out" on pages nobody is signed
+  // in to. An identifier field is direct evidence of the opposite, so the link
+  // only decides the phase when there is no field to contradict it.
+  const state = await stateOf(build({
+    controls: [email, nextButton],
+    links: [{ tag: 'A', attrs: { href: '/logout' }, text: 'Sign out' }]
+  }));
+  assert.equal(state.phase, 'identifier');
+  assert.equal(state.usernameFields.length, 1);
 });
 
 test('an avatar element with no sign-out control is weak logged_in evidence', async () => {

@@ -883,7 +883,41 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'].includes(name)) {
     if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
     const prepared = name === 'browser_upload_verified' ? { ...args, verifyKind: 'upload' } : args;
-    return await page(name, { ...prepared, ...routedArgs, ref: routedArgs.ref });
+    // A verified write whose expectation lives in the document that the write
+    // itself replaces cannot report success: the code that would evaluate the
+    // expectation died with the old document. Only a click can do this (fill and
+    // upload never navigate), so only a click pays for the extra read.
+    //
+    // The url survives the document, so it is read from chrome.tabs rather than
+    // from the page. Without this, a submit that navigates comes back as
+    // "uncertain" — and "uncertain" is the word that teaches a caller to click
+    // the submit button a second time. A changed url is the evidence that the
+    // click was dispatched; whether it reached the right page is a separate
+    // question, so the result still says the expectation was never evaluated.
+    const urlBefore = name === 'browser_click_verified'
+      ? (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null
+      : null;
+    const asNavigated = async outcome => {
+      if (urlBefore === null || outcome?.status === 'success') return outcome;
+      const urlAfter = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null;
+      if (!urlAfter || urlAfter === urlBefore) return outcome;
+      return { ...(outcome ?? {}), status: 'navigated', dispatched: outcome?.dispatched ?? true, retryable: false,
+        navigation: { from: urlBefore, to: urlAfter },
+        reason: outcome?.reason ?? 'document_replaced_by_navigation',
+        recommendedNextAction: 'The click navigated, which is the evidence that it was dispatched, but the document that held the expectation is gone, so the expectation was never evaluated. Confirm the outcome on the new page with browser_read or browser_login_state before doing anything else. Do not click again.' };
+    };
+    let outcome;
+    try {
+      outcome = await page(name, { ...prepared, ...routedArgs, ref: routedArgs.ref });
+    } catch (error) {
+      // The throw is usually the injected world disappearing under the click.
+      // If the url moved, that is a dispatch, not a failure, and reporting it as
+      // a failure is what causes the duplicate submit.
+      const settled = await asNavigated({ status: 'uncertain', reason: 'verification_interrupted_after_dispatch', dispatched: true, retryable: false });
+      if (settled?.status === 'navigated') return settled;
+      throw error;
+    }
+    return await asNavigated(outcome);
   }
   // Ref-to-descriptor conversion for recipe saving. It answers here rather than
   // in the service because only the page knows an element's accessible name and

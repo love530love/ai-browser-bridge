@@ -1,3 +1,17 @@
+## 0.12.0 — 2026-10-27（已部署，本机实测）
+
+- **本轮做的是「度量」，不是「加能力」**。0.11 说 recipe 能让弱 agent 把事做完，但那句话在当时不可证伪：所有验收都在回答「这个能力对不对」，没有一条在回答「一个读不懂页面的调用方能不能把任务做完」。新增 `test/bench/`（`npm run test:bench`）：5 个任务 × 3 种调用风格 = 13 次运行，全跑本地 fixture，不碰真实账号。
+- **不用真模型，是刻意的**。基座的硬约束是无模型也能用；一个需要 API key 的 benchmark 违反它要证明的那件事。而且模型有版本漂移，同一个月内换个模型结论就不可复现。所以要度量的是**基座能不能把 careless 的调用变成安全的拒绝**，那就把失败模式注入进去：`blind`（按第一个像的 label 定位、用不返回裁决的工具、没有裁决就再动一次）、`guarded`（只在 label 唯一时定位、用 `*_verified`、非成功即停）、`recipe`（决定一次、存下来、重放）。
+- **三个数字，一个都不许来自调用方自述**：`completed` 来自 fixture 服务端记录的 POST 与记录状态；`danger` 是 fixture 记录的不该发生的写；`steps` 是实际调用数。另加 `confirmed` 一列表示基座有没有给出裁决——「事情做成了但它不知道，于是再做一次」正是弱 agent 的痛点。
+- **首次实测**：`blind` 完成 2/5 且造成 2 次实际损害（一次重复提交、一次删错记录），做成的那两次里有一次完全不知道自己成了；`guarded` 完成 4/5、零损害、每次都拿到裁决，唯一没做成的是陷阱页——它拒绝了，因为两个控件同名，这是正确行为；`recipe` 用更少的步数拿到同样结果（登录 4 vs 5、填表 3 vs 5）。
+- **两条正控制，比结论本身更重要**：`submit-form / blind` 必须产生重复提交、`delete-draft / blind` 必须删错记录。一个报告「零危险动作」的 benchmark，如果不能证明它**看得见**危险动作，那个零一文不值。任何一条不再发生，说明 fixture 坏了而不是基座变好了。
+- **写 benchmark 比跑它更有价值：它当场抓出两个真实缺陷，两个都修了。**
+  ① **普通「Sign out」链接根本不被识别**。`logoutHints` 只扫 `controls`，而 `controls` 按设计不含普通 `<a href>`（它们不是提交候选）。于是「头部写着 Sign out 的应用主页」报 `unknown`，`untilPhase:"logged_in"` **在它最该服务的那些应用上完全不可用**。修法：sign-out 链接单独扫一遍，并作为弱证据——只有页面上没有标识符输入框时才据此判 `logged_in`（营销页脚也可能挂 Sign out，不能让它盖掉真实表单）。`test/login-phase.test.js` 12 → 14 条，两个方向都钉住。
+  ② **`click_verified` 在导航型提交上报 `uncertain`**（0.11 只在 recipe 里修过，单工具没跟上）。现在 URL 变了就报 `status:"navigated"` + `navigation.from/to`，并明确「期望值从未被求值，请在新页面用 `browser_read` / `browser_login_state` 确认，不要重复点击」。判断放在 service worker 里，因为页面侧的代码已经随旧文档消失了——只有 `chrome.tabs` 知道 URL 变了。
+- **`browser_click_verified` 的分支收窄**：只有 click 付这次额外读取的代价（fill / upload 不会导航）。
+- 新增 `test/bench/site.js`（fixture 站点：陷阱页两个同名 Delete、iframe 提交页保证 ref 仍然有效）与 `test/bench/run.js`（runner + 不变量）。文档新增第 5 节，含完整实测表、读法，以及**这个套件不证明什么**。
+- 全量单测 **352/352**；`doctor` 10/10 全绿；扩展与服务同为 0.12.0；工具数仍为 68（本轮不加工具）。
+
 ## 0.11.0 — 2026-10-27（已部署，本机实测）
 
 - **先调研，再动手**：新增 [docs/AGENT-ROBUSTNESS-RESEARCH.md](docs/AGENT-ROBUSTNESS-RESEARCH.md)。把「弱 agent 也能完成任意目的」拆成五条可测能力（看懂页面 / 选对目标 / 知道做成了没有 / 出错能恢复 / 不必每次重新想），再对照业界做法逐条给结论：Playwright MCP 用无障碍树而非截图、Playwright 的 aria snapshot、browser-use 的历史重放、Healenium 的多属性自愈、Skyvern 的「选择器优先 + AI 兜底」。**明确不采纳**的是 AI 兜底定位（基座必须在无模型时可用，且模型判断不可复现、不可审计）、set-of-marks 截图标注（真实账号的像素不该进上下文）、云端反爬/CAPTCHA（本项目不承载风控对抗）。许可证纪律也写进去了：Skyvern 是 AGPL-3.0，只借思路不抄代码。

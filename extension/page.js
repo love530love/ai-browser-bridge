@@ -798,10 +798,21 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const text = `${el.innerText || el.value || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.getAttribute('href') || ''}`.toLowerCase();
       return /(google|apple|microsoft|github|facebook|wechat|weixin|qq|weibo|dingtalk|sso|single sign|微信|企业微信|钉钉|微博|扫码)/.test(text);
     }).slice(0, 8);
-    const logoutHints = controls.filter(el => {
-      const text = `${el.innerText || el.value || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('href') || ''}`.toLowerCase();
-      return /(log ?out|sign ?out|退出|登出|注销)/.test(text);
-    }).slice(0, 4);
+    // A sign-out control is usually a plain link, and `controls` deliberately
+    // excludes plain links (they are not submit candidates). Scanning only
+    // controls made every app whose header reads "Sign out" report "unknown",
+    // which made untilPhase:"logged_in" unusable on exactly the apps it is for.
+    // Links are kept as a separate, weaker list: a login page may carry a
+    // "Sign out" link in a footer or a marketing header, so a link only decides
+    // the phase when there is no identifier field to contradict it.
+    const signOutPattern = /(log ?out|sign ?out|退出|登出|注销)/;
+    const signOutText = el => `${el.innerText || el.value || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('href') || ''}`.toLowerCase();
+    const logoutHintsFromControls = controls.filter(el => signOutPattern.test(signOutText(el))).slice(0, 4);
+    const logoutLinks = [...document.querySelectorAll('a[href]')]
+      .filter(el => visible(el) && !sensitive(el))
+      .filter(el => signOutPattern.test(signOutText(el)))
+      .slice(0, 4);
+    const logoutHints = [...new Set([...logoutHintsFromControls, ...logoutLinks])].slice(0, 4);
     // A signed-in page very often hides "sign out" inside an avatar menu that is
     // closed, so requiring a visible sign-out control reports "unknown" on pages
     // that are plainly authenticated. An account/avatar element is weaker
@@ -834,7 +845,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     // the phase and the guidance tells the caller to check the heading text.
     const phase = passwordFields.length ? 'credentials'
       : (otpFields.length || digitBoxes.length >= 4) ? 'otp'
-      : logoutHints.length ? 'logged_in'
+      : (logoutHintsFromControls.length || (logoutLinks.length && !usernameFields.length)) ? 'logged_in'
       : (accountHints.length && !usernameFields.length) ? 'logged_in'
       : usernameFields.length ? 'identifier'
       : 'unknown';
@@ -845,7 +856,8 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (passwordFields.length) phaseEvidence.push(`${passwordFields.length} visible password field(s)`);
     if (otpFields.length) phaseEvidence.push(`${otpFields.length} one-time-code field(s)`);
     else if (digitBoxes.length >= 4) phaseEvidence.push(`${digitBoxes.length} single-character code boxes`);
-    if (logoutHints.length) phaseEvidence.push('a visible sign-out control');
+    if (logoutHintsFromControls.length) phaseEvidence.push('a visible sign-out control');
+    else if (logoutLinks.length) phaseEvidence.push('a visible sign-out link');
     if (accountHints.length) phaseEvidence.push('an account or avatar element');
     if (usernameFields.length) phaseEvidence.push(`${usernameFields.length} identifier field(s)`);
     if (errorNodes.length) phaseEvidence.push(`${errorNodes.length} visible error message(s)`);

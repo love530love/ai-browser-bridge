@@ -17,5 +17,9 @@ bridge-autostart.cmd
 # graphify code-graph output (generated, machine-local)
 graphify-out/
 
+# Last bench run, kept on disk for comparing versions. It holds no page data,
+# but it is a timestamped measurement, not a source file.
+test/bench/last-run.json
+
 # Scratch files used while working; never commit these.
 .tmp-*
