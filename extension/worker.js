@@ -573,7 +573,14 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   if (!Number.isInteger(args.tabId) || args.tabId < 1) throw new Error('Invalid tabId');
   const tab = await chrome.tabs.get(args.tabId);
   checkedUrl(tab.url, config);
-  if (tab.pendingUrl && tab.pendingUrl !== tab.url) throw new Error('Navigation in progress. Wait and read again.');
+  // A phase wait is the one command that is supposed to run while the tab is
+  // between documents: it is called right after a submit, which is exactly when
+  // pendingUrl is set. Refusing it here made untilPhase unreachable for every
+  // full-page login - the case it exists for. Every other command still refuses,
+  // because acting on a document that is about to be replaced is how a click
+  // lands on the wrong element.
+  const waitingForLoginPhase = name === 'browser_login_state' && typeof args.untilPhase === 'string';
+  if (tab.pendingUrl && tab.pendingUrl !== tab.url && !waitingForLoginPhase) throw new Error('Navigation in progress. Wait and read again.');
   // Lease tools never reach the extension: the service owns and answers them.
   // Page operations below therefore execute unconditionally; conflicting writes
   // were already rejected by the service before this job was dispatched.
@@ -881,6 +888,89 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   if (!['browser_read', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch'].includes(name)) throw new Error('Unknown command');
   const pageWriteTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_select', 'browser_choose', 'browser_pick']);
   if (pageWriteTools.has(name) && !(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
+  // A login submit is the one moment where a single frame is not enough: the
+  // server navigates or the SPA swaps views, so a read taken right after the
+  // click lands in the gap and reports "unknown". The wait therefore polls from
+  // here, in the service worker, and not inside the page. An in-page promise is
+  // destroyed by the very navigation the caller is waiting for, so it could only
+  // ever observe transitions that happen without a document change - which is
+  // the case untilPhase exists to cover.
+  if (name === 'browser_login_state' && typeof args.untilPhase === 'string') {
+    const phases = ['credentials', 'identifier', 'otp', 'logged_in', 'unknown'];
+    if (!phases.includes(args.untilPhase)) throw new Error(`untilPhase must be one of ${phases.join(', ')}`);
+    const timeoutMs = Math.min(60000, Math.max(200, Number(args.timeoutMs) || 15000));
+    const pollMs = Math.min(2000, Math.max(100, Number(args.pollMs) || 250));
+    const startedAt = Date.now();
+    const startUrl = tab.url;
+    // The wait is a property of this call, not of the page read: the page op
+    // must stay a single-frame description or every read would carry its own
+    // nested wait.
+    const readArgs = { ...routedArgs };
+    delete readArgs.untilPhase; delete readArgs.timeoutMs; delete readArgs.pollMs;
+    const phasesSeen = [];
+    const readFailures = [];
+    const deadline = startedAt + timeoutMs;
+    let polls = 0;
+    let originBlocked = false;
+    let latest = null;
+    let matched = false;
+    for (;;) {
+      const atMs = Date.now() - startedAt;
+      polls += 1;
+      let state = null;
+      try {
+        state = await page('browser_login_state', readArgs);
+      } catch (error) {
+        // A navigation tears down the isolated world mid-call. That is the
+        // transition being waited for, not a failure of the wait, so it is
+        // recorded and the next poll reads the new document.
+        const message = String(error?.message || error);
+        if (/Origin changed or not allowed/i.test(message)) { originBlocked = true; break; }
+        readFailures.push({ atMs, error: message.slice(0, 200) });
+      }
+      if (state && typeof state.phase === 'string') {
+        latest = state;
+        const last = phasesSeen[phasesSeen.length - 1];
+        if (!last || last.phase !== state.phase) phasesSeen.push({ phase: state.phase, atMs, url: state.url });
+        if (state.phase === args.untilPhase) { matched = true; break; }
+      } else if (state && state.status === 'waiting') {
+        readFailures.push({ atMs, error: `page returned waiting: ${state.reason || 'no reason given'}` });
+      }
+      if (Date.now() >= deadline) break;
+      if (!(await commandStillActive())) {
+        return { ...(latest ?? {}), status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false,
+          wait: { untilPhase: args.untilPhase, matched: false, timedOut: false, waitedMs: Date.now() - startedAt, phasesSeen, readFailures },
+          nextPollTool: 'browser_health',
+          recommendedNextAction: 'The command was cancelled or the bridge disconnected during the wait, so the final phase is unknown. Re-read with browser_login_state before acting; do not re-submit blindly.' };
+      }
+      await new Promise(resolve => setTimeout(resolve, pollMs));
+    }
+    const waitedMs = Date.now() - startedAt;
+    const afterTab = await chrome.tabs.get(tab.id).catch(() => null);
+    const toUrl = afterTab?.url ?? latest?.url ?? startUrl;
+    if (originBlocked) {
+      return { ...(latest ?? {}), status: 'blocked', reason: 'phase_wait_left_allowed_origins', dispatched: false,
+        untilPhase: args.untilPhase, waitedMs, phasesSeen, readFailures,
+        fromUrl: startUrl, toUrl,
+        recommendedNextAction: 'The page navigated to an origin this bridge is not allowed to read, so the phase after the submit cannot be observed. Add that origin to the allowlist, or read the tab with browser_health to see where it landed. Do not treat the missing phase as a failed login.' };
+    }
+    if (!latest) {
+      return { status: 'waiting', retryable: true, reason: 'login_phase_unreadable', dispatched: false,
+        untilPhase: args.untilPhase, waitedMs, readFailures: readFailures.slice(0, 6),
+        nextPollTool: 'browser_login_state',
+        recommendedNextAction: 'No frame of this tab could be read during the wait, which usually means a navigation is still in flight or the document was replaced repeatedly. Read browser_health, then call browser_login_state again without untilPhase to see the current state.' };
+    }
+    return { ...latest,
+      wait: {
+        untilPhase: args.untilPhase, matched, timedOut: !matched, waitedMs, pollMs, timeoutMs,
+        polls, phasesSeen, readFailures: readFailures.slice(0, 6),
+        urlChanged: toUrl !== startUrl, fromUrl: startUrl, toUrl,
+        note: matched
+          ? 'The page reached the requested phase while this call was open. A phase is a DOM reading, not proof of authentication: read the account name or a signed-in-only view before calling the login complete.'
+          : `The page did not reach phase "${args.untilPhase}" within ${waitedMs}ms. That is not proof the submit failed - a slow server, a captcha, an unmodelled second step or an error banner all look the same from here. phasesSeen is what was actually observed. Read errorText and the fields above before retrying, and never re-submit blindly: a second submit can trip a lockout or send a second code.`
+      }
+    };
+  }
   const target = Number.isInteger(routedArgs.frame) ? { tabId: tab.id, frameIds: [routedArgs.frame] } : { tabId: tab.id };
   const [result] = await chrome.scripting.executeScript({ target, func: pageOperation, args: [name, routedArgs, config.allowedOrigins, config.allSites] });
   if (result?.error) throw new Error(result.error.message || 'Page operation failed');

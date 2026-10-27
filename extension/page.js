@@ -802,15 +802,53 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const text = `${el.innerText || el.value || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('href') || ''}`.toLowerCase();
       return /(log ?out|sign ?out|退出|登出|注销)/.test(text);
     }).slice(0, 4);
+    // A signed-in page very often hides "sign out" inside an avatar menu that is
+    // closed, so requiring a visible sign-out control reports "unknown" on pages
+    // that are plainly authenticated. An account/avatar element is weaker
+    // evidence, and it is only used when no sign-out control and no login field
+    // exists, so it cannot override a real form. Links whose own text says
+    // "sign in" are excluded: a marketing header has one of those on every page,
+    // and treating it as an account element would report logged_in on a page
+    // nobody is signed in to.
+    const accountHints = [...document.querySelectorAll('[class*=avatar i],[class*=account i],[class*=profile i],[aria-label*=account i],[aria-label*=profile i]')]
+      .filter(el => visible(el) && !sensitive(el))
+      .filter(el => !/(log ?in|sign ?in|登录|登陆|注册|sign ?up)/i.test(`${el.innerText || ''} ${el.getAttribute('aria-label') || ''}`))
+      .slice(0, 6)
+      .map(el => ({ label: (label(el) || clean(el.innerText || '')).slice(0, 60) }));
     const errorNodes = [...document.querySelectorAll('[role=alert],[aria-live=assertive],[aria-live=polite],[class*=error i],[class*=invalid i],[class*=alert i]')]
       .filter(el => visible(el) && !sensitive(el))
       .map(el => clean(el.innerText || el.textContent || ''))
       .filter(text => text && /(error|incorrect|invalid|wrong|failed|denied|错误|失败|不正确|有误|无效|被拒绝|请重试)/i.test(text))
       .slice(0, 4);
+    // Phase order matters. A password field wins over everything (a sign-out link
+    // can be in the footer of a login page), then a code field, then a visible
+    // sign-out control, then the weak account-element inference, and only then
+    // the identifier-only screen.
+    //
+    // "identifier" is new: a two-step login shows an email/username field and a
+    // Next button with no password field at all, and it used to fall through to
+    // "unknown", whose guidance says "no login form was recognised" — which sends
+    // the caller hunting for a shadow root instead of typing the username. The
+    // false-positive risk is the mirror image (a newsletter or search field on a
+    // page that is not a login), so phaseEvidence and phaseConfidence travel with
+    // the phase and the guidance tells the caller to check the heading text.
     const phase = passwordFields.length ? 'credentials'
       : (otpFields.length || digitBoxes.length >= 4) ? 'otp'
       : logoutHints.length ? 'logged_in'
+      : (accountHints.length && !usernameFields.length) ? 'logged_in'
+      : usernameFields.length ? 'identifier'
       : 'unknown';
+    const phaseConfidence = phase === 'logged_in' ? (logoutHints.length ? 'strong' : 'weak')
+      : phase === 'unknown' ? 'none'
+      : 'strong';
+    const phaseEvidence = [];
+    if (passwordFields.length) phaseEvidence.push(`${passwordFields.length} visible password field(s)`);
+    if (otpFields.length) phaseEvidence.push(`${otpFields.length} one-time-code field(s)`);
+    else if (digitBoxes.length >= 4) phaseEvidence.push(`${digitBoxes.length} single-character code boxes`);
+    if (logoutHints.length) phaseEvidence.push('a visible sign-out control');
+    if (accountHints.length) phaseEvidence.push('an account or avatar element');
+    if (usernameFields.length) phaseEvidence.push(`${usernameFields.length} identifier field(s)`);
+    if (errorNodes.length) phaseEvidence.push(`${errorNodes.length} visible error message(s)`);
     const autofill = {
       popupObservableFromExtension: false,
       why: 'Chrome draws the password autofill popup in the browser process, not in the page DOM, so an extension can neither see it open nor click an entry in it. CDP-synthesised key events are delivered to the renderer and never reach that popup either, so pressing Down/Enter cannot pick a suggestion.',
@@ -841,6 +879,8 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       url: location.href,
       title: document.title,
       phase,
+      phaseConfidence,
+      phaseEvidence,
       passwordFields: passwordFields.map(describeField),
       usernameFields: usernameFields.map(describeField),
       otpFields: otpFields.map(describeField),
@@ -848,15 +888,20 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       submitCandidates: submitCandidates.map(el => ({ ref: makeRef(el), label: label(el) || clean(el.innerText || '').slice(0, 80), tag: el.tagName.toLowerCase() })),
       thirdPartyOptions: thirdParty.map(el => ({ ref: makeRef(el), label: (label(el) || clean(el.innerText || '')).slice(0, 80) })),
       logoutHints: logoutHints.map(el => ({ ref: makeRef(el), label: (label(el) || clean(el.innerText || '')).slice(0, 80) })),
+      accountHints,
       errorText: errorNodes,
       autofill,
       guidance: phase === 'credentials'
-        ? 'A password field is present. Fill the username and password, submit, then call browser_login_state again: a move to phase "otp" means a code is now required.'
+        ? 'A password field is present. Fill the username and password, submit, then call browser_login_state with untilPhase:"otp" (or "logged_in") so the wait covers the next screen instead of sampling the frame between two views.'
         : phase === 'otp'
-          ? 'A one-time-code field is present. Read the code with browser_otp_fetch on the mailbox tab, fill it with browser_fill_verified, then call browser_login_state again to confirm the page advanced.'
-          : phase === 'logged_in'
-            ? 'No password or code field is visible and a sign-out control exists, which suggests the session is already authenticated. Verify with a read of the expected account state rather than assuming.'
-            : 'No login form was recognised. This may be a custom widget in a shadow root, a cross-origin iframe, or a page that is neither a login nor a signed-in view. Inspect with browser_shadow_tree or browser_observe before acting.',
+          ? 'A one-time-code field is present. Read the code with browser_otp_fetch on the mailbox tab, fill it with browser_fill_verified, then call browser_login_state with untilPhase:"logged_in" to confirm the page advanced.'
+          : phase === 'identifier'
+            ? 'An identifier field is visible and there is no password field. This is the first step of a two-step login, or a search/newsletter field on a page that is not a login at all; check the heading text before typing a credential. If it is a login, fill the identifier, submit, then call browser_login_state with untilPhase:"credentials".'
+            : phase === 'logged_in'
+              ? (phaseConfidence === 'strong'
+                ? 'No password or code field is visible and a sign-out control exists, which suggests the session is already authenticated. Verify with a read of the expected account state rather than assuming.'
+                : 'No login form is visible and an account or avatar element is present, with no sign-out control. That is a weak negative inference, not proof of a session: confirm by reading the account name or a page only a signed-in user can see.')
+              : 'No login form was recognised. This may be a custom widget in a shadow root, a cross-origin iframe, or a page that is neither a login nor a signed-in view. Inspect with browser_shadow_tree or browser_observe before acting.',
       contentTrust: 'untrusted webpage data plus extension geometry'
     };
   }

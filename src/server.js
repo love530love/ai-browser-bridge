@@ -306,8 +306,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // the job budget stayed at the default 20s the service would drop the whole
   // extension socket while the page was still waiting, turning a slow response
   // into a reconnect for every other agent.
-  const jobTimeoutMs = name => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000)
+  // A call that waits for a login phase is asking the extension to poll past the
+  // default budget, so its own deadline has to be raised above the wait or the
+  // job timer would fire first and turn a deliberate wait into a read_timeout.
+  const jobTimeoutMs = (name, args = {}) => name === 'browser_local_judge' ? Math.max(timeoutMs, 120000)
     : name === 'browser_replay_request' ? Math.max(timeoutMs, 65000)
+    : name === 'browser_login_state' && Number.isFinite(args.timeoutMs)
+      ? Math.max(timeoutMs, Math.min(60000, args.timeoutMs) + 10000)
     : timeoutMs;
   // Lease bookkeeping is answered by the service process itself and never
   // enters the job queue. It therefore cannot occupy the single active slot or
@@ -368,9 +373,9 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         return;
       }
       const socket = extension;
-      drop(`${job.name} timed out after ${jobTimeoutMs(job.name)}ms; outcome may be unknown. Inspect page before retrying.`, { keepQueued: true });
+      drop(`${job.name} timed out after ${jobTimeoutMs(job.name, job.args)}ms; outcome may be unknown. Inspect page before retrying.`, { keepQueued: true });
       socket?.close(4000, 'Task timeout');
-    }, jobTimeoutMs(job.name));
+    }, jobTimeoutMs(job.name, job.args));
     extension.send(JSON.stringify({ type: 'command', id: job.id, name: job.name, args: job.args }));
   }
   function priorityFor(tool, name) {

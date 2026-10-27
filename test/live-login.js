@@ -1,8 +1,11 @@
 // Login-path acceptance against the user's already-connected Chrome.
 //
-// Covers the three things a login actually needs from this base, each on a local
-// fixture so nothing touches a real account:
+// Covers what a login actually needs from this base, each on a local fixture so
+// nothing touches a real account:
 //   - the page's login phase is read without reading a single field value,
+//   - a two-step login's first screen is its own phase instead of unknown,
+//   - a submit can be followed by a wait for the next phase, across a real
+//     navigation the fixture holds open for 600ms,
 //   - a one-time code is pulled out of a mailbox view with its sender line so a
 //     phishing code can be told apart,
 //   - a password field's accessible name comes from aria-labelledby, which the
@@ -26,7 +29,7 @@ const call = async (name, args = {}) => (await request('/call', { name, argument
 
 const loginPage = `<!doctype html><meta charset="utf-8"><title>Sign in</title>
 <h1>Sign in</h1>
-<form>
+<form action="/slow-otp" method="post">
   <span id="user-label">Email address</span>
   <input id="user" name="email" type="email" aria-labelledby="user-label">
   <label for="pw">Password</label>
@@ -42,6 +45,35 @@ const otpPage = `<!doctype html><meta charset="utf-8"><title>Verify</title>
 <input id="code" name="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
 <button type="submit">Verify</button>`;
 
+// Same form as otpPage, but its Verify button continues the flow, and the
+// server holds this response for 600ms. The hold is the point: it forces the
+// phase wait to span a real navigation instead of sampling an already settled
+// page, which is the only way to test what untilPhase exists for.
+const slowOtpPage = `<!doctype html><meta charset="utf-8"><title>Verify</title>
+<h1>Enter the code we sent you</h1>
+<form action="/inbox" method="post">
+  <label for="code">Verification code</label>
+  <input id="code" name="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+  <button type="submit">Verify</button>
+</form>`;
+
+// The signed-in view. A visible sign-out control is the strong evidence that
+// makes phase logged_in trustworthy instead of a guess.
+const inboxPage = `<!doctype html><meta charset="utf-8"><title>Inbox</title>
+<h1>Welcome back, Ada</h1>
+<p>3 unread messages</p>
+<button type="button">Sign out</button>`;
+
+// The first screen of a two-step login: an identifier field, a Next button, and
+// no password field anywhere. This used to be phase "unknown".
+const step1Page = `<!doctype html><meta charset="utf-8"><title>Sign in</title>
+<h1>Sign in</h1>
+<form action="/login" method="post">
+  <span id="user-label">Email address</span>
+  <input id="user" name="email" type="email" aria-labelledby="user-label">
+  <button type="submit">Next</button>
+</form>`;
+
 const mailboxPage = `<!doctype html><meta charset="utf-8"><title>Inbox</title>
 <ul>
   <li><span>Acme Security &lt;security@acme.test&gt;</span><span>Your verification code</span>
@@ -52,12 +84,14 @@ const mailboxPage = `<!doctype html><meta charset="utf-8"><title>Inbox</title>
       <p>Order 20241015 shipped. Call +1 415 555 0134 for help.</p></li>
 </ul>`;
 
-const pages = { '/login': loginPage, '/otp': otpPage, '/mailbox': mailboxPage };
+const pages = { '/login': loginPage, '/otp': otpPage, '/slow-otp': slowOtpPage, '/inbox': inboxPage, '/step1': step1Page, '/mailbox': mailboxPage };
+const delays = { '/slow-otp': 600 };
 const fixture = http.createServer((req, res) => {
-  const body = pages[new URL(req.url, 'http://127.0.0.1').pathname];
+  const pathname = new URL(req.url, 'http://127.0.0.1').pathname;
+  const body = pages[pathname];
   if (!body) { res.writeHead(404); res.end('not found'); return; }
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(body);
+  const send = () => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(body); };
+  if (delays[pathname]) setTimeout(send, delays[pathname]); else send();
 });
 
 const startedAt = Date.now();
@@ -140,12 +174,89 @@ try {
   const empty = await call('browser_otp_fetch', { tabId: loginTab });
   record('a page with no code returns no candidate', 0, empty?.candidateCount, `candidateCount=${empty?.candidateCount}`);
 
-  // 7. The credential lookup refuses without the explicit confirmation string.
+  // 7. The wait after a submit: the gap that made an automated login
+  //    unfinishable. A read taken right after the click lands between two
+  //    documents and reports "unknown", so the caller could not tell a slow
+  //    server from a rejected password.
+  const stepTab = await open('/step1');
+  // Named stepState, not step: `step` is the log helper and shadowing it broke
+  // every later call in this script.
+  const stepState = await call('browser_login_state', { tabId: stepTab });
+  record('an identifier-only screen is the identifier phase', 'identifier', stepState?.phase,
+    `phase=${stepState?.phase} confidence=${stepState?.phaseConfidence}`);
+  record('the identifier guidance names the wait for the next screen', true,
+    /untilPhase:"credentials"/.test(stepState?.guidance ?? ''), `guidance=${(stepState?.guidance ?? '').slice(0, 120)}`);
+  const stepUser = (stepState?.usernameFields ?? [])[0];
+  const stepNext = (stepState?.submitCandidates ?? [])[0];
+  const filledUser = await call('browser_fill_verified', { tabId: stepTab, ref: stepUser?.ref, text: 'ada@example.test', expect: { valueMatches: 'ada@example.test' } });
+  record('the identifier field accepts text and verifies', 'success', filledUser?.status,
+    `status=${filledUser?.status} valueMatches=${filledUser?.checks?.valueMatches}`);
+  await call('browser_click', { tabId: stepTab, ref: stepNext?.ref });
+  const stepped = await call('browser_login_state', { tabId: stepTab, untilPhase: 'credentials', timeoutMs: 10000, pollMs: 150 });
+  record('a wait for the next phase after a submit is matched', true, stepped?.wait?.matched,
+    `wait=${JSON.stringify(stepped?.wait ?? null).slice(0, 240)}`);
+  record('the wait reports the phases it actually saw', true,
+    (stepped?.wait?.phasesSeen ?? []).some(item => item.phase === 'credentials'),
+    `phasesSeen=${JSON.stringify((stepped?.wait?.phasesSeen ?? []).map(item => item.phase))}`);
+
+  // 8. The full loop, across a server that holds the response for 600ms. This is
+  //    the case a single-frame read cannot cover: the tab is between documents
+  //    for the whole first poll.
+  const loopTab = await open('/login');
+  const creds = await call('browser_login_state', { tabId: loopTab });
+  await call('browser_fill_verified', { tabId: loopTab, ref: (creds?.usernameFields ?? [])[0]?.ref, text: 'ada@example.test', expect: { valueMatches: 'ada@example.test' } });
+  const secret = await call('browser_fill', { tabId: loopTab, ref: (creds?.passwordFields ?? [])[0]?.ref, text: 'S3cret-passphrase', secret: true });
+  record('a password fill reports the length it typed and never echoes the value', true,
+    secret?.characters === 'S3cret-passphrase'.length && !/S3cret-passphrase/.test(JSON.stringify(secret)),
+    `characters=${secret?.characters} echoSuppressed=${secret?.valueEchoSuppressed}`);
+  await call('browser_click', { tabId: loopTab, ref: (creds?.submitCandidates ?? [])[0]?.ref });
+  const afterSubmit = await call('browser_login_state', { tabId: loopTab, untilPhase: 'otp', timeoutMs: 12000, pollMs: 150 });
+  record('the wait spans a slow navigation instead of sampling one frame', true,
+    (afterSubmit?.wait?.waitedMs ?? 0) >= 250, `waitedMs=${afterSubmit?.wait?.waitedMs} polls=${afterSubmit?.wait?.polls}`);
+  record('the wait ends on the otp phase', 'otp', afterSubmit?.phase, `phase=${afterSubmit?.phase}`);
+  record('the wait recorded that the url changed', true, afterSubmit?.wait?.urlChanged === true,
+    `from=${afterSubmit?.wait?.fromUrl} to=${afterSubmit?.wait?.toUrl}`);
+  // A login reply must never carry the password back. The fixture posts the form
+  // rather than sending it as a query string, which is what a real login does;
+  // this pins that the reply echoes the page's own url and nothing else.
+  record('no password appears in the wait reply', false, /S3cret-passphrase/.test(JSON.stringify(afterSubmit)),
+    'searched the whole reply for the password');
+  const codeFill = await call('browser_fill_verified', { tabId: loopTab, ref: (afterSubmit?.otpFields ?? [])[0]?.ref, text: '481920', expect: { valueMatches: '481920' } });
+  record('the one-time code lands in the code field', 'success', codeFill?.status, `status=${codeFill?.status}`);
+  await call('browser_click', { tabId: loopTab, ref: (afterSubmit?.submitCandidates ?? [])[0]?.ref });
+  const done = await call('browser_login_state', { tabId: loopTab, untilPhase: 'logged_in', timeoutMs: 12000, pollMs: 150 });
+  record('the loop closes on the logged_in phase', 'logged_in', done?.phase, `phase=${done?.phase}`);
+  record('logged_in is backed by a visible sign-out control', 'strong', done?.phaseConfidence,
+    `confidence=${done?.phaseConfidence} evidence=${JSON.stringify(done?.phaseEvidence)}`);
+  record('a matched phase is not claimed as proof of authentication', true,
+    /not proof of authentication/i.test(done?.wait?.note ?? ''), `note=${(done?.wait?.note ?? '').slice(0, 120)}`);
+
+  // 9. A wait that never matches must say so, and must not read as a failed
+  //    submit: the two are different, and confusing them is what makes an agent
+  //    re-submit a password.
+  // A distinct exact URL, because browser_open reuses an exact URL: asking for
+  // /login again would hand back the tab the loop above just left on /inbox, and
+  // the "did not move" case would be tested against a page that had.
+  const stillTab = await open('/login?timeout=1');
+  const staticWait = await call('browser_login_state', { tabId: stillTab, untilPhase: 'otp', timeoutMs: 700, pollMs: 150 });
+  record('a wait that never matches reports no match', false, staticWait?.wait?.matched, `matched=${staticWait?.wait?.matched}`);
+  record('a timed-out wait is a timeout, not a failure', true, staticWait?.wait?.timedOut, `timedOut=${staticWait?.wait?.timedOut}`);
+  record('a timed-out wait does not call the submit failed', true,
+    /not proof the submit failed/i.test(staticWait?.wait?.note ?? ''), `note=${(staticWait?.wait?.note ?? '').slice(0, 120)}`);
+  record('a timed-out wait still returns the phase it saw', 'credentials', staticWait?.phase, `phase=${staticWait?.phase}`);
+  const badPhase = await bounded(request('/call', {
+    name: 'browser_login_state',
+    arguments: { tabId: stillTab, untilPhase: 'signed_in', agent }
+  }).then(r => r.result).catch(error => ({ error: error.message })), 15000);
+  record('an unknown phase name is refused before any polling', true, Boolean(badPhase?.error),
+    `result=${JSON.stringify(badPhase).slice(0, 160)}`);
+
+  // 10. The credential lookup refuses without the explicit confirmation string.
   const denied = await bounded(request('/call', { name: 'browser_credential_lookup', arguments: { url: `${base}/login`, agent } }).then(r => r.result).catch(error => ({ error: error.message })), 15000);
   record('credential lookup refuses an unconfirmed call', true, Boolean(denied?.error) || denied?.status === 'denied',
     `result=${JSON.stringify(denied).slice(0, 160)}`);
 
-  // 8. Optional: run the real DPAPI + AES-GCM chain against the real profile.
+  // 11. Optional: run the real DPAPI + AES-GCM chain against the real profile.
   //    Off by default because it reaches a real saved password. It asserts the
   //    contract rather than demanding success, because on Chrome 127+ the saved
   //    password may legitimately be unreadable: the point is that the reply says
