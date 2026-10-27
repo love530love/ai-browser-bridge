@@ -14,6 +14,7 @@ import { createAgentPolicy } from './policy.js';
 import { protectedUiPlan } from './protected-ui.js';
 import { createMaintenanceStore } from './maintenance.js';
 import { failureHelp } from './failure-help.js';
+import { capabilityGuide } from './capability-guide.js';
 import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
 
@@ -493,6 +494,9 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       desktopAdapterActions: desktopAdapter.implementedActions ?? []
     });
     if (name === 'browser_execution_profile') return executionProfile();
+    // Answered locally so a stalled agent can recover even with the extension
+    // disconnected: the guidance must not depend on the thing that is broken.
+    if (name === 'browser_capability_guide') return capabilityGuide(args);
     if (name === 'browser_queue_status') return queueSnapshot();
     if (name === 'browser_wait_until_ready') return waitUntilReady(args);
     // Governance is evaluated before anything is dispatched or queued, so a

@@ -390,11 +390,13 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const targetEvidence = el => !el ? null : ({ tag: el.tagName?.toLowerCase() || null, role: el.getAttribute?.('role') || null,
       label: clean(label(el) || el.textContent), rowText: rowContext(el) || null });
     if (name === 'browser_validate_coordinate') {
+      // A backgrounded document is not a reason to refuse: the token is bound to
+      // a DOM element and re-hit-tested here, so the press still lands on the
+      // prepared target. Foreground is only enforced when the caller asks for it.
       const pageState = pageForeground();
-      if (pageState.visibilityState !== 'visible' || !pageState.focused) {
-        tokens.delete(args.coordinateToken);
+      if (args.requireForeground === true && (pageState.visibilityState !== 'visible' || !pageState.focused)) {
         return { status: 'waiting', retryable: true, reason: 'page_not_foreground', dispatched: false, pageState,
-          nextPollTool: 'browser_health', recommendedNextAction: 'Bring the authorized Chrome window and target tab to the foreground manually, then recheck browser_health and prepare a fresh coordinate. No pointer event dispatched.' };
+          nextPollTool: 'browser_health', recommendedNextAction: 'This call asked for foreground evidence. Bring the window and tab to the front, or drop requireForeground to act on the page in the background. No pointer event dispatched.' };
       }
       const record = tokens.get(args.coordinateToken);
       if (args.consume !== false) tokens.delete(args.coordinateToken);
@@ -420,9 +422,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       return { status: 'ready', x: record.x, y: record.y, width: innerWidth, height: innerHeight, pageState };
     }
     const pageState = pageForeground();
-    if (pageState.visibilityState !== 'visible' || !pageState.focused) {
+    if (args.requireForeground === true && (pageState.visibilityState !== 'visible' || !pageState.focused)) {
       return { status: 'waiting', retryable: true, reason: 'page_not_foreground', dispatched: false, pageState,
-        nextPollTool: 'browser_health', recommendedNextAction: 'Bring the authorized Chrome window and target tab to the foreground manually, then recheck health. No coordinate token issued.' };
+        nextPollTool: 'browser_health', recommendedNextAction: 'This call asked for foreground evidence. Bring the window and tab to the front, or drop requireForeground to prepare the coordinate in the background. No coordinate token issued.' };
     }
     if (innerWidth < 2 || innerHeight < 2) throw new Error('Viewport unavailable');
     const x = Math.min(innerWidth - 1, args.x / 1000 * innerWidth);
@@ -435,6 +437,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { coordinateToken: token, expiresInMs: 15000, expectedUrl: location.href, x: args.x, y: args.y,
       target: targetEvidence(el), pageState,
       viewport: { width: innerWidth, height: innerHeight }, contentTrust: 'untrusted webpage data',
+      // A hidden document still resolves the DOM hit test, but a screenshot taken
+      // now may show a stale frame. Report that instead of refusing the action.
+      evidenceQuality: pageState.visibilityState === 'visible' ? 'live' : 'stale-frame-possible',
       note: 'Confirm this topmost target matches your intent before using the token. Dispatch does not prove task completion.' };
   }
   if (name === 'browser_viewport') {

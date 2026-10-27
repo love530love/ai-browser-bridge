@@ -441,7 +441,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     if (result?.result == null) throw new Error('No page result. Inspect page before retrying.');
     return result.result;
   }
-  async function pointerForeground({ afterMove = false, invalidateCoordinate = false } = {}) {
+  async function pointerForeground({ afterMove = false, invalidateCoordinate = false, requireForeground = false } = {}) {
     const commandActive = await commandStillActive();
     const currentTab = await chrome.tabs.get(tab.id);
     let windowFocused = false, windowFocusError = null;
@@ -451,23 +451,31 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     const foreground = { tabActive: !!currentTab.active, windowFocused, windowFocusError,
       visibilityState: pageState.visibilityState, documentFocused: pageState.focused,
       viewport: { width: pageState.width, height: pageState.height } };
+    // Hard blockers are about target correctness: the command is gone, or the
+    // document is no longer the one the coordinate was prepared against.
     const blockers = [];
     if (!commandActive) blockers.push('bridge_command_cancelled_or_disconnected');
     if (currentTab.url !== tab.url || currentTab.pendingUrl) blockers.push('navigation_in_progress_or_url_changed');
-    if (!currentTab.active) blockers.push('tab_inactive');
-    if (!windowFocused) blockers.push('window_not_focused');
-    if (pageState.visibilityState !== 'visible') blockers.push('document_hidden');
-    if (!pageState.focused) blockers.push('document_unfocused');
     if (pageState.url !== tab.url) blockers.push('document_url_changed');
+    // Foreground state does not change which DOM element sits at these
+    // coordinates: CDP dispatches into the target, so a backgrounded tab still
+    // resolves the same hit test. Report it, do not gate on it, unless the caller
+    // explicitly asked for foreground evidence.
+    const advisories = [];
+    if (!currentTab.active) advisories.push('tab_inactive');
+    if (!windowFocused) advisories.push('window_not_focused');
+    if (pageState.visibilityState !== 'visible') advisories.push('document_hidden');
+    if (!pageState.focused) advisories.push('document_unfocused');
+    if (requireForeground) blockers.push(...advisories);
     if (blockers.length) {
       if (invalidateCoordinate) await page('browser_validate_coordinate', { ...routedArgs, consume: true }).catch(() => {});
       return { ready: false, result: { status: 'waiting', retryable: true,
       reason: blockers.includes('bridge_command_cancelled_or_disconnected') ? 'bridge_command_cancelled_or_disconnected' : blockers.some(item => item.includes('changed') || item.includes('navigation')) ? 'page_state_changed' : 'page_not_foreground',
-      dispatched: false, foreground, blockers, nextPollTool: 'browser_health',
-      recommendedNextAction: afterMove ? 'The pointer moved to the preflight location, but no mouse press was dispatched. Bring the authorized Chrome window and target tab to the foreground manually, recheck browser_health, then prepare a fresh coordinate.' : 'Bring the authorized Chrome window and target tab to the foreground manually; do not steal focus automatically. Recheck browser_health before preparing a fresh coordinate. No pointer event dispatched.' } };
+      dispatched: false, foreground, blockers, advisories, nextPollTool: 'browser_health',
+      recommendedNextAction: afterMove ? 'The pointer moved to the preflight location, but no mouse press was dispatched. Recheck browser_health and prepare a fresh coordinate; a backgrounded tab alone is not a blocker unless requireForeground was set.' : 'Recheck browser_health and prepare a fresh coordinate. A backgrounded tab alone is not a blocker unless requireForeground was set. No pointer event dispatched.' } };
     }
-    if (!commandActive) return { ready: false, result: { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, foreground, blockers, nextPollTool: 'browser_health', recommendedNextAction: 'The Bridge command is no longer active. Reconnect, re-observe, and prepare a new coordinate; no pointer event was dispatched.' } };
-    return { ready: true, foreground };
+    if (!commandActive) return { ready: false, result: { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, foreground, blockers, advisories, nextPollTool: 'browser_health', recommendedNextAction: 'The Bridge command is no longer active. Reconnect, re-observe, and prepare a new coordinate; no pointer event was dispatched.' } };
+    return { ready: true, foreground: { ...foreground, advisories } };
   }
   if (name === 'browser_read' && args.frame === 'all') {
     const results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
@@ -556,7 +564,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     return { dispatched: true, inspectOutcome: true };
   }
   if (name === 'browser_prepare_coordinate') {
-    const state = await pointerForeground();
+    const state = await pointerForeground({ requireForeground: args.requireForeground === true });
     if (!state.ready) return state.result;
     const prepared = await page(name);
     return prepared.coordinateToken ? { ...prepared, foreground: state.foreground } : prepared;
@@ -575,7 +583,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     }
     const pointerActions = new Set(['Tap', 'Double Tap', 'Long Press', 'Hover', 'Swipe']);
     if (pointerActions.has(args.action)) {
-      const state = await pointerForeground({ invalidateCoordinate: true });
+      const state = await pointerForeground({ invalidateCoordinate: true, requireForeground: args.requireForeground === true });
       if (!state.ready) return state.result;
     }
     let coordinateResult;
@@ -591,13 +599,13 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       try {
         const pointerCompleted = await pointer(send, { ...point, action: { Tap: 'click', 'Double Tap': 'double', 'Long Press': 'long', Hover: 'hover', Swipe: 'drag' }[args.action],
           beforeMove: async () => {
-            const state = await pointerForeground({ invalidateCoordinate: true });
+            const state = await pointerForeground({ invalidateCoordinate: true, requireForeground: args.requireForeground === true });
             if (!state.ready) { coordinateResult = state.result; return false; }
             coordinateResult = await page('browser_validate_coordinate', { ...args, consume: false });
             return coordinateResult.status === 'ready';
           },
           beforePress: async () => {
-            const state = await pointerForeground({ afterMove: true, invalidateCoordinate: true });
+            const state = await pointerForeground({ afterMove: true, invalidateCoordinate: true, requireForeground: args.requireForeground === true });
             if (!state.ready) { coordinateResult = state.result; return false; }
             coordinateResult = await page('browser_validate_coordinate', { ...args, consume: false });
             if (coordinateResult.status !== 'ready') return false;

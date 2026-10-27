@@ -13,3 +13,6 @@ bridge-autostart.cmd
 /_*.json
 /vy_*.json
 /tabs_tmp.json
+
+# graphify code-graph output (generated, machine-local)
+graphify-out/

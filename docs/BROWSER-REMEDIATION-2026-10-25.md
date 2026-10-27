@@ -36,6 +36,9 @@
 - SSR/hydration 双渲染可能解释用户观察到的 A/TD 命中切换，但本项目没有 page source 或任意 evaluate 能力；这仍是用户现场观察支持的假设，不能写成 Bridge 已独立验证的根因。
 
 ### 实施改动
+
+> **已被 0.5.24 取代（2026-10-27）**：本节描述的“坐标要求前台”门禁已拆除。`tab_inactive`、`window_not_focused`、`document_hidden`、`document_unfocused` 降级为 `advisories` 上报，不再阻断；只有 `requireForeground: true` 时才恢复拒绝，且拒绝不再销毁 token。后台实测见 `test/focus-matrix.js`（25/25）与 `docs/CHROME-CAPABILITY-MATRIX.md` 的「焦点独立性契约」。本节保留为当时的决策记录，不代表当前行为。
+
 - `extension/page.js`：仅在精确文本匹配时补充无 href anchor 候选；无 href anchor 的隐式角色报告为 `generic`，候选显式带 `clickability: unverified` 与 `exact-visible-text; clickability-unverified`，不把找到目标等同于有语义按钮/链接保证。
 - `extension/page.js`：坐标准备要求页面 `visibilityState === visible` 且 `document.hasFocus() === true`。失焦/隐藏时不签发 token；验证时失焦会销毁 token，恢复前台后必须重新截图/准备。
 - `extension/page.js`：目标校验失败增加 `validationFailures` 与 `targetChange.expected/actual`（标签、ARIA 角色、文案、行文案）；`expected` 来自签发 token 时保存的摘要快照，即使同一 DOM 节点原地换文案也能看出前后差异；保留拒绝派发的 fail-closed 行为。

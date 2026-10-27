@@ -17,8 +17,8 @@ function fixture() {
     innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0, crypto: { randomUUID }, Map,
     Date: { now: () => now }, getComputedStyle: () => ({ visibility: 'visible', display: 'block' }), document });
   const run = vm.runInContext(`(${pageOperation.toString()})`, context);
-  const prepare = () => run('browser_prepare_coordinate', { x: 50, y: 50 }, [], true);
-  const validate = token => run('browser_validate_coordinate', { coordinateToken: token, x: 50, y: 50 }, [], true);
+  const prepare = (opts = {}) => run('browser_prepare_coordinate', { x: 50, y: 50, ...opts }, [], true);
+  const validate = (token, opts = {}) => run('browser_validate_coordinate', { coordinateToken: token, x: 50, y: 50, ...opts }, [], true);
   return { prepare, validate, dialog, context, document, el, cover: () => { hit = { tagName: 'DIV', textContent: 'Cover', isConnected: true, getAttribute: () => null, closest: () => null }; },
     hide: () => { visibilityState = 'hidden'; focused = false; }, show: () => { visibilityState = 'visible'; focused = true; }, expire: () => { now += 15001; } };
 }
@@ -49,19 +49,39 @@ test('same-URL product changes, overlays, scrolling and expiry prevent dispatch'
   assert.equal(changedInPlace.targetChange.expected.label, '开始使用');
   assert.equal(changedInPlace.targetChange.actual.label, 'Different action');
 });
-test('hidden or unfocused documents cannot prepare or reuse coordinate tokens', async () => {
+test('a backgrounded document still prepares and reuses coordinate tokens', async () => {
+  // Foreground is not a correctness invariant: the token is bound to the DOM
+  // element and re-hit-tested at dispatch, so hiding the document must not
+  // destroy the token. Only an explicit requireForeground opts back in.
   const f = fixture(); f.hide();
   const prep = await f.prepare();
-  assert.equal(prep.reason, 'page_not_foreground');
-  assert.equal(prep.dispatched, false);
-  assert.equal(prep.coordinateToken, undefined);
+  assert.ok(prep.coordinateToken, 'a hidden document must still yield a token');
+  assert.equal(prep.evidenceQuality, 'stale-frame-possible');
+  assert.equal(prep.pageState.visibilityState, 'hidden');
+  const reused = await f.validate(prep.coordinateToken);
+  assert.equal(reused.status, 'ready');
+  assert.equal(reused.dispatched, undefined);
 
-  const g = fixture(), valid = await g.prepare(); g.hide();
-  const result = await g.validate(valid.coordinateToken);
-  assert.equal(result.reason, 'page_not_foreground');
-  assert.equal(result.dispatched, false);
-  g.show();
-  assert.equal((await g.validate(valid.coordinateToken)).reason, 'coordinate_token_missing_or_expired');
+  // A real target change still fails closed while hidden.
+  const g = fixture(); const valid = await g.prepare(); g.hide(); g.cover();
+  const covered = await g.validate(valid.coordinateToken);
+  assert.equal(covered.status, 'waiting');
+  assert.ok(covered.validationFailures.includes('hit_target_changed'));
+});
+
+test('requireForeground restores the strict foreground-only behaviour without consuming the token', async () => {
+  const strict = fixture(); strict.hide();
+  const refused = await strict.prepare({ requireForeground: true });
+  assert.equal(refused.reason, 'page_not_foreground');
+  assert.equal(refused.coordinateToken, undefined);
+
+  const f = fixture(); const prepared = await f.prepare(); f.hide();
+  const blocked = await f.validate(prepared.coordinateToken, { requireForeground: true });
+  assert.equal(blocked.reason, 'page_not_foreground');
+  assert.equal(blocked.dispatched, false);
+  f.show();
+  // The refusal must not burn the token: once visible again it is still usable.
+  assert.equal((await f.validate(prepared.coordinateToken)).status, 'ready');
 });
 test('exact visible text on an anchor without href is discoverable but unverified', async () => {
   class FakeAnchor {

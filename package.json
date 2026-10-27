@@ -17,7 +17,8 @@
     "test:stress": "node test/browser-stress.js",
     "test:devtools": "node test/live-devtools.js",
     "doctor": "node src/cli.js doctor",
-    "test:capture": "node test/live-capture.js"
+    "test:capture": "node test/live-capture.js",
+    "test:focus": "node test/focus-matrix.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",

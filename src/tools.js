@@ -111,6 +111,11 @@ export const TOOLS = [
     agent
   }, ['tabId'], true),
   tool('browser_health', 'Layered health check for service/extension, permissions, Chrome tab.active, Chrome window.focused, document.visibilityState/hasFocus, viewport, page readiness, and tool version. These are separate states; use before coordinate input.', { tabId, agent }, [], true),
+  tool('browser_capability_guide', 'Answer locally, without any model: for a stated goal, which primitive to use, whether it needs the foreground, what the fallback is, and which capabilities are genuinely not implemented. Use this instead of stalling when a tool is unfamiliar or refuses unexpectedly. It also states which reported states (tab.active, window.focused, document visibility/focus) are advisory only, because DOM and CDP primitives keep working in a backgrounded tab.', {
+    goal: text(2000),
+    tabId,
+    agent
+  }, ['goal'], true),
   tool('browser_bridge_modes', 'Read available browser-control modes and their fallback order: DOM, verified transactions, picker/upload bridges, CDP keyboard/pointer, screenshot, and coordinate adapter. Use to choose the least fragile mode.', { tabId, agent }, [], true),
   tool('browser_failure_help', 'Read-only retry guidance after a failed browser action. Classifies the failure, recommends the next safest bridge mode, and states whether retry is allowed or human confirmation is required.', {
     tabId,
@@ -162,14 +167,14 @@ export const TOOLS = [
   tool('browser_tab_lease', 'Read enforced tab write lease state.', { tabId, agent }, ['tabId'], true),
   tool('browser_history', 'Back, forward, reload or activate a tab. If the tab is leased, pass the matching agent.', { tabId, action: { type: 'string', enum: ['back', 'forward', 'reload', 'activate'] }, agent }, ['tabId', 'action']),
   tool('browser_wait', 'Wait for visible main-frame text using DOM events, up to 10 seconds. No model polling.', { tabId, text: text(1000), timeoutMs: timeoutMs(10000), agent }, ['tabId', 'text'], true),
-  tool('browser_prepare_coordinate', 'Read-only coordinate preflight after inspecting a fresh screenshot. Requires the target document visible/focused, active Chrome tab, and focused Chrome window; otherwise returns waiting without a token. Returns the topmost target and a single-use 15-second token. Inspect the returned target before acting. Coordinates use 0..1000 viewport units. Repeat preparation after layout changes.', {
-    tabId, x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 }, agent
+  tool('browser_prepare_coordinate', 'Read-only coordinate preflight after inspecting a fresh screenshot. Works on a backgrounded tab: the token is bound to the DOM element under the coordinate and re-hit-tested at dispatch, so foreground is not required. Set requireForeground to keep the old foreground-only behaviour. Returns the topmost target and a single-use 15-second token. Inspect the returned target before acting. Coordinates use 0..1000 viewport units. Repeat preparation after layout changes.', {
+    tabId, x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 }, requireForeground: { type: 'boolean' }, agent
   }, ['tabId', 'x', 'y'], true),
-  tool('browser_action', 'Open-AutoGLM-style browser actions. Pointer actions require a fresh browser_prepare_coordinate token and matching x/y, and recheck active tab/window focus/document visibility before movement and press. A changed hit target fails closed with expected-vs-actual diagnostics. Coordinates are normalized 0..1000 in current viewport. Supply expectedUrl from latest observation. Observe after every action.', {
+  tool('browser_action', 'Open-AutoGLM-style browser actions. Pointer actions work on a backgrounded tab: the coordinate token is bound to the DOM element and re-hit-tested before movement and press, and a changed hit target fails closed with expected-vs-actual diagnostics. Set requireForeground to refuse unless the tab and window are in front. Coordinates are normalized 0..1000 in current viewport. Supply expectedUrl from latest observation. Observe after every action.', {
     tabId, action: { type: 'string', enum: ['Tap', 'Double Tap', 'Long Press', 'Hover', 'Swipe', 'Type', 'Key', 'Back', 'Wait'] },
     expectedUrl: text(8000), coordinateToken: text(100), x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 },
     endX: { type: 'number', minimum: 0, maximum: 1000 }, endY: { type: 'number', minimum: 0, maximum: 1000 },
-    text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }, agent
+    text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }, requireForeground: { type: 'boolean' }, agent
   }, ['tabId', 'action', 'expectedUrl'])
 ];
 

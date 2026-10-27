@@ -1,4 +1,4 @@
-## 0.5.24 — 2026-10-27（源码候选，未部署）
+## 0.5.24 — 2026-10-27（已部署，本机实测）
 
 - 新增只读捕获原语 `browser_devtools_capture`：在一次 debugger attach 内先 enable 再采集一个有界窗口，覆盖 DevTools Console（`Runtime.consoleAPICalled`、`Runtime.exceptionThrown`、`Log.entryAdded`）、Network（请求/响应/完成/失败合并为一行）、Sources 脚本列表（`Debugger.scriptParsed`）与 Performance 指标（`Performance.getMetrics`）。
 - 明确负证据：domain enable 之前的事件不可见，空列表不证明没有发生；只观察该 tab target，其它 tab、worker、Service Worker、OOPIF 是独立 target；缓冲有界，溢出以 `dropped`/`truncated` 计数上报而不是静默丢弃。
@@ -7,8 +7,12 @@
 - 未实现且不声称：请求重放、脚本编辑、断点/单步调试、Console 输入执行、分离 DevTools 窗口与被检查标签绑定。
 - 修复 `validateCall` 对 `type: 'array'` 字段完全不校验的缺口：现在校验数组类型、`minItems`/`maxItems` 与 `items.enum`，避免任意形状被透传到扩展。
 - `browser_reload_extension` 的目标解析并入能力内部，不再要求调用方先手工枚举窗口：只传 `confirmation` 时现场枚举可见 Chrome 窗口，恰好一个则使用，零个返回 `not_dispatched`/`no_visible_chrome_window`，多个返回 `denied`/`chrome_target_ambiguous` 并列出候选而不猜；成功时回传 `targetResolution: "single-visible-chrome-window"`。显式传 `processId`/`windowHandle` 的旧路径仍要求近期枚举，行为不变。
-- 部署与现场验收（2026-10-27）：服务重启到 0.5.24、扩展经 `browser_reload_extension` 重载并验证新会话与版本，`doctor` 10/10 通过；`browser_devtools_capture` 真实 Chrome 验收 9/9 通过（本地 fixture，只操作自身标签）。
-- 版本号与 manifest 同步升到 0.5.24；服务与已加载扩展尚未重新部署/重载，`doctor` 版本匹配仍会失败。
+- 拆除坐标通路的前台依赖（回退 0.5.20 引入的强制前台门禁）：`pointerForeground()` 把 `tab_inactive`、`window_not_focused`、`document_hidden`、`document_unfocused` 从阻断降级为 `advisories` 上报，只保留与焦点无关的目标正确性阻断（`bridge_command_cancelled_or_disconnected`、`navigation_in_progress_or_url_changed`、`document_url_changed`）；`extension/page.js` 的 prepare/validate 同样改为只在 `requireForeground === true` 时拒绝，且拒绝时不再销毁 token。`browser_prepare_coordinate` 与 `browser_action` 新增可选 `requireForeground`，用于显式恢复严格行为。
+- 新增 `evidenceQuality`（`live` / `stale-frame-possible`）替代“隐藏即拒绝”：文档自报隐藏时截图可能是旧帧，但 DOM 命中测试仍有效，该字段是提示而非拒绝理由。
+- 真实后台实测 `test/focus-matrix.js` 25/25：两个 fixture 标签，激活第二个使第一个真后台，`browser_read`/`find_element`/`click`/`fill`/`key`/`scroll`/`select`/`screenshot`/`performance`/`devtools_capture` 全部可用，DOM 副作用真实发生（计数器 0→1）；`browser_prepare_coordinate` 正常签发 token 并解析到 `button`；`browser_action` `Tap` 真实落到预备目标（计数器 1→2）、`Hover` 正常派发；`requireForeground:true` 仍返回 `waiting`/`page_not_foreground` 且不签发 token。
+- 实测环境事实：非激活标签仍自报 `visibilityState=visible`、`document.hasFocus()=true`（视口 2560×1271）。`visibilityState`/`hasFocus` 不等价于“在前台”，原先按它们拦截会时灵时不灵；真正需要前台的只剩 UIA 的 `SendKeys`（扩展 Reload）与最小化窗口下的 UIA 回读。
+- 部署与现场验收（2026-10-27）：服务重启到 0.5.24（buildId `937f6f5b…`）、扩展经 `browser_reload_extension` 重载并验证新会话与版本（`verified: true`，`targetResolution: "single-visible-chrome-window"`），`doctor` 全项通过；`browser_devtools_capture` 真实 Chrome 验收 9/9 通过（本地 fixture，只操作自身标签）；全量 `node --test test/*.test.js` 181/181 通过（41 个测试文件全部有贡献，无静默跳过）。
+- 版本号与 manifest 同步升到 0.5.24。
 
 ## 0.5.23 — 2026-10-26
 

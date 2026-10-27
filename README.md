@@ -6,6 +6,8 @@
 
 一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.5.24**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
+0.5.24 让所有页面动作默认不依赖窗口/标签焦点：标签置于后台、窗口不在最上层时，读写、CDP 指针派发与坐标动作仍照常完成（后台实测 25/25，`npm run test:focus`）。坐标工具新增可选 `requireForeground` 用于显式恢复严格模式；`browser_prepare_coordinate` 用 `evidenceQuality` 提示截图是否可能是旧帧。详见 [Chrome 能力矩阵](docs/CHROME-CAPABILITY-MATRIX.md) 的「焦点独立性契约」。
+
 0.5.18 增加断线错误暂存、重连补传和落盘确认，以及鼠标移入后的再次校验、弹窗表单值变化检测。日志保留范围与错误清理流程见 [扩展错误维护](docs/EXTENSION-ERROR-MAINTENANCE.md)。
 
 0.5.17 坐标指针动作新增必需步骤：`browser_prepare_coordinate` → 核对返回目标 → 使用一次性 `coordinateToken` 调用 `browser_action`。旧客户端需刷新工具列表；服务与扩展需配套升级。
