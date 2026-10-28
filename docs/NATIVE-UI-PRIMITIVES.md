@@ -73,6 +73,29 @@ Collapsed→Expanded（settleMs 161）→ 独立快照确认为 Expanded → 45 
 Collapsed → 独立快照确认 Collapsed → 没有留下打开的菜单。同时证明：不存在的 ref 与
 名字不符的 ref 都 `not_dispatched`，只给 role 的 ref 在校验层就被拒。
 
+## 2026-10-28：跨版本的身份问题（0.15.0）
+
+上面所有原语都建立在「`automationId` 在下次启动时还是同一个」这个假设上，而浏览器升级正是
+打破它的那件事。所以 0.15.0 不加原语，先把这个假设变成可检验的：
+
+- **基座现在知道自己驱动的是哪个 Chrome**。`/status` 的 `browserVersion` / `browserMajor` /
+  `browserIdentitySource` 来自 service worker 的 UA-CH（`getHighEntropyValues(['uaFullVersion'])`）。
+  页面侧拿不到：`navigator.userAgent` 被减缩成 `154.0.0.0`，而 `browser_debugger action:"evaluate"`
+  走 `Runtime.evaluate` + `awaitPromise:false`，Promise 不会被等。
+- **`scripts/chrome-compat-baseline.js`** 抓基线（只读 `/status` 与本机安装目录，不开标签），
+  `--diff` 输出 GONE / NEW / CHANGED。**GONE 即「有代码按那个 id 绑定了控件，必须改成可发现的绑定」。**
+  基线只保留有 `automationId` 的控件，名称存 sha256 前 12 位 + 48 字符前缀，不把书签栏抄进文件。
+- **`scripts/password-manager-ui.ps1` 改成 `Find-Control`：id 优先 → 角色+可访问名称兜底 → 歧义即拒绝。**
+  理由不是「更稳」，而是 `Find-ById` 失败与「控件不存在」不可区分，而这条流程会把密码显示出来。
+  命中多个候选时返回 `denied`（`search_input_ambiguous` / `reveal_control_ambiguous`）而不是挑一个——
+  按位置挑候选在一条会显示密码的路径上是不可接受的。匹配路径写进 `evidence.lookup`，
+  事后能区分「靠 id 成功」和「靠兜底成功」。**这条兜底只解决改名，不解决语义变化**：
+  如果 156 把「显示密码」按钮改成菜单项，角色兜底也找不到，那必须重新观察。
+
+156 的公开变更里与本项目相关的只有 IndexedDB 后端迁移（LevelDB+扁平文件 → SQLite，API 不变），
+判断与理由见 [CHROME-VERSION-ADAPTATION.md](CHROME-VERSION-ADAPTATION.md)。
+**升级未实际应用前不宣称已适配**；基线为 154.0.8037.93，156.0.8078.49 已下载待应用。
+
 ## 下一条执行链
 
 1. ~~对近期快照 ref 绑定的原生控件执行 Expand/Collapse，回读展开状态。~~ 已完成（0.14.0）。

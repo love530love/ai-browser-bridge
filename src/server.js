@@ -81,6 +81,11 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let desktopOperation = null;
   const observedDesktopTargets = new Map();
   let extensionVersion = null;
+  // Which browser the extension is running in. The extension reports it once
+  // after hello because no chrome.* API exposes it and the reduced user agent
+  // hides the patch version; a browser update is otherwise invisible to the
+  // bridge until something it depends on stops working.
+  let extensionBrowser = null;
   const desktopAdapter = suppliedDesktopAdapter ?? createDesktopAdapter({ scriptPath: join(ROOT, 'scripts', 'reload-extension.ps1') });
   const maintenance = createMaintenanceStore({ file: maintenanceStateFile });
   const maintenanceState = maintenance.status;
@@ -252,6 +257,10 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     version: VERSION,
     buildId: BUILD_ID,
     extensionVersion,
+    browserVersion: extensionBrowser?.version ?? null,
+    browserMajor: extensionBrowser?.major ?? null,
+    browserIdentitySource: extensionBrowser?.source ?? null,
+    browserBrands: extensionBrowser?.brands ?? null,
     extensionSessionId,
     maintenance: maintenanceState(),
     tabLeases: leases.list(),
@@ -351,6 +360,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   function drop(reason, { keepQueued = false } = {}) {
     extension = null;
     extensionVersion = null;
+    extensionBrowser = null;
     extensionSessionId = null;
     if (current) {
       // A disconnected or stopped extension may have accepted a write before its
@@ -992,6 +1002,20 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
           ws.send(JSON.stringify({ type: 'ready' })); pump(); return;
         }
         if (msg.type === 'keepalive') { ws.send(JSON.stringify({ type: 'keepalive' })); return; }
+        if (msg.type === 'browser' && ws === extension) {
+          // Validated rather than trusted: this arrives over the same socket as
+          // results, and a malformed value would end up in every status reply.
+          const version = typeof msg.browser?.version === 'string' && /^\d+(\.\d+){1,3}$/.test(msg.browser.version) ? msg.browser.version : null;
+          extensionBrowser = version ? {
+            version,
+            major: Number.parseInt(version, 10),
+            brands: Array.isArray(msg.browser.brands) ? msg.browser.brands.slice(0, 8)
+              .filter(item => item && typeof item.brand === 'string' && typeof item.version === 'string')
+              .map(item => ({ brand: item.brand.slice(0, 40), version: item.version.slice(0, 20) })) : null,
+            source: typeof msg.browser.source === 'string' ? msg.browser.source.slice(0, 40) : null
+          } : null;
+          return;
+        }
         if (msg.type === 'extension-error' && ws === extension) {
           const eventId = typeof msg.eventId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(msg.eventId) ? msg.eventId : null;
           try {

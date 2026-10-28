@@ -76,6 +76,49 @@ test('extension session identity changes across authenticated reconnects', async
   second.close();
 });
 
+test('the extension reports which browser it runs in, and status fails closed on bad values', async t => {
+  const { b, wsUrl } = await setup(t);
+  const ws = await extension(wsUrl);
+  // Nothing is known until the extension says so. A guessed version would be
+  // worse than an explicit null: the whole point is detecting an update.
+  assert.equal(b.status().browserVersion, null);
+  assert.equal(b.status().browserMajor, null);
+  // The browser message has no reply, so a keepalive round-trip afterwards is
+  // what proves it was processed (same socket, ordered delivery).
+  const report = async browser => {
+    const ack = once(ws, 'message');
+    ws.send(JSON.stringify({ type: 'browser', browser }));
+    ws.send(JSON.stringify({ type: 'keepalive' }));
+    await ack;
+  };
+  await report({ version: '156.0.8078.49', brands: [{ brand: 'Google Chrome', version: '156' }, { brand: 'Not;A=Brand', version: 99 }, null], source: 'user_agent_client_hints' });
+  assert.equal(b.status().browserVersion, '156.0.8078.49');
+  assert.equal(b.status().browserMajor, 156);
+  assert.equal(b.status().browserIdentitySource, 'user_agent_client_hints');
+  // Brands travel over the same socket as results, so malformed entries are
+  // dropped instead of being copied into every status reply.
+  assert.deepEqual(b.status().browserBrands, [{ brand: 'Google Chrome', version: '156' }]);
+  // A bare major version is what the reduced user agent exposes; accepting it
+  // would silently turn "patch unknown" into "patch 0" and hide the update.
+  for (const bad of [{ version: '156' }, { version: '156.0.8078.49\n' }, { version: 156.0 }, {}, null]) {
+    await report(bad);
+    assert.equal(b.status().browserVersion, null, JSON.stringify(bad));
+    assert.equal(b.status().browserMajor, null, JSON.stringify(bad));
+  }
+  await report({ version: '156.0.8078.49', source: 'user_agent_client_hints' });
+  assert.equal(b.status().browserVersion, '156.0.8078.49');
+  // A different browser after a reconnect must not inherit the old version.
+  await new Promise(resolve => { ws.once('close', resolve); ws.close(); });
+  // connected flips as soon as the close frame arrives, but the teardown that
+  // clears the session runs in the close handler; wait for that instead of
+  // racing it (extensionSessionId is cleared by the same call).
+  for (let i = 0; i < 200 && b.status().extensionSessionId; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(b.status().extensionSessionId, null);
+  assert.equal(b.status().connected, false);
+  assert.equal(b.status().browserVersion, null);
+  assert.equal(b.status().browserBrands, null);
+});
+
 test('strict validation denies unsupported actions and unsafe URL schemes', () => {
   assert.throws(() => validateCall('eval', {}));
   assert.throws(() => validateCall('browser_read', { tabId: -1 }));

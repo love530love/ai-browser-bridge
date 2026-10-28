@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.14.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.15.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.15.0 起因是一件基座此前完全看不见的事：**它不知道自己驱动的是哪个 Chrome**。没有 `chrome.*` API 报浏览器版本，`navigator.userAgent` 被 UA 减缩成 `154.0.0.0`（补丁号被抹掉，正好抹掉升级最想确认的那几位），`Runtime.evaluate` 又是 `awaitPromise:false` 拿不到 UA-CH 的 Promise。三条路都不通之后答案在 service worker 里的 UA-CH：`/status` 现在有 `browserVersion` / `browserMajor` / `browserIdentitySource`，实测 `154.0.8037.93`。配套新增 `scripts/chrome-compat-baseline.js`——把升级前的原生控件 `automationId` 抓成基线、升级后 `--diff` 出 GONE / NEW / CHANGED，并回答「新版本下载好了没有」（实测 `PENDING UPDATE: 156.0.8078.49`）。同时把密码管理器 UIA 的定位从「按 id」改成「id 优先 → 角色+名称兜底 → **歧义即拒绝**」，因为 `Find-ById` 失败与「控件不存在」不可区分，而这条流程会把密码显示出来。**156 尚未实际应用，所以本轮不宣称「已适配 156」**，验收清单写在 [docs/CHROME-VERSION-ADAPTATION.md](docs/CHROME-VERSION-ADAPTATION.md)。
 
 0.14.0 让原生 Chrome UI 从「状态可读」走到「单个控件可写且可证」：`browser_native_action` 只做 `expand` / `collapse`，**故意没有 Toggle**——toggle 派发两次回到原点，所以「结果不确定」时根本无法重试；而 expand/collapse 构造上幂等（已在该状态就不派发，返回 `alreadyInState:true`），这才让「不确定之后重试一次」变成安全指令。`ref` 不算身份，必须再重复一个 `name` 或 `automationId`，不符即拒绝且不派发。成功只认「从控件自己读回的状态」，pattern 不抛异常不算成功。它走绑定到元素的 `ExpandCollapsePattern`，不是 `SendKeys('{F12}')`，因此没有焦点 TOCTOU。实测还纠正了一条旧结论：Chrome 自绘菜单是窗口的**子 HWND**，展开时快照能看到完整的 `MenuItem` 树（111 → 166 控件、45 个菜单项），所以「不含 popup」只对独立顶层窗口成立。真机 `npm run test:native` 13/13。
 

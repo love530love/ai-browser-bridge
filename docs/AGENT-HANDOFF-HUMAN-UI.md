@@ -4,7 +4,53 @@
 
 ## 目标
 
-2026-10-28 接手增量（0.14.0）：磁盘基线 `85f2435` → 本轮新增 `browser_native_action`。
+## 2026-10-28 接手增量（0.15.0）：Chrome 156 适配轮
+
+用户要重启 Chrome 应用更新到 156。这一轮**不加原语**，先把「升级会坏什么」变成可测量的事，
+因为上面所有原语都建立在「`automationId` 下次启动还是同一个」这个假设上。
+
+- **基座原本不知道自己驱动的是哪个 Chrome**。没有 `chrome.*` API 报版本；
+  `navigator.userAgent` 被 UA 减缩成 `154.0.0.0`（补丁号被抹掉，正好抹掉升级最想确认的那几位）；
+  `browser_debugger action:"evaluate"` 走 `Runtime.evaluate` + `awaitPromise:false`，页面侧
+  拿到的是未决 Promise。答案是 service worker 里的 UA-CH：`/status` 现在有 `browserVersion` /
+  `browserMajor` / `browserIdentitySource` / `browserBrands`，实测 `154.0.8037.93`
+  （`user_agent_client_hints`）。`browser_health` 与 `doctor` 的 `extension-connected` 也带上。
+- **版本消息与结果走同一条 socket，所以服务端校验而不信任**：只接受
+  `/^\d+(\.\d+){1,3}$/`；**只给大版本号的一律拒绝**——把「补丁未知」当成「补丁 0」正好会藏掉升级。
+  worker 在 `hello` **之后单独**发 `browser` 消息（并进 hello 会让 UA-CH 的慢把握手拖成配对失败）。
+- **`scripts/chrome-compat-baseline.js`**：只读 `/status` 与本机安装目录，不开标签、不读页面。
+  两个实测修正：版本目录里**没有** `chrome.exe`（在 `Application\` 一层，子目录里是 `chrome.dll`
+  与 `<version>.manifest`），以及本机 Chrome 装在**两个根**（C:\ 与 D:\）。
+  基线 `154.0.8037.93`：`controls 109 partial=false omittedDocuments=0`、`identity rows 60`、
+  `PENDING UPDATE: 156.0.8078.49`。
+- **`scripts/password-manager-ui.ps1` 改为 `Find-Control`：id 优先 → 角色+可访问名称兜底 →
+  歧义即拒绝**。`Find-ById` 的失败与「控件不存在」不可区分，而这条流程会把密码显示出来；
+  命中多个候选直接 `denied`（`search_input_ambiguous` / `reveal_control_ambiguous`），
+  匹配路径写进 `evidence.lookup`。
+- 补齐 0.14.0 遗留：`browser_capabilities.protectedUi.implementedActions` 加
+  `read_native_controls` / `expand_native_control` / `collapse_native_control`。
+- 全量单测 **372/372**；工具数仍 69；`scripts/password-manager-ui.ps1` AST `parse-ok`。
+
+**升级后必须按序执行**（详见 [CHROME-VERSION-ADAPTATION.md](CHROME-VERSION-ADAPTATION.md)）：
+
+```powershell
+node scripts/chrome-compat-baseline.js
+node scripts/chrome-compat-baseline.js --diff .local/chrome-compat-154.0.8037.93.json .local/chrome-compat-156.0.8078.49.json
+npm test
+node src/cli.js doctor
+npm run test:native
+npm run test:capture
+npm run test:debugger
+npm run test:bench
+```
+
+`--diff` 里出现 **GONE** 的 `automationId` = 有代码按那个 id 绑定了控件，必须改成可发现的绑定
+或确认它不在任何路径上。**当前运行版本仍是 154.0.8037.93，156.0.8078.49 已下载待应用，
+所以本轮不宣称「已适配 156」。**
+
+## 2026-10-28 接手增量（0.14.0）
+
+磁盘基线 `85f2435` → 本轮新增 `browser_native_action`。
 原生 UI 从「状态可读」推进到「单个控件可写且可证」，工具数 68 → 69。
 
 - `browser_native_action({processId, windowHandle, ref, action, expect})`，`action` 只有

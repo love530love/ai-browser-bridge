@@ -25,6 +25,31 @@ const errorJournal = createErrorJournal(chrome.storage.local, message => {
 // Which tabs this bridge opened. Closing anything else would destroy work the
 // user did not hand over, so browser_close checks this before removing a tab.
 const tabOwnership = createTabOwnership(chrome.storage.session);
+// The bridge used to drive a browser whose version it could not name, which is
+// how an update becomes a mystery instead of a diff. No chrome.* API reports the
+// browser version, and the reduced user agent reports 154.0.0.0 for every patch
+// of that major, so the only source is the user-agent client hints, read here in
+// the worker where the promise can actually be awaited. Cached for the worker
+// lifetime on purpose: the value cannot change without the browser restarting,
+// and that restart recreates this worker.
+let browserIdentityCache = null;
+async function browserIdentity() {
+  if (browserIdentityCache) return browserIdentityCache;
+  const data = typeof navigator !== 'undefined' ? navigator.userAgentData : null;
+  if (!data) return (browserIdentityCache = { version: null, major: null, brands: null, source: 'unavailable' });
+  let full = null;
+  try { full = await data.getHighEntropyValues(['uaFullVersion', 'fullVersionList']); } catch { /* reduced hints only */ }
+  const brands = full?.fullVersionList ?? data.brands ?? null;
+  const product = (brands ?? []).find(item => /Google Chrome/i.test(item.brand)) ?? (brands ?? []).find(item => /Chromium/i.test(item.brand));
+  const version = full?.uaFullVersion ?? product?.version ?? null;
+  browserIdentityCache = {
+    version: version && /^\d+(\.\d+){1,3}$/.test(version) ? version : null,
+    major: version ? Number.parseInt(version, 10) : null,
+    brands: Array.isArray(brands) ? brands.slice(0, 8).map(item => ({ brand: String(item.brand).slice(0, 40), version: String(item.version).slice(0, 20) })) : null,
+    source: full ? 'user_agent_client_hints' : 'reduced_user_agent'
+  };
+  return browserIdentityCache;
+}
 // One long-lived debugger session per tab, which is what breakpoints need. Every
 // path out of the manager resumes a paused target before detaching: a paused tab
 // nobody owns is a frozen tab the user has to reload by hand.
@@ -486,6 +511,10 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     const base = {
       service: 'extension-worker',
       extensionVersion: chrome.runtime.getManifest().version,
+      // Which browser this worker is running in. Reported on every health call
+      // rather than only at connect time, because "the version changed under me"
+      // is exactly the question health is called to answer after an update.
+      browser: await browserIdentity(),
       connected: socket?.readyState === WebSocket.OPEN && connectionState === '已连接',
       connectionState,
       lastAction,
@@ -1132,7 +1161,14 @@ async function connect({ automatic = false } = {}) {
   socket = ws;
   connectInFlight = false;
   connectDeadline = setTimeout(() => { if (socket === ws) disconnect('连接超时，后台自动重连中', { automaticReconnect: true }); }, 10000);
-  ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token: config.token, version: chrome.runtime.getManifest().version }));
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'hello', token: config.token, version: chrome.runtime.getManifest().version }));
+    // Sent after hello so authentication is never delayed by a hint lookup: a
+    // slow client-hints promise must not look like a wrong pairing key.
+    browserIdentity()
+      .then(browser => { if (socket === ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'browser', browser })); })
+      .catch(() => {});
+  };
   ws.onmessage = async event => {
     if (ws !== socket) return;
     try {

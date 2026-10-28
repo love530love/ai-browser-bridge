@@ -37,7 +37,7 @@ async function doctor() {
     if (status.version !== expectedVersion) report.recommendations.push(`Running service differs from disk version ${expectedVersion}; restart the service when idle.`);
     if (status.extensionVersion !== manifestVersion) report.recommendations.push(`Loaded extension differs from disk version ${manifestVersion}; reload and verify before claiming deployment complete.`);
     add('service-status', status.service === 'ai-browser-bridge', { version: status.version });
-    add('extension-connected', status.connected === true, { extensionVersion: status.extensionVersion ?? null });
+    add('extension-connected', status.connected === true, { extensionVersion: status.extensionVersion ?? null, browserVersion: status.browserVersion ?? null });
     add('version-match', !!status.version && !!status.extensionVersion && status.version === status.extensionVersion, { serviceVersion: status.version, extensionVersion: status.extensionVersion ?? null });
     add('queue-idle', !status.active && status.queued === 0, { active: status.active, queued: status.queued });
     add('upload-roots', (status.uploadRoots ?? 0) === (config.uploadRoots?.length ?? 0), { count: status.uploadRoots ?? 0 });

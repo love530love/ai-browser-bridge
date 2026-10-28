@@ -113,13 +113,35 @@ function Find-AllById([string]$id) {
   $condition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $id)
   return @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition))
 }
+# Every automation id in this file was measured on one Chrome build. A version
+# jump can rename them, and a renamed id fails exactly like a missing element -
+# the worst possible failure mode for a flow that types a saved password. So each
+# critical lookup tries the id first and then falls back to role + accessible
+# name, and reports which path matched. An ambiguous fallback is refused instead
+# of resolved by position: two controls whose names both look like "Show
+# password" is precisely when a guess reveals a secret into the wrong place.
+function Find-Control([string]$Id, [string]$RoleName, [string]$NamePattern) {
+  if ($Id) {
+    $byId = Find-ById $Id
+    if ($byId) { return @{ element = $byId; matchedBy = "automationId:$Id"; ambiguous = $false } }
+  }
+  if ($RoleName -and $NamePattern) {
+    $role = [System.Windows.Automation.ControlType]::$RoleName
+    $condition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, $role)
+    $candidates = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition) |
+      Where-Object { -not $_.Current.IsOffscreen -and [string]$_.Current.Name -match $NamePattern })
+    if ($candidates.Count -eq 1) { return @{ element = $candidates[0]; matchedBy = "role+name:$RoleName/$NamePattern"; ambiguous = $false } }
+    if ($candidates.Count -gt 1) { return @{ element = $null; matchedBy = "role+name:$RoleName/$NamePattern"; ambiguous = $true; candidates = $candidates.Count } }
+  }
+  return @{ element = $null; matchedBy = 'not_found'; ambiguous = $false }
+}
 function Get-Value($element) {
   try { return [string]$element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch { return $null }
 }
 function Get-AddressBarValue {
-  $edit = Find-ById 'view_1012'
-  if (-not $edit) { return '' }
-  $value = Get-Value $edit
+  $resolved = Find-Control 'view_1012' 'Edit' 'address and search|search or type a url'
+  if (-not $resolved.element) { return '' }
+  $value = Get-Value $resolved.element
   if ($value) { return $value }
   return ''
 }
@@ -247,19 +269,37 @@ if (-not $pageReady) { Result @{ status = 'uncertain'; reason = 'password_manage
 # The entry list loads asynchronously after the page appears, so wait for it to
 # actually render rather than sleeping a fixed amount and hoping.
 $entryCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'seePasswordDetails')
+# Entry rows carry the site name followed by ", see details". The id that used to
+# find them is build-specific; the suffix is part of the accessible name a screen
+# reader depends on, which makes it the more durable of the two.
+function Get-EntryControls {
+  $byId = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $entryCondition) | Where-Object { -not $_.Current.IsOffscreen })
+  if ($byId.Count -gt 0) { return @{ rows = $byId; matchedBy = 'automationId:seePasswordDetails' } }
+  $buttonCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+  $byName = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition) |
+    Where-Object { -not $_.Current.IsOffscreen -and [string]$_.Current.Name -match ', see details$' })
+  return @{ rows = $byName; matchedBy = 'role+name:Button/, see details' }
+}
+$searchResolved = Find-Control 'searchInput' 'Edit' 'search'
+if ($searchResolved.ambiguous) {
+  Result @{ status = 'denied'; reason = 'search_input_ambiguous'; dispatched = $true; candidates = $searchResolved.candidates
+    note = 'More than one edit control looks like the search box. Refusing to type a site name into an unidentified field.' }
+}
+$search = $searchResolved.element
+$searchMatchedBy = $searchResolved.matchedBy
 $listDeadline = (Get-Date).AddMilliseconds($WaitMs)
 $listRendered = $false
+$entriesMatchedBy = 'not_found'
 while ((Get-Date) -lt $listDeadline) {
-  $search = Find-ById 'searchInput'
   if ($search) {
-    $probeEntries = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $entryCondition))
+    $probe = Get-EntryControls
+    $entriesMatchedBy = $probe.matchedBy
     $listNode = Find-ById 'passwords'
-    if ($probeEntries.Count -gt 0 -or $listNode) { $listRendered = $true; break }
+    if ($probe.rows.Count -gt 0 -or $listNode) { $listRendered = $true; break }
   }
   Start-Sleep -Milliseconds 250
 }
-$search = Find-ById 'searchInput'
-if (-not $search) { Result @{ status = 'uncertain'; reason = 'search_input_not_found'; dispatched = $true } }
+if (-not $search) { Result @{ status = 'uncertain'; reason = 'search_input_not_found'; dispatched = $true; tried = $searchResolved.matchedBy } }
 
 # Chrome names an entry after the site string it was saved with, which is not
 # always the bare host: an IP-based login is stored as "http://host:port". Both
@@ -280,7 +320,9 @@ foreach ($candidate in $candidates) {
   $stablePolls = 0
   while ((Get-Date) -lt $filterDeadline) {
     Start-Sleep -Milliseconds 300
-    $entries = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $entryCondition) | Where-Object { -not $_.Current.IsOffscreen })
+    $entryProbe = Get-EntryControls
+    $entries = $entryProbe.rows
+    if ($entryProbe.rows.Count -gt 0) { $entriesMatchedBy = $entryProbe.matchedBy }
     $exactNow = @($entries | Where-Object { [string]$_.Current.Name -eq "$candidate, see details" })
     if ($exactNow.Count -ge 1) { $matchedEntry = $exactNow[0]; break }
     $signature = (@($entries | ForEach-Object { [string]$_.Current.Name }) -join '|')
@@ -313,15 +355,20 @@ if ($details.originMatches -eq $false) {
   Result @{ status = 'denied'; reason = 'origin_binding_mismatch'; shownSite = $details.shownSite; origin = $details.originLink; dispatched = $true }
 }
 
-$revealButton = Find-ById 'showPasswordButton'
-if (-not $revealButton) { Result @{ status = 'uncertain'; reason = 'reveal_control_not_found'; dispatched = $true; shownSite = $details.shownSite } }
+$revealResolved = Find-Control 'showPasswordButton' 'Button' 'show password'
+if ($revealResolved.ambiguous) {
+  Result @{ status = 'denied'; reason = 'reveal_control_ambiguous'; dispatched = $true; candidates = $revealResolved.candidates; shownSite = $details.shownSite
+    note = 'More than one button looks like the reveal control. Pressing the wrong one could reveal a different entry, so nothing was pressed.' }
+}
+$revealButton = $revealResolved.element
+if (-not $revealButton) { Result @{ status = 'uncertain'; reason = 'reveal_control_not_found'; dispatched = $true; shownSite = $details.shownSite; tried = $revealResolved.matchedBy } }
 
 if (-not $details.passwordMasked) {
   # Already revealed (a previous call, or a session where Chrome kept it open).
   $payload = @{
     status = 'success'; site = $details.shownSite; origin = $details.originAuthority; loginUrl = $details.originLink
     username = $details.username; password = $details.password; requiresUserAuth = $false
-    evidence = @{ method = 'windows_ui_automation'; revealInvoked = $false; alreadyRevealed = $true }
+    evidence = @{ method = 'windows_ui_automation'; revealInvoked = $false; alreadyRevealed = $true; lookup = @{ search = $searchMatchedBy; entries = $entriesMatchedBy; reveal = $revealResolved.matchedBy } }
   }
 } else {
   $revealButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
@@ -335,7 +382,7 @@ if (-not $details.passwordMasked) {
     $payload = @{
       status = 'success'; site = $after.shownSite; origin = $after.originAuthority; loginUrl = $after.originLink
       username = $after.username; password = $after.password; requiresUserAuth = $false
-      evidence = @{ method = 'windows_ui_automation'; revealInvoked = $true; alreadyRevealed = $false }
+      evidence = @{ method = 'windows_ui_automation'; revealInvoked = $true; alreadyRevealed = $false; lookup = @{ search = $searchMatchedBy; entries = $entriesMatchedBy; reveal = $revealResolved.matchedBy } }
     }
   } elseif ($leftChrome) {
     # Chrome asked the operating system for consent. That is the user's step, not
