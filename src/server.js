@@ -21,7 +21,31 @@ import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-a
 import { setDevToolsState } from './devtools-menu.js';
 import { lookupCredential, credentialOriginHash, CREDENTIAL_LOOKUP_CONFIRMATION } from './credential-store.js';
 import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMATION } from './password-manager.js';
-import { STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION, RECIPE_RUN_CONFIRMATION } from './confirmations.js';
+import {
+  STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION, RECIPE_RUN_CONFIRMATION,
+  BOOKMARKS_WRITE_CONFIRMATION, HISTORY_DELETE_CONFIRMATION, DOWNLOADS_CONTROL_CONFIRMATION,
+  EXTENSION_STATE_CONFIRMATION, COOKIES_WRITE_CONFIRMATION, BROWSING_DATA_CONFIRMATION,
+  SITE_SETTINGS_WRITE_CONFIRMATION, PRIVACY_SETTING_WRITE_CONFIRMATION,
+  WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION
+} from './confirmations.js';
+
+// Browser-wide writes (extension/browser-authority.js) are gated here, before a
+// job is queued, for the same reason the storage and replay gates live here: a
+// refusal that costs a queue slot and a round trip is a refusal the caller only
+// discovers after waiting. Each tool has its own phrase, so one approval can
+// never authorise a different tool's write.
+const AUTHORITY_CONFIRMATIONS = {
+  browser_bookmarks_write: BOOKMARKS_WRITE_CONFIRMATION,
+  browser_history_delete: HISTORY_DELETE_CONFIRMATION,
+  browser_downloads_control: DOWNLOADS_CONTROL_CONFIRMATION,
+  browser_extension_state: EXTENSION_STATE_CONFIRMATION,
+  browser_cookies_write: COOKIES_WRITE_CONFIRMATION,
+  browser_clear_browsing_data: BROWSING_DATA_CONFIRMATION,
+  browser_site_settings_write: SITE_SETTINGS_WRITE_CONFIRMATION,
+  browser_privacy_settings_write: PRIVACY_SETTING_WRITE_CONFIRMATION,
+  browser_windows_control: WINDOW_CONTROL_CONFIRMATION,
+  browser_proxy_write: PROXY_CONFIRMATION
+};
 import { recipeDir, recipeFileName, buildRecipe, saveRecipe, loadRecipe, listRecipes, deleteRecipe, missingVariables, MAX_RECIPE_STEPS } from './recipes.js';
 
 function equal(a, b) {
@@ -1092,6 +1116,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (name === 'browser_desktop_windows' || name === 'browser_devtools' || name === 'browser_native_snapshot' ||
         name === 'browser_native_action') return desktopCall(name, args);
     if (name === 'browser_storage_write' && args.confirmation !== STORAGE_WRITE_CONFIRMATION) return denyUnconfirmed(name, args, STORAGE_WRITE_CONFIRMATION);
+    if (AUTHORITY_CONFIRMATIONS[name] && args.confirmation !== AUTHORITY_CONFIRMATIONS[name]) return denyUnconfirmed(name, args, AUTHORITY_CONFIRMATIONS[name]);
     if (name === 'browser_replay_request' && args.confirmation !== REPLAY_REQUEST_CONFIRMATION) return denyUnconfirmed(name, args, REPLAY_REQUEST_CONFIRMATION);
     if (name === 'browser_recipe_run' && args.confirmation !== RECIPE_RUN_CONFIRMATION) return denyUnconfirmed(name, args, RECIPE_RUN_CONFIRMATION);
     if (LEASE_TOOLS.has(name)) return leaseCall(name, args, decision);

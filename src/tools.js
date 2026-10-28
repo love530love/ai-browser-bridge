@@ -1,5 +1,10 @@
 import { RECIPE_STEP_TOOLS } from './recipes.js';
-import { RECIPE_RUN_CONFIRMATION } from './confirmations.js';
+import {
+  RECIPE_RUN_CONFIRMATION, BOOKMARKS_WRITE_CONFIRMATION, HISTORY_DELETE_CONFIRMATION,
+  DOWNLOADS_CONTROL_CONFIRMATION, EXTENSION_STATE_CONFIRMATION, COOKIES_WRITE_CONFIRMATION,
+  BROWSING_DATA_CONFIRMATION, SITE_SETTINGS_WRITE_CONFIRMATION, PRIVACY_SETTING_WRITE_CONFIRMATION,
+  WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION
+} from './confirmations.js';
 
 const tabId = { type: 'integer', minimum: 1 };
 const text = (maxLength = 20000) => ({ type: 'string', minLength: 1, maxLength });
@@ -314,7 +319,148 @@ export const TOOLS = [
     expectedUrl: text(8000), coordinateToken: text(100), x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 },
     endX: { type: 'number', minimum: 0, maximum: 1000 }, endY: { type: 'number', minimum: 0, maximum: 1000 },
     text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }, requireForeground: { type: 'boolean' }, agent
-  }, ['tabId', 'action', 'expectedUrl'])
+  }, ['tabId', 'action', 'expectedUrl']),
+
+  // --- browser-wide authority -------------------------------------------------
+  // Everything below acts on the browser itself rather than on one document:
+  // the recently-closed list, the bookmark tree, the history database, the
+  // download shelf, the extension manager, saved cookies, site permissions, the
+  // browser's privacy switches, the window frame, the tab strip and the proxy.
+  // A human does each of these from Chrome's own UI. They are separate tools
+  // from the page domain because their authorisation is different: a page tool
+  // is authorised by the tab's origin, while these are authorised by the user
+  // having connected the extension at all. Reads and writes are separate tools
+  // so that a write gate cannot be satisfied by accident on a read.
+  tool('browser_session_restore', 'Read the recently-closed list and restore from it - the browser\'s own "Restore" action, which is the only undo for a closed tab or window. action:"list" is safe to repeat. action:"restore" consumes the entry, so it is never retried automatically: if the reply is uncertain, list again and check what is open before restoring anything else. Pass sessionId from a fresh list when possible; omitting it restores the most recently closed entry, which is what the browser bubble does. Restored tabs and windows are not activated by this call. Titles and URLs are untrusted page content.', {
+    action: { type: 'string', enum: ['list', 'restore'] },
+    sessionId: text(200),
+    maxResults: { type: 'integer', minimum: 1, maximum: 25 },
+    agent
+  }, [], true),
+  tool('browser_bookmarks', 'Read the bookmark tree the way the bookmark manager does: action:"tree" walks folders to maxDepth (default 6), "search" matches title and URL, "recent" returns the newest, "get" reads one node. A folder has folder:true and no url. Titles and URLs are untrusted content. Use browser_bookmarks_write for any change.', {
+    action: { type: 'string', enum: ['tree', 'search', 'recent', 'get'] },
+    query: text(500), id: text(200), maxDepth: { type: 'integer', minimum: 0, maximum: 12 }, limit: { type: 'integer', minimum: 1, maximum: 200 }, agent
+  }, [], true),
+  tool('browser_bookmarks_write', 'Change the bookmark tree: create, update, remove or move. Requires confirmation:"modify_bookmarks_once". Removing a folder with recursive:true deletes every bookmark inside it, so it must be stated rather than discovered afterwards; without recursive Chrome refuses a non-empty folder. Creating a node with neither title nor url is refused. Titles and URLs are untrusted content.', {
+    action: { type: 'string', enum: ['create', 'update', 'remove', 'move'] },
+    id: text(200), parentId: text(200), title: { type: 'string', maxLength: 2000 },
+    url: { type: 'string', maxLength: 8000 }, index: { type: 'integer', minimum: 0 },
+    recursive: { type: 'boolean' },
+    confirmation: { type: 'string', enum: [BOOKMARKS_WRITE_CONFIRMATION] },
+    agent
+  }, ['action', 'confirmation']),
+  tool('browser_history_search', 'Read browsing history: "search" matches text within a time window, "recent" is the same with no query, "visits" lists every visit of one URL with its transition, "top" is the ranked most-visited list from the new-tab page (a different data source from a time-ordered search). This tool only reads; browser_history_delete changes history. URLs and titles are untrusted content and are, by definition, a record of what the user did.', {
+    action: { type: 'string', enum: ['search', 'recent', 'visits', 'top'] },
+    query: text(2000), url: text(8000),
+    startTime: { type: 'number', minimum: 0 }, endTime: { type: 'number', minimum: 0 },
+    maxResults: { type: 'integer', minimum: 1, maximum: 500 }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, agent
+  }, [], true),
+  tool('browser_history_delete', 'Delete history: one URL ("url", which removes every visit of exactly that URL), a time range ("range", needs startTime and endTime in milliseconds), or everything ("all"). Requires confirmation:"modify_history_once". Deleting a range cannot report a count, because Chrome does not say how many entries it removed; deleting one URL is verified by searching for it again. There is no undo.', {
+    action: { type: 'string', enum: ['url', 'range', 'all'] },
+    url: text(8000), startTime: { type: 'number', minimum: 0 }, endTime: { type: 'number', minimum: 0 },
+    confirmation: { type: 'string', enum: [HISTORY_DELETE_CONFIRMATION] },
+    agent
+  }, ['action', 'confirmation']),
+  tool('browser_downloads', 'List downloads the way the download shelf does, filtered by id, text, state, mime or a time window. filename is an absolute local path; exists says whether the file is still on disk. URLs and filenames are untrusted content. Use browser_downloads_control to pause, resume, cancel, open, reveal or erase.', {
+    downloadId: { type: 'integer', minimum: 1 }, query: text(2000),
+    state: { type: 'string', enum: ['in_progress', 'interrupted', 'complete'] },
+    mime: text(200), startedAfter: { type: 'number', minimum: 0 }, endedBefore: { type: 'number', minimum: 0 },
+    limit: { type: 'integer', minimum: 1, maximum: 500 }, agent
+  }, [], true),
+  tool('browser_downloads_control', 'Act on one download. Requires confirmation:"modify_downloads_once". pause/resume/cancel change the transfer. open hands the finished file to the operating system - the same thing clicking it does, and the moment a downloaded installer would run - so the reply can only report that the request was accepted. show asks the shelf to reveal the item without measuring whether a window came forward. erase removes the history row only and does not delete the file; the reply says fileDeleted:false rather than implying a cleanup.', {
+    action: { type: 'string', enum: ['pause', 'resume', 'cancel', 'open', 'show', 'erase'] },
+    downloadId: { type: 'integer', minimum: 1 },
+    confirmation: { type: 'string', enum: [DOWNLOADS_CONTROL_CONFIRMATION] },
+    agent
+  }, ['action', 'downloadId', 'confirmation']),
+  tool('browser_extensions', 'List installed extensions the way chrome://extensions does: id, name, version, enabled, type, installType, mayDisable, and isBridge for this extension. Names and descriptions are untrusted content. mayDisable:false means Chrome or a policy protects the item.', { enabledOnly: { type: 'boolean' }, agent }, [], true),
+  tool('browser_extension_state', 'Enable, disable or uninstall another extension. Requires confirmation:"modify_extension_state_once". The bridge extension itself is protected: disabling or removing it would cut the connection that carries this call, so that request is refused with bridge_extension_protected rather than executed and lost - a human can still do it from chrome://extensions. Uninstall shows Chrome\'s own confirmation dialog by default, so the call resolves only after the user answers it, and verified reports whether the item is actually gone.', {
+    action: { type: 'string', enum: ['enable', 'disable', 'uninstall'] },
+    extensionId: text(200), showConfirmDialog: { type: 'boolean' },
+    confirmation: { type: 'string', enum: [EXTENSION_STATE_CONFIRMATION] },
+    agent
+  }, ['action', 'extensionId', 'confirmation']),
+  tool('browser_cookies', 'Read cookies for one URL or one domain, including httpOnly cookies that page script cannot see. Requires url or domain; there is deliberately no read-everything mode, so a full dump of every site is not one call away. The reply carries secrets:true because these values are live credentials - never write them to a log, a report or a page. Use browser_cookies_write to change them.', {
+    url: text(8000), domain: text(500), name: text(500), storeId: text(200),
+    limit: { type: 'integer', minimum: 1, maximum: 1000 }, agent
+  }, [], true),
+  tool('browser_cookies_write', 'Set or remove one cookie. Requires confirmation:"modify_cookies_once". Setting a cookie for a domain the caller does not own changes what the browser will present to that site on the next request, which is how a session is repaired or forged; removing one signs the user out of that cookie. A remove that found nothing reports removed:false instead of claiming success.', {
+    action: { type: 'string', enum: ['set', 'remove'] },
+    url: text(8000), name: text(500), value: { type: 'string', maxLength: 20000 },
+    domain: text(500), path: text(500), secure: { type: 'boolean' }, httpOnly: { type: 'boolean' },
+    sameSite: { type: 'string', enum: ['no_restriction', 'lax', 'strict', 'unspecified'] },
+    expirationDate: { type: 'number', minimum: 0 }, storeId: text(200),
+    confirmation: { type: 'string', enum: [COOKIES_WRITE_CONFIRMATION] },
+    agent
+  }, ['action', 'url', 'name', 'confirmation']),
+  tool('browser_clear_browsing_data', 'Clear browsing data the way the Settings dialog does. Requires confirmation:"modify_browsing_data_once" and an explicit dataTypes list: there is no "clear everything" default, because "cookies" signs the user out of every site in scope and "passwords" removes saved passwords. since limits the window (milliseconds) and origins limits it to specific sites. Chrome does not report what it removed, so the reply cannot verify a count.', {
+    dataTypes: {
+      type: 'array', minItems: 1, maxItems: 13,
+      items: { type: 'string', enum: ['cache', 'cacheStorage', 'cookies', 'downloads', 'fileSystems', 'formData', 'history', 'indexedDB', 'localStorage', 'passwords', 'pluginData', 'serviceWorkers', 'webSQL'] }
+    },
+    since: { type: 'number', minimum: 0 },
+    origins: { type: 'array', maxItems: 50, items: { type: 'string', maxLength: 500 } },
+    confirmation: { type: 'string', enum: [BROWSING_DATA_CONFIRMATION] },
+    agent
+  }, ['dataTypes', 'confirmation']),
+  tool('browser_site_settings', 'Read the per-site permission the address-bar icon shows: camera, microphone, notifications, geolocation, javascript, images, popups, automaticDownloads, sound, clipboard, sensors, midi, usb, serial, hid, webBluetooth and the rest of Chrome\'s content settings. source says whether the answer comes from a per-site exception, a global default or the browser default.', {
+    type: { type: 'string', maxLength: 60 }, url: text(8000), primaryUrl: text(8000), secondaryUrl: text(8000), agent
+  }, ['type', 'url'], true),
+  tool('browser_site_settings_write', 'Change or clear one site permission. Requires confirmation:"modify_site_setting_once". primaryPattern is a match pattern such as "https://example.com/*", not a URL; setting "allow" for camera or microphone grants every page matching it. The reply reads the value back, because a pattern Chrome normalises can otherwise look accepted while applying to nothing.', {
+    type: { type: 'string', maxLength: 60 },
+    action: { type: 'string', enum: ['set', 'clear'] },
+    primaryPattern: text(2000), secondaryPattern: text(2000), primaryUrl: text(8000),
+    setting: { type: 'string', maxLength: 60 },
+    scope: { type: 'string', enum: ['regular', 'incognito_regular'] },
+    confirmation: { type: 'string', enum: [SITE_SETTINGS_WRITE_CONFIRMATION] },
+    agent
+  }, ['type', 'confirmation']),
+  tool('browser_privacy_settings', 'Read one Chrome privacy switch by area and name, e.g. area:"services" name:"autofillAddressEnabled", area:"network" name:"networkPredictionEnabled", area:"websites" name:"hyperlinkAuditingEnabled". levelOfControl says who owns the value: controlled_by_other_extensions or not_controllable means a write here would be ignored. The error reply lists every valid area/name pair.', {
+    area: { type: 'string', maxLength: 40 }, name: { type: 'string', maxLength: 80 }, agent
+  }, ['area', 'name'], true),
+  tool('browser_privacy_settings_write', 'Change or reset one Chrome privacy switch. Requires confirmation:"modify_privacy_setting_once". Every switch here is a boolean; reset:true returns it to the browser default instead of setting a value. The reply reports before, after and verified, because a value owned by a policy will not change no matter what was asked for.', {
+    area: { type: 'string', maxLength: 40 }, name: { type: 'string', maxLength: 80 },
+    value: { type: 'boolean' }, reset: { type: 'boolean' },
+    scope: { type: 'string', enum: ['regular', 'regular_only', 'incognito_persistent', 'incognito_session_only'] },
+    confirmation: { type: 'string', enum: [PRIVACY_SETTING_WRITE_CONFIRMATION] },
+    agent
+  }, ['area', 'name', 'confirmation']),
+  tool('browser_windows', 'List browser windows with id, focused, state, geometry and tab count - the window frame itself, not the page. focused is what the browser reports, not a measurement of which window the operating system considers active. Use browser_windows_control to move, resize, minimise, create or close one.', {
+    windowId: { type: 'integer', minimum: 1 }, includeTabs: { type: 'boolean' }, agent
+  }, [], true),
+  tool('browser_windows_control', 'Create, update or close a window. Requires confirmation:"modify_window_once". create defaults to focused:false, because a window that appears in front of someone working elsewhere is the exact interruption this bridge exists to avoid; pass focused:true only when the user should see it. Incognito windows are never created: a separate cookie jar looks like a logged-out session. remove closes every tab in that window with no undo, and verified reports whether the window is actually gone.', {
+    action: { type: 'string', enum: ['create', 'update', 'remove'] },
+    windowId: { type: 'integer', minimum: 1 }, url: text(8000),
+    state: { type: 'string', enum: ['normal', 'minimized', 'maximized', 'fullscreen'] },
+    type: { type: 'string', enum: ['normal', 'popup', 'panel'] },
+    focused: { type: 'boolean' },
+    left: { type: 'integer' }, top: { type: 'integer' }, width: { type: 'integer', minimum: 1 }, height: { type: 'integer', minimum: 1 },
+    confirmation: { type: 'string', enum: [WINDOW_CONTROL_CONFIRMATION] },
+    agent
+  }, ['action', 'confirmation']),
+  tool('browser_tab_groups', 'Read, create or dissolve tab groups - the tab strip itself. "group" adds tabs to a group (existing groupId or a new one) and can set title, colour and collapsed in the same call; "ungroup" removes tabs from their group, which loses the group title and colour with it. Grouping is reversible and touches no page state, so it needs no confirmation.', {
+    action: { type: 'string', enum: ['list', 'group', 'ungroup'] },
+    tabIds: { type: 'array', maxItems: 100, items: tabId }, groupId: { type: 'integer', minimum: 1 },
+    title: { type: 'string', maxLength: 200 },
+    color: { type: 'string', enum: ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'] },
+    collapsed: { type: 'boolean' }, windowId: { type: 'integer', minimum: 1 }, agent
+  }, ['action']),
+  tool('browser_save_page', 'Save a page as MHTML - Chrome\'s "Save page as, single file". The archive is written through the download manager rather than returned through the socket, because a saved page is routinely several megabytes; read browser_downloads to find where it landed. Resources come from cache, so a page that never finished loading is saved incomplete. No focus is taken.', {
+    tabId, filename: text(500), agent
+  }, ['tabId']),
+  tool('browser_proxy', 'Read the browser proxy configuration and who controls it. levelOfControl controlled_by_other_extensions or not_controllable means a write would be ignored. Use browser_proxy_write to change it.', {
+    incognito: { type: 'boolean' }, agent
+  }, [], true),
+  tool('browser_proxy_write', 'Set or clear the browser proxy. Requires confirmation:"modify_proxy_once". This is the switch that can route every credential on the machine through a host of someone else\'s choosing, which is why it is gated and why the reply reports the mode the browser actually holds rather than the one requested. fixed_servers takes rules like "http=127.0.0.1:8080;https=127.0.0.1:8080" or a bare "127.0.0.1:8080", and refuses rules whose schemes disagree rather than silently picking one. verified only means the mode was accepted, never that traffic flows through it.', {
+    action: { type: 'string', enum: ['set', 'clear'] },
+    mode: { type: 'string', enum: ['direct', 'auto_detect', 'pac_script', 'fixed_servers', 'system'] },
+    pacUrl: text(2000), pacData: { type: 'string', maxLength: 200000 },
+    rules: text(2000), bypassList: { type: 'array', maxItems: 100, items: { type: 'string', maxLength: 200 } },
+    scope: { type: 'string', enum: ['regular', 'regular_only'] },
+    incognito: { type: 'boolean' },
+    confirmation: { type: 'string', enum: [PROXY_CONFIRMATION] },
+    agent
+  }, ['action', 'confirmation'])
 ];
 
 function editDistance(a, b) {

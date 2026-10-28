@@ -8,11 +8,27 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TOOLS } from '../src/tools.js';
-import { STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION } from '../src/confirmations.js';
+import {
+  STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION,
+  BOOKMARKS_WRITE_CONFIRMATION, HISTORY_DELETE_CONFIRMATION, DOWNLOADS_CONTROL_CONFIRMATION,
+  EXTENSION_STATE_CONFIRMATION, COOKIES_WRITE_CONFIRMATION, BROWSING_DATA_CONFIRMATION,
+  SITE_SETTINGS_WRITE_CONFIRMATION, PRIVACY_SETTING_WRITE_CONFIRMATION,
+  WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION
+} from '../src/confirmations.js';
 
 const EXPECTED = {
   browser_storage_write: STORAGE_WRITE_CONFIRMATION,
-  browser_replay_request: REPLAY_REQUEST_CONFIRMATION
+  browser_replay_request: REPLAY_REQUEST_CONFIRMATION,
+  browser_bookmarks_write: BOOKMARKS_WRITE_CONFIRMATION,
+  browser_history_delete: HISTORY_DELETE_CONFIRMATION,
+  browser_downloads_control: DOWNLOADS_CONTROL_CONFIRMATION,
+  browser_extension_state: EXTENSION_STATE_CONFIRMATION,
+  browser_cookies_write: COOKIES_WRITE_CONFIRMATION,
+  browser_clear_browsing_data: BROWSING_DATA_CONFIRMATION,
+  browser_site_settings_write: SITE_SETTINGS_WRITE_CONFIRMATION,
+  browser_privacy_settings_write: PRIVACY_SETTING_WRITE_CONFIRMATION,
+  browser_windows_control: WINDOW_CONTROL_CONFIRMATION,
+  browser_proxy_write: PROXY_CONFIRMATION
 };
 
 test('each confirmation-gated tool advertises exactly the value the service checks', () => {

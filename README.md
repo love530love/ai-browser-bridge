@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.21.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.22.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.22.0 把范围从「页面」扩到「浏览器本身」。此前所有工具都活在文档里，而人类工程师有一大半操作在文档之外：恢复关掉的标签、翻书签、清历史、看下载、启停扩展、改站点权限、读 cookie、调隐私开关、摆窗口。这些 Chrome 都给扩展 API，之前一个都没开。现在 **13 个权限 + 21 个工具**全部打开，规则是**每开一个权限必须在同一版里有一个工具**——只加权限不加工具，等于安装时多一条警告而没有多一分能力。读写刻意分家（`browser_cookies` 只读、`browser_cookies_write` 才写），因为确认串必须「声明即必填、只有一个值」，否则要么逼调用方在只读时也闭眼填确认，要么写就没有闸门。10 个新确认串在服务端**入队前**就拒。硬边界写进代码：桥扩展**拒绝停用自己**（那会切断承载该请求的连接）；`browser_cookies` **没有「读全部」模式**，必须指名 url 或 domain，返回标 `secrets:true`；`browser_clear_browsing_data` **必须显式列 dataTypes**，因为 `cookies` 会登出所有站点；建窗口**默认 `focused:false`**；代理 rules 的 scheme 不一致时**拒绝**而不是悄悄挑一个；所有读回来的标题/URL/文件名都标 `untrusted browser metadata`。真机已验证到写闭环：书签 create → get → remove（`verified:true`），`browser_extensions` 读到 35 个扩展，`browser_session_restore` 列出了 25 条最近关闭记录、其中 6 条是 20 标签窗口。
 
 0.21.0 把「哪个浏览器是我的」这个问题交给了唯一知道答案的人。0.20.0 的打分器把稳定版 `Default` 排在前面，用户当场否掉并选了 **Canary / Default**；随后按写入时间取证才发现两份 profile **是同一个账号的克隆**（`Login Data` 都是 192KB），Canary 那份已经 78 天没写入、真正在写的是稳定版那份——所以「记一次」之后还必须能发现「记错了」。现在 `config.json` 里的 `browserTarget: { channel, exePath, userDataDir, profileDirectory }` 记一次、之后逐字使用，脚本回 `targetSource: "explicit"`；只有没记录时才退回启发式，`doctor` 会提醒。**记录也会过期**，所以同一轮又加了活跃度证据：`-DryRun` 报 `wouldLaunch.ageMinutes` / `profileName` / `accounts` 与全渠道最新的 `liveCandidate`，目标陈旧时给 `warnings: ["recorded_target_looks_stale"]` 且 `doctor` 直接判红。**登录账号只能证明「我用过一次」，只有写入时间能证明「我在用」。** 另外两条实测结论：`--load-extension` 在 Chrome 156/159 上**被忽略**（不能当兜底）；`SW_SHOWNOACTIVATE` **不足以**阻止 Chrome 抢前台（它对第一个窗口会显式 ShowWindow），所以改成「抢了就把焦点还回去」——`AttachThreadInput` + `SetForegroundWindow` 恢复原前台窗口，再测一次并如实报 `focusRestored`。诊断也修了：Chrome 退出时会把扩展记录压缩成只剩 `disable_reasons`、`path` 消失，只按路径匹配会误报「未安装」，现在 id 也参与匹配。
 

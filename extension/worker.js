@@ -6,6 +6,7 @@ import { captureDevtools, createTabSubscription } from './cdp-capture.js';
 import { readStorage, writeStorage } from './cdp-storage.js';
 import { replayRequest } from './cdp-replay.js';
 import { createSessionManager } from './cdp-session.js';
+import { runAuthorityTool } from './browser-authority.js';
 import { reuseKey, samePage, visibleTab, isInternalPage, describeTab, createTabOwnership } from './tab-identity.js';
 let socket = null;
 let keepalive = null;
@@ -610,6 +611,14 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       verified: false, method: 'chrome.runtime.reload',
       nextStep: 'This worker unloads and reloads, then reconnects with a new session id. The service confirms it by observing that new session and version.' };
   }
+  // Browser-wide tools (sessions, bookmarks, history, downloads, extension
+  // manager, cookies, site settings, windows, tab groups, page capture) are not
+  // about one document, so they are answered before the tab gate below. Their
+  // authority comes from the extension being connected, and every write among
+  // them was already refused by the service unless the caller echoed the
+  // confirmation string for that specific tool.
+  const authorityResult = await runAuthorityTool(name, args);
+  if (authorityResult !== null) return authorityResult;
   if (!Number.isInteger(args.tabId) || args.tabId < 1) throw new Error('Invalid tabId');
   const tab = await chrome.tabs.get(args.tabId);
   // Closing is about a tab's lifecycle, not its content. Requiring the origin

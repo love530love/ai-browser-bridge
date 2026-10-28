@@ -4,6 +4,29 @@
 
 ## 目标
 
+## 2026-10-29 接手增量（0.22.0）：范围从「页面」扩到「浏览器本身」
+
+- **13 个权限 / 21 个工具**，规则是「每开一个权限，同一版必须有一个工具」。
+  权限：`sessions` `bookmarks` `history` `downloads` `management` `cookies` `browsingData`
+  `contentSettings` `privacy` `topSites` `pageCapture` `tabGroups` `proxy`。
+  **明确不加**：`webNavigation`（只有事件）、`nativeMessaging` / `identity`（本机无基础设施）、
+  `clipboardRead/Write`（粘贴已可用 CDP Ctrl+V；读剪贴板需 `offscreen` 且会读到用户刚复制的任意内容）。
+- **读写必须分家**。`test/confirmation-schemas.test.js` 要求「声明 confirmation 即 required 且单值」，
+  所以读写混用的工具只有两种坏结局：让只读也闭眼填确认（闸门失效），或让写没有闸门。
+  每个域都是 `browser_x`（只读）+ `browser_x_write`（带确认串）。
+- **10 个确认串在服务端入队前就拒**（`AUTHORITY_CONFIRMATIONS`），不是往返一轮之后才说不。
+- 硬边界写在代码里：桥扩展**不能停用/卸载自己**（`bridge_extension_protected`）；
+  `browser_cookies` **没有「读全部」模式**（必须给 url 或 domain，返回 `secrets:true`）；
+  `browser_clear_browsing_data` **必须显式列 dataTypes**；建窗口**默认 `focused:false`**；
+  代理 rules 的 scheme 不一致时**拒绝**；所有读工具返回的文本标 `untrusted browser metadata`。
+- **本机实测注意**：书签根 id 是 **5/6/7**，不是标准 1/2/3（写死会 `Can't find parent bookmark for id`）；
+  Chrome 156 的 `contentSettings.get` **不再回 `source`**，所以「未报告」不等于「没有例外」。
+- **旧债已可回收**：`browser_session_restore action:"list"` 列出 25 条最近关闭记录，
+  其中 6 条是 20 标签窗口（`veryai.cn` / `kernelgen.flagos.io`）。恢复会**消费**该条目，
+  所以结果不确定时先重新 list 再决定，绝不自动重放。
+- 部署方式：`stop.ps1` → `start.ps1` → `browser_reload_extension`（`chrome.runtime.reload`，
+  零焦点零新标签）→ 逐项真机验证。
+
 ## 2026-10-28 接手增量（0.21.0）：浏览器目标由用户指定
 
 - **本机的正确答案（用户当场确认）**：日常浏览器 = **Chrome SxS（Canary）/ profile `Default`**，

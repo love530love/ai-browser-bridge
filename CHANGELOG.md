@@ -1,3 +1,23 @@
+## 0.22.0 — 2026-10-29（**浏览器本身也在范围内**：13 个权限、21 个工具、每个写操作一把独立的锁）
+
+用户的要求是「让任意 agent 无缝接入操纵能力，完全能够代替人类工程师操作」。0.21.0 之前所有工具都在**页面**里，而人类工程师要干的事有一大半在页面之外：恢复关掉的标签、翻书签、清历史、看下载、启停扩展、改站点权限、读 cookie、调隐私开关、摆窗口。这些 Chrome 都给了扩展 API，我们一个都没开。这一版把它们全部打开，并且**每开一个权限就必须在同一版里有一个工具**——只加权限不加工具，等于安装时多一条警告而没有多一分能力。
+
+- **13 个新权限**：`sessions` `bookmarks` `history` `downloads` `management` `cookies` `browsingData` `contentSettings` `privacy` `topSites` `pageCapture` `tabGroups` `proxy`。同时**明确不加**两类：只提供事件、没有对应操作的（`webNavigation`），和需要本机不存在的基础设施才能用的（`nativeMessaging`、OAuth 的 `identity`）。
+- **21 个新工具，读写分家**。这是被 `test/confirmation-schemas.test.js` 逼出来的正确设计：它要求「声明了 confirmation 就必须是 required 且只有一个值」。如果一个工具既读又写，要么让读也强制填 `modify_xxx_once`（等于训练调用方闭眼填），要么让写没有闸门。所以每个域都是 `browser_x`（只读）+ `browser_x_write`（写，带确认串）：
+  `browser_session_restore`、`browser_bookmarks` / `browser_bookmarks_write`、`browser_history_search` / `browser_history_delete`、`browser_downloads` / `browser_downloads_control`、`browser_extensions` / `browser_extension_state`、`browser_cookies` / `browser_cookies_write`、`browser_clear_browsing_data`、`browser_site_settings` / `browser_site_settings_write`、`browser_privacy_settings` / `browser_privacy_settings_write`、`browser_windows` / `browser_windows_control`、`browser_tab_groups`、`browser_save_page`、`browser_proxy` / `browser_proxy_write`。
+- **10 个新的确认串**，服务端在入队前就拒（`AUTHORITY_CONFIRMATIONS`），不是等一轮往返之后才说不行。
+- **几条硬边界，写进代码而不是文档里**：
+  - `browser_extension_state` **拒绝停用/卸载桥扩展自己**（`bridge_extension_protected`）：那个请求会切断承载它的连接，结果只能是超时而不是答复。人仍然可以在 `chrome://extensions` 里做。
+  - `browser_cookies` **没有「读全部」模式**：必须给 url 或 domain，全站 cookie 一键导出不在能力列表里。返回带 `secrets:true`。
+  - `browser_clear_browsing_data` **必须显式列 dataTypes**，没有 clear-everything 默认值，因为 `cookies` 会登出所有站点、`passwords` 会删掉保存的密码。
+  - `browser_windows_control` 的 create **默认 `focused:false`**，要抢前台必须显式写。
+  - `browser_proxy_write` 的 rules 在 scheme 不一致时**拒绝**而不是悄悄挑一个。
+  - 所有读工具返回的标题/URL/文件名/扩展名都标 `contentTrust: 'untrusted browser metadata'`——那些是外部输入的文本，不是指令。
+- **真机验证**（Chrome 156.0.8078.49，用户自己的会话）：`browser_windows` 1 个最大化窗口；`browser_extensions` 35 个扩展、`isBridge:true` 为 0.22.0；`browser_downloads` 真实下载记录；`browser_bookmarks` 真实书签；`browser_history_search action:"top"` 真实排行榜；书签**写闭环** create → get → remove（`verified:true`）；`browser_site_settings` camera=ask；`browser_privacy_settings` autofillAddressEnabled=true / `controllable_by_this_extension`；`browser_proxy` mode=system；`browser_cookies` 无 url/domain 时 `denied`。
+- **上一轮欠的账有答案了**：`browser_session_restore action:"list"` 在真机上列出了 25 条最近关闭记录，其中 6 条是 **20 标签窗口**（`veryai.cn` / `kernelgen.flagos.io`）——正是之前被关掉的那批。恢复入口终于不需要扩展有 `sessions` 权限之外的东西了。
+- 扩展侧新文件 `extension/browser-authority.js`，`worker.js` 只加一行分发（放在 tabId 闸门之前，因为这些工具没有 tab）。`skills/ai-browser-bridge/SKILL.md`、`capability-guide.js` 的意图表与缺口表同步更新——特别是把「写 Chrome 设置/代理」从「未实现」里删掉，只留下真的没做的（证书管理、没有 chrome.* API 的设置项）。
+- 测试：`test/browser-authority.test.js` 13 条（假 chrome，钉住「拒绝的调用真的没到达 API」「返回的是浏览器实际状态而不是请求」「桥扩展不能停用自己」），`confirmation-schemas` 扩到 12 对。
+
 ## 0.21.0 — 2026-10-28（**浏览器目标由用户指定，不再猜**；两处抢焦点被实测并收口）
 
 - **启发式选浏览器彻底失败，而且是被用户当场指出的**。0.20.0 的打分器把「稳定版 4 分」排在「Canary 2 分」前面，还在渠道内部按 `Local State` 的 `last_used` 选了 `Profile 1`。用户的回答是：**日常用的是 Canary / Default**。更糟的是，两边的证据根本不足以区分——本轮逐 profile 取证发现 Canary/Default 与稳定版/Default **是同一个 Google 账号、`Login Data` 都是 192KB**，属于同一份数据的克隆；而按写入时间看，Canary 那份的 `Preferences`/`History`/`Cookies` 全部停在 78 天前，稳定版那份几分钟前还在写。也就是说：**「书签/历史/登录」这一整套信号都无法回答「哪个人在用」**。
