@@ -3,6 +3,10 @@ param(
   [switch]$AsJson,
   [switch]$Activate,
   [switch]$DryRun,
+  [string]$LoadExtension = '',
+  [string]$ExePath = '',
+  [string]$UserDataDir = '',
+  [string]$ProfileDirectory = '',
   [ValidateRange(1, 60)][int]$VerifyTimeoutSec = 20
 )
 
@@ -58,6 +62,10 @@ public static class LaunchWindow {
 
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
   [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
   [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
   [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hWnd, uint command);
@@ -97,6 +105,25 @@ public static class LaunchWindow {
   }
 
   public static string TitleOf(IntPtr hWnd) { return WindowTitle(hWnd); }
+
+  // Chrome calls ShowWindow on its first window regardless of the nCmdShow it was
+  // given, so SW_SHOWNOACTIVATE alone does not stop it from taking the screen.
+  // Handing the foreground back is the part that actually works: the window stays
+  // where it is, the user's own window returns to the front. AttachThreadInput is
+  // what makes SetForegroundWindow legal from a process that is not the current
+  // foreground owner.
+  public static bool GiveForegroundBack(IntPtr previous) {
+    if (previous == IntPtr.Zero) return false;
+    uint previousPid;
+    uint previousThread = GetWindowThreadProcessId(previous, out previousPid);
+    uint currentThread = GetCurrentThreadId();
+    bool attached = previousThread != 0 && previousThread != currentThread &&
+      AttachThreadInput(currentThread, previousThread, true);
+    BringWindowToTop(previous);
+    bool restored = SetForegroundWindow(previous);
+    if (attached) AttachThreadInput(currentThread, previousThread, false);
+    return restored;
+  }
 }
 '@
 
@@ -161,6 +188,82 @@ function Get-ProfileEvidence([string]$userDataDir) {
   return $evidence
 }
 
+# Liveness evidence: the profile written to most recently is the one a human is
+# actually using. A profile can carry a real login and still be a stale clone -
+# on this machine the recorded target held the right account but had not been
+# touched for 78 days, while another channel's profile was written seconds ago.
+# Logins alone therefore cannot tell "the browser I use" from "a browser I used
+# once", so a recorded target is checked against recency and any gap is reported
+# instead of hidden.
+function Get-ProfileLiveness([string]$userDataDir, [string]$profileDirectory) {
+  $result = [pscustomobject]@{
+    userDataDir = $userDataDir; profileDirectory = $profileDirectory
+    exists = $false; profileName = $null; accounts = @()
+    lastActivityUtc = $null; ageMinutes = $null
+  }
+  if (-not $userDataDir -or -not (Test-Path -LiteralPath $userDataDir)) { return $result }
+  $dir = $null
+  if ($profileDirectory) {
+    $dir = Join-Path $userDataDir $profileDirectory
+  } else {
+    $evidence = Get-ProfileEvidence $userDataDir
+    if ($evidence.lastUsed) {
+      $dir = Join-Path $userDataDir $evidence.lastUsed
+      $result.profileDirectory = $evidence.lastUsed
+    }
+  }
+  if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { return $result }
+  $result.exists = $true
+  $preferences = Join-Path $dir 'Preferences'
+  if (Test-Path -LiteralPath $preferences) {
+    try {
+      $parsed = Get-Content -LiteralPath $preferences -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($parsed.profile.name) { $result.profileName = $parsed.profile.name }
+      if ($parsed.account_info) { $result.accounts = @($parsed.account_info | ForEach-Object { $_.email }) }
+    } catch { }
+  }
+  $newest = $null
+  foreach ($name in @('Preferences', 'History', 'Network\Cookies', 'Cookies')) {
+    $file = Join-Path $dir $name
+    if (Test-Path -LiteralPath $file) {
+      $stamp = (Get-Item -LiteralPath $file).LastWriteTimeUtc
+      if (-not $newest -or $stamp -gt $newest) { $newest = $stamp }
+    }
+  }
+  if ($newest) {
+    $result.lastActivityUtc = $newest.ToString('o')
+    $result.ageMinutes = [math]::Round(((Get-Date).ToUniversalTime() - $newest).TotalMinutes, 1)
+  }
+  return $result
+}
+
+# Freshest profile across every installed channel: the answer to "which browser
+# was a human touching last", independent of which one the config happens to name.
+function Get-LiveCandidate() {
+  $best = $null
+  foreach ($channel in @('stable', 'beta', 'dev', 'canary')) {
+    $userDataDir = Get-UserDataDir $channel
+    if (-not $userDataDir -or -not (Test-Path -LiteralPath $userDataDir)) { continue }
+    foreach ($entry in @(Get-ChildItem -LiteralPath $userDataDir -Directory -ErrorAction SilentlyContinue)) {
+      if ($entry.Name -notmatch '^(Default|Profile \d+)$') { continue }
+      $live = Get-ProfileLiveness $userDataDir $entry.Name
+      if (-not $live.lastActivityUtc) { continue }
+      if (-not $best -or $live.ageMinutes -lt $best.ageMinutes) {
+        $best = [pscustomobject]@{
+          channel = $channel
+          userDataDir = $userDataDir
+          profileDirectory = $entry.Name
+          profileName = $live.profileName
+          accounts = @($live.accounts)
+          lastActivityUtc = $live.lastActivityUtc
+          ageMinutes = $live.ageMinutes
+        }
+      }
+    }
+  }
+  return $best
+}
+
 # Rule 1: reuse beats creation. Any chrome process means the browser is already
 # running, so launching would create a competing instance rather than help.
 # -DryRun skips the refusal because it never launches: it still wants to report
@@ -210,8 +313,40 @@ if ($running.Count -gt 0) {
   }
 }
 
-# Rule 2: choose the binary by profile evidence. Every installed channel is a
-# candidate; the one whose user-data directory holds a used profile wins.
+# Rule 2: choose the binary.
+#
+# An explicit target wins outright. Scoring is only the fallback for a machine
+# that has never been told which browser its owner uses, because no heuristic
+# can tell "the profile with my logins" from "a profile an installer created" -
+# on this machine the signed-in profile scored *lower* than an unsigned one.
+$chosen = $null
+$rejected = @()
+$targetSource = 'scored'
+if ($ExePath) {
+  if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
+    Write-Result ([pscustomobject]@{ status='denied'; reason='configured_browser_missing'; dispatched=$false
+      configuredExePath = $ExePath
+      message='The configured browserTarget.exePath does not exist; nothing was launched. Fix browserTarget in config.json or remove it to fall back to scoring.' })
+    exit 0
+  }
+  # Resolve first, classify second: the channel is decided from the real path, not
+  # from whatever spelling the caller passed in.
+  $explicitResolved = (Resolve-Path -LiteralPath $ExePath).Path
+  $explicitChannel = Get-Channel $explicitResolved
+  $explicitUserData = $(if ($UserDataDir) { $UserDataDir } else { Get-UserDataDir $explicitChannel })
+  $explicitEvidence = Get-ProfileEvidence $explicitUserData
+  $chosen = [pscustomobject]@{
+    ExePath = $explicitResolved
+    Channel = $explicitChannel
+    UserDataDir = $explicitUserData
+    Score = $explicitEvidence.score
+    LastUsed = $explicitEvidence.lastUsed
+    LastVersion = $explicitEvidence.lastVersion
+    BookmarksBytes = $explicitEvidence.bookmarksBytes
+    LoginBytes = $explicitEvidence.loginBytes
+  }
+  $targetSource = 'explicit'
+} else {
 $rawCandidates = New-Object System.Collections.Generic.List[string]
 foreach ($hive in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe',
                     'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe')) {
@@ -292,10 +427,46 @@ if ($chosen.Score -le 0) {
   })
   exit 0
 }
+}
 
 $chromePath = $chosen.ExePath
 $argumentList = @()
+# Loading this project's own extension is not a profile flag: it does not change
+# which profile is opened, only whether the bridge is present at startup. It is
+# passed only when the extension is registered but Chrome has it disabled,
+# because an unpacked extension is exactly what Chrome refuses to load when
+# developer mode is off.
+if ($LoadExtension) {
+  if (Test-Path -LiteralPath (Join-Path $LoadExtension 'manifest.json')) {
+    $argumentList += ('--load-extension=' + $LoadExtension)
+  } else {
+    Write-Result ([pscustomobject]@{ status='denied'; reason='extension_dir_invalid'; dispatched=$false
+      message='The extension directory has no manifest.json; nothing was launched.' })
+    exit 0
+  }
+}
 if ($Url) { $argumentList += $Url }
+# A profile is only named when a human named it. Guessing which profile inside a
+# channel is the same mistake one level down: it opens a browser that looks empty
+# to its owner.
+if ($ProfileDirectory) { $argumentList += ('--profile-directory=' + $ProfileDirectory) }
+
+# Is the browser about to be started the one a human touched last? A recorded
+# target that has gone cold while another channel is warm is the same failure as
+# guessing, only discovered later - so it is measured here and said out loud.
+$targetLiveness = Get-ProfileLiveness $chosen.UserDataDir $ProfileDirectory
+$liveCandidate = Get-LiveCandidate
+$targetIsLive = $null
+if ($targetLiveness.ageMinutes -ne $null -and $liveCandidate) {
+  $sameDir = $targetLiveness.userDataDir -and $liveCandidate.userDataDir -and
+    ($targetLiveness.userDataDir.ToLowerInvariant() -eq $liveCandidate.userDataDir.ToLowerInvariant())
+  $sameProfile = $targetLiveness.profileDirectory -eq $liveCandidate.profileDirectory
+  $targetIsLive = [bool]($sameDir -and $sameProfile)
+}
+$launchWarnings = @()
+if ($targetIsLive -eq $false -and $liveCandidate -and ($liveCandidate.ageMinutes -lt 1440)) {
+  $launchWarnings += 'recorded_target_looks_stale'
+}
 
 # -DryRun answers "which browser would you start, on which profile?" without
 # starting anything. It exists so this decision can be inspected on a live
@@ -311,15 +482,29 @@ if ($DryRun) {
       channel = $chosen.Channel
       userDataDir = $chosen.UserDataDir
       profileScore = $chosen.Score
+      targetSource = $targetSource
+      profileDirectory = $(if ($ProfileDirectory) { $ProfileDirectory } else { $null })
       lastUsedProfile = $chosen.LastUsed
       lastVersion = $chosen.LastVersion
       bookmarksBytes = $chosen.BookmarksBytes
       loginBytes = $chosen.LoginBytes
+      profileName = $targetLiveness.profileName
+      accounts = @($targetLiveness.accounts)
+      lastActivityUtc = $targetLiveness.lastActivityUtc
+      ageMinutes = $targetLiveness.ageMinutes
+      argumentList = @($argumentList)
     }
+    liveCandidate = $liveCandidate
+    targetIsLive = $targetIsLive
+    warnings = @($launchWarnings)
     rejectedCandidates = $rejected
     runningSession = $runningSession
     launchMode = $(if ($Activate) { 'activate' } else { 'no_activate' })
-    message = 'Dry run: nothing was launched. wouldLaunch describes the browser and profile the real launch would use.'
+    message = $(if ($launchWarnings -contains 'recorded_target_looks_stale') {
+      'Dry run: nothing was launched. The recorded target is cold while another channel was written to recently, so the recorded browser may not be the one its owner uses; compare wouldLaunch with liveCandidate.'
+    } else {
+      'Dry run: nothing was launched. wouldLaunch describes the browser and profile the real launch would use.'
+    })
   })
   exit 0
 }
@@ -385,6 +570,16 @@ do {
 
 $foregroundAfter = [LaunchWindow]::GetForegroundWindow()
 $stoleFocus = ($foregroundAfter -ne $foregroundBefore) -and ($foregroundAfter -eq $handle)
+# Give the screen back if Chrome took it. Measured again afterwards: claiming the
+# user was not interrupted is worth nothing, showing that their window is in front
+# again is worth something.
+$focusRestored = $null
+if ($stoleFocus -and -not $Activate) {
+  $focusRestored = [LaunchWindow]::GiveForegroundBack($foregroundBefore)
+  Start-Sleep -Milliseconds 250
+  $foregroundFinal = [LaunchWindow]::GetForegroundWindow()
+  $focusRestored = ($foregroundFinal -eq $foregroundBefore)
+}
 
 if ($handle -eq [IntPtr]::Zero) {
   Write-Result ([pscustomobject]@{
@@ -397,13 +592,29 @@ if ($handle -eq [IntPtr]::Zero) {
     channel = $chosen.Channel
     userDataDir = $chosen.UserDataDir
     profileScore = $chosen.Score
-    profileFlags = 'none'
+    targetSource = $targetSource
+    profileDirectory = $(if ($ProfileDirectory) { $ProfileDirectory } else { $null })
+    profileFlags = $(if ($ProfileDirectory) { 'profile-directory-explicit' } else { 'none' })
     launchMode = $launchMode
+    activated = $stoleFocus
+    focusRestored = $focusRestored
     argumentList = @($argumentList)
     rejectedCandidates = $rejected
     message = 'chrome.exe was started but no browser window appeared in time. Inspect before launching again; a second launch would open another window.'
   })
   exit 0
+}
+
+# The message must not claim "no focus taken" when the measurement says otherwise.
+# Chrome shows its first window with an explicit ShowWindow call, which overrides
+# the nCmdShow it was started with, so the honest statement is which of the two
+# happened and whether the user's window is back in front.
+$focusMessage = if ($stoleFocus -and $focusRestored -eq $true) {
+  ' Chrome brought its window to the front anyway; the previous foreground window was restored and verified.'
+} elseif ($stoleFocus) {
+  ' Chrome brought its window to the front anyway and the previous foreground window could not be restored; the user may have noticed.'
+} else {
+  ' The window was created without taking focus.'
 }
 
 Write-Result ([pscustomobject]@{
@@ -418,11 +629,20 @@ Write-Result ([pscustomobject]@{
   channel = $chosen.Channel
   userDataDir = $chosen.UserDataDir
   profileScore = $chosen.Score
-  profileFlags = 'none'
+  targetSource = $targetSource
+  profileDirectory = $(if ($ProfileDirectory) { $ProfileDirectory } else { $null })
+  profileFlags = $(if ($ProfileDirectory) { 'profile-directory-explicit' } else { 'none' })
+  profileName = $targetLiveness.profileName
+  accounts = @($targetLiveness.accounts)
+  profileAgeMinutes = $targetLiveness.ageMinutes
   launchMode = $launchMode
   activated = $stoleFocus
+  focusRestored = $focusRestored
   argumentList = @($argumentList)
   rejectedCandidates = $rejected
-  message = 'Chrome started on the ' + $chosen.Channel + ' channel with its own user-data directory and no profile or incognito flags, so existing cookies and logins apply. The window was created without taking focus.'
+  message = ('Chrome started on the ' + $chosen.Channel + ' channel with its own user-data directory and no profile or incognito flags, so existing cookies and logins apply.' +
+    $(if ($launchWarnings -contains 'recorded_target_looks_stale') {
+      ' Warning: this profile had not been written to for ' + [math]::Round($targetLiveness.ageMinutes) + ' minutes while ' + $liveCandidate.channel + '/' + $liveCandidate.profileDirectory + ' was written ' + [math]::Round($liveCandidate.ageMinutes) + ' minutes ago - the recorded browserTarget may not be the browser its owner uses.'
+    } else { '' }) + $focusMessage)
 })
 exit 0

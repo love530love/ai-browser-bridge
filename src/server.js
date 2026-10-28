@@ -5,7 +5,7 @@ import { basename, extname, isAbsolute, join, relative, resolve } from 'node:pat
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { loadConfig, ROOT, stateDir } from './config.js';
-import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory } from './chrome-profile.js';
+import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory, developerModeInEffect } from './chrome-profile.js';
 import { VERSION } from './version.js';
 import { TOOLS, validateCall } from './tools.js';
 import { createTasks } from './tasks.js';
@@ -71,7 +71,7 @@ function withContentBoundaries(result) {
   }
   return next;
 }
-export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true } = {}) {
+export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true, browserTarget = config.browserTarget ?? null } = {}) {
   config = { ...config, uploadRoots: config.uploadRoots ?? [] };
   let extension = null;
   let current = null;
@@ -888,13 +888,32 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
             : 'A Chrome window is already on screen but the bridge extension is not connected, so nothing was launched. Reload the 自主浏览器 extension, then repeat the call.' };
       }
     }
-    const launched = await desktopAdapter.launchChrome({ url: args.url });
+    // Chrome disables unpacked extensions whenever developer mode is off, and on
+    // a machine whose pref signature no longer validates developer mode is
+    // dropped on every exit. That would make "restart the browser" a task for a
+    // human, every single time. So when the extension is registered but disabled,
+    // the browser is started with --load-extension for this project's own
+    // directory. It is deliberately narrow: a directory that is not registered at
+    // all is not loaded, because "never installed" is a real state that deserves
+    // the user's decision rather than a silent install.
+    const extensionDir = join(ROOT, 'extension');
+    const preLaunchState = findBridgeExtension({ extensionDir });
+    const loadExtension = preLaunchState.found === true && preLaunchState.enabled === false ? extensionDir : null;
+    // The recorded target, when there is one, is the whole answer: this machine's
+    // owner said which browser is theirs, so nothing here re-decides it.
+    const target = browserTarget;
+    const launched = await desktopAdapter.launchChrome({
+      url: args.url, loadExtension,
+      exePath: target?.exePath ?? null,
+      userDataDir: target?.userDataDir ?? null,
+      profileDirectory: target?.profileDirectory ?? null
+    });
     if (launched?.status !== 'success') return launched;
     // The profile the user actually uses, as the bridge itself computes it. If
     // the launch opened anything else, the browser is running but it is the
     // wrong browser, and saying "success" would be the exact mistake this whole
     // path exists to prevent.
-    const expectedUserDataDir = chromeUserDataDir();
+    const expectedUserDataDir = target?.userDataDir ?? chromeUserDataDir();
     if (launched.userDataDir && expectedUserDataDir && !sameDirectory(launched.userDataDir, expectedUserDataDir)) {
       return { ...launched, status: 'uncertain', verified: false, retryable: false,
         reason: 'launched_wrong_profile', expectedUserDataDir,
@@ -905,17 +924,23 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     while (Date.now() < deadline && !(extension && extensionVersion === VERSION)) await sleep(400);
     const connected = Boolean(extension) && extensionVersion === VERSION;
     if (connected) {
-      return { ...launched, extensionConnected: true, extensionVersion, focusRequired: false };
+      return { ...launched, extensionConnected: true, extensionVersion, focusRequired: false,
+        loadedViaFlag: Boolean(loadExtension) };
     }
     // The browser is up; the bridge is not. Saying "success" here would be a lie
     // about what the caller can actually do next. "Not connected" has two very
     // different causes and they look identical from here, so the profile on disk
     // is read to say which one it is instead of guessing.
-    const extensionState = findBridgeExtension({ extensionDir: join(ROOT, 'extension') });
+    const extensionState = findBridgeExtension({ extensionDir });
+    const developerMode = developerModeInEffect({ profileDirectory: extensionState.profileDirectory ?? 'Default' });
     return { ...launched, status: 'uncertain', verified: false,
       reason: 'chrome_launched_extension_not_connected', extensionConnected: false, extensionVersion: extensionVersion ?? null,
-      extensionState: { ...extensionState, explanation: describeExtensionState(extensionState) },
-      message: 'Chrome started with the user profile, but the bridge extension has not connected. The browser is running; load the extension or press Reconnect before issuing page operations.' };
+      loadedViaFlag: Boolean(loadExtension),
+      extensionState: { ...extensionState, developerMode,
+        explanation: describeExtensionState(extensionState, { developerMode }) },
+      message: loadExtension
+        ? 'Chrome started on the right profile, but the bridge extension still did not connect even though it was loaded with --load-extension. Chrome may ignore that switch on this build; check chrome://extensions in the window that just opened.'
+        : 'Chrome started with the user profile, but the bridge extension has not connected. The browser is running; load the extension or press Reconnect before issuing page operations.' };
   }
 
   async function launchCall(name, args) {
@@ -944,6 +969,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     status: launched.status, reason: launched.reason ?? null, chromePath: launched.chromePath ?? null,
     processId: launched.processId ?? null, windowHandle: launched.windowHandle ?? null,
     channel: launched.channel ?? null, userDataDir: launched.userDataDir ?? null,
+    loadedViaFlag: launched.loadedViaFlag === true,
     // false means the window was created without taking focus, measured before
     // and after by the launcher rather than promised.
     activated: launched.activated === true, launchMode: launched.launchMode ?? null,

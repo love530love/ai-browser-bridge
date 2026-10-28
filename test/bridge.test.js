@@ -606,3 +606,38 @@ test('the launch is asked for without taking focus', async t => {
   assert.equal(seen.length, 1);
   assert.notEqual(seen[0]?.activate, true, 'a background task must not ask the launcher to activate the window');
 });
+
+test('a recorded browser target is passed to the launcher instead of being re-decided', async t => {
+  // A machine can carry several Chrome installs, each with its own user-data
+  // directory, and a heuristic cannot tell "the profile with my logins" from "a
+  // profile an installer created" - on the real machine the signed-in profile
+  // scored lower than an unsigned one. So once the owner names their browser, that
+  // choice is what gets launched.
+  const seen = [];
+  const target = { channel: 'canary', exePath: 'C:/SxS/chrome.exe',
+    userDataDir: 'C:/SxS/User Data', profileDirectory: 'Default' };
+  const { b } = await setup(t, {
+    ...autoLaunchOptions({}, async options => {
+      seen.push(options);
+      return { status: 'not_dispatched', retryable: false, reason: 'chrome_already_running' };
+    }),
+    browserTarget: target
+  });
+  await b.call('browser_read', { tabId: 5, agent: 'starter' });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].exePath, target.exePath);
+  assert.equal(seen[0].userDataDir, target.userDataDir);
+  assert.equal(seen[0].profileDirectory, 'Default');
+  assert.notEqual(seen[0].activate, true, 'a background task must not ask the launcher to activate the window');
+});
+
+test('without a recorded target nothing is forced on the launcher', async t => {
+  const seen = [];
+  const { b } = await setup(t, autoLaunchOptions({}, async options => {
+    seen.push(options);
+    return { status: 'not_dispatched', retryable: false, reason: 'chrome_already_running' };
+  }));
+  await b.call('browser_read', { tabId: 5, agent: 'starter' });
+  assert.equal(seen[0].exePath, null);
+  assert.equal(seen[0].profileDirectory, null);
+});

@@ -112,7 +112,8 @@ export function createDesktopAdapter({
   // SW_SHOWNOACTIVATE so a background task cannot pull the screen out from under
   // someone who is working in another window. dryRun answers "which browser and
   // which profile would this use" without starting anything.
-  async function launchChrome({ url, activate = false, dryRun = false } = {}) {
+  async function launchChrome({ url, activate = false, dryRun = false, loadExtension = null,
+    exePath = null, userDataDir = null, profileDirectory = null } = {}) {
     if (!available) return unavailable();
     if (url !== undefined && url !== '' && !/^https?:\/\//i.test(String(url))) {
       return { status: 'denied', retryable: false, reason: 'unsupported_url_scheme', dispatched: false,
@@ -122,6 +123,14 @@ export function createDesktopAdapter({
     if (url) args.push('-Url', String(url));
     if (activate) args.push('-Activate');
     if (dryRun) args.push('-DryRun');
+    // Only ever this project's own extension directory; the caller cannot name a
+    // path of its own.
+    if (loadExtension) args.push('-LoadExtension', String(loadExtension));
+    // A recorded target is used verbatim. Nothing here decides which browser the
+    // user means; that decision was made once, by the person who knows.
+    if (exePath) args.push('-ExePath', String(exePath));
+    if (userDataDir) args.push('-UserDataDir', String(userDataDir));
+    if (profileDirectory) args.push('-ProfileDirectory', String(profileDirectory));
     let result;
     try { result = await runScript(launchScriptPath, args, 45000); }
     catch { return { status: 'uncertain', retryable: false, reason: 'desktop_process_result_unknown', dispatched: null,
@@ -140,7 +149,12 @@ export function createDesktopAdapter({
         return { retryable: value.status === 'not_dispatched' ? true : false, ...value };
       }
     } catch { /* fall through */ }
-    return { status: 'failed', retryable: true, reason: 'chrome_launch_result_invalid', dispatched: false };
+    // The launcher's own words are the only way to tell "the script refused" from
+    // "the script crashed", and swallowing them made a runtime error look like an
+    // invalid result.
+    const stderrTail = String(result.stderr ?? '').trim().slice(-400);
+    return { status: 'failed', retryable: true, reason: 'chrome_launch_result_invalid', dispatched: false,
+      ...(stderrTail ? { stderr: stderrTail } : {}), stdout: String(result.stdout ?? '').trim().slice(-300) };
   }
 
   async function listChromeWindows() {

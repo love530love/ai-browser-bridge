@@ -6,7 +6,7 @@ import { callWithWaitingRecovery } from './auto-recovery.js';
 import { createAgentPolicy } from './policy.js';
 import { regressionSummary } from './regression-summary.js';
 import { computeBuildIdentity } from './build-identity.js';
-import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory } from './chrome-profile.js';
+import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory, developerModeInEffect } from './chrome-profile.js';
 import { createDesktopAdapter } from './desktop-adapter.js';
 import { usageSummary } from './usage-summary.js';
 
@@ -43,15 +43,18 @@ async function doctor() {
     // "Not connected" and "not installed" and "Chrome disabled it" are the same
     // symptom and three different fixes, so the profile on disk is read here.
     const extensionState = findBridgeExtension({ extensionDir: join(ROOT, 'extension') });
+    const developerMode = developerModeInEffect({ profileDirectory: extensionState.profileDirectory ?? 'Default' });
     add('bridge-extension-registered', extensionState.found === true && extensionState.enabled === true, {
       profileDirectory: extensionState.profileDirectory ?? null,
       extensionId: extensionState.extensionId ?? null,
+      matchedBy: extensionState.matchedBy ?? null,
       enabled: extensionState.enabled ?? null,
       disableReasons: extensionState.disableReasons ?? null,
-      explanation: describeExtensionState(extensionState)
+      developerMode,
+      explanation: describeExtensionState(extensionState, { developerMode })
     });
     if (extensionState.found && extensionState.enabled === false) {
-      report.recommendations.push(`Chrome has disabled the bridge extension in profile "${extensionState.profileDirectory}". Open chrome://extensions, turn on Developer mode and enable it; until then nothing can connect.`);
+      report.recommendations.push(`Chrome has disabled the bridge extension in profile "${extensionState.profileDirectory}" (disable_reasons ${JSON.stringify(extensionState.disableReasons)}). It is still registered, so switch Developer mode back on in chrome://extensions and enable 自主浏览器; auto start also passes --load-extension in this state so a restart does not need that step repeated.`);
     }
     if (!extensionState.found) {
       report.recommendations.push('The bridge extension is not registered in any Chrome profile. Load it with "Load unpacked" from chrome://extensions with Developer mode on.');
@@ -62,24 +65,52 @@ async function doctor() {
     // binary, the channel and the user-data directory it would use.
     try {
       const adapter = createDesktopAdapter();
-      const decision = adapter.available ? await adapter.launchChrome({ dryRun: true }) : null;
+      const target = config.browserTarget ?? null;
+      const decision = adapter.available
+        ? await adapter.launchChrome({ dryRun: true, exePath: target?.exePath ?? null,
+          userDataDir: target?.userDataDir ?? null, profileDirectory: target?.profileDirectory ?? null })
+        : null;
       if (decision) {
-        const target = decision.wouldLaunch ?? null;
-        const expected = chromeUserDataDir();
-        const sameProfile = target?.userDataDir ? sameDirectory(target.userDataDir, expected) : null;
-        add('auto-start-target', decision.reason === 'dry_run' && sameProfile !== false, {
-          wouldLaunch: target,
+        const would = decision.wouldLaunch ?? null;
+        // With a recorded target the question is "does the launch match what was
+        // recorded", not "does it match the stable channel".
+        const expected = target?.userDataDir ?? chromeUserDataDir();
+        const sameProfile = would?.userDataDir ? sameDirectory(would.userDataDir, expected) : null;
+        // A stale target is not "correct just because it is explicit": the whole
+        // point of recording a target is to open the browser its owner uses, and
+        // recency is the only evidence that answers that. So it fails the check
+        // instead of leaving doctor all-green while auto start would be wrong.
+        const staleTarget = (decision.warnings ?? []).includes('recorded_target_looks_stale');
+        add('auto-start-target', decision.reason === 'dry_run' && sameProfile !== false && !staleTarget, {
+          configuredTarget: target,
+          wouldLaunch: would,
           expectedUserDataDir: expected,
           sameProfileAsThisMachine: sameProfile,
+          // Recency, not just identity: a recorded target can be a real profile
+          // with a real login that nobody has touched for weeks, while another
+          // channel was written to seconds ago. Identity alone would call that
+          // "correct" and quietly open the wrong browser.
+          liveCandidate: decision.liveCandidate ?? null,
+          targetIsLive: decision.targetIsLive ?? null,
+          warnings: decision.warnings ?? [],
           runningSession: decision.runningSession ?? null,
           rejectedCandidates: decision.rejectedCandidates ?? [],
           note: 'Dry run only: nothing was launched. This is the browser and profile a real auto start would use.'
         });
+        if (!target) {
+          report.recommendations.push('No browserTarget is recorded, so auto start picks a channel by heuristic. That is how the wrong browser gets opened: set browserTarget in config.json to the browser you actually use.');
+        }
+        if ((decision.warnings ?? []).includes('recorded_target_looks_stale')) {
+          const live = decision.liveCandidate ?? {};
+          const recorded = would ?? {};
+          report.recommendations.push(
+            `browserTarget looks stale: ${recorded.channel}/${recorded.profileDirectory} was last written ${Math.round(recorded.ageMinutes ?? -1)} minutes ago, while ${live.channel}/${live.profileDirectory} was written ${Math.round(live.ageMinutes ?? -1)} minutes ago. Same machine, different browser - confirm which one you actually use before relying on auto start.`);
+        }
         if (decision.reason === 'no_used_profile_available') {
           report.recommendations.push('Auto start is refusing to launch: no installed Chrome channel has a profile with history in it. Open your own browser once; launching a blank profile would look like a wiped session.');
         }
         if (sameProfile === false) {
-          report.recommendations.push(`Auto start would launch ${target.chromePath} (${target.channel} channel), which uses ${target.userDataDir} instead of ${expected}. That browser has different cookies and logins. Fix the install or the App Paths entry before relying on auto start.`);
+          report.recommendations.push(`Auto start would launch ${would.chromePath} (${would.channel} channel), which uses ${would.userDataDir} instead of ${expected}. That browser has different cookies and logins.`);
         }
       }
     } catch (error) {

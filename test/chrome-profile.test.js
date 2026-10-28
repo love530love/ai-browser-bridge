@@ -65,7 +65,9 @@ test('a profile without the extension is not a false positive', () => {
   const found = findBridgeExtension({ userDataDir: root, extensionDir });
   assert.equal(found.found, false);
   assert.equal(found.reason, 'not_installed');
-  assert.match(describeExtensionState(found), /not installed/);
+  // The wording matters: "not registered" is what a caller can act on, and it must
+  // not be confused with "registered but disabled", which has a different fix.
+  assert.match(describeExtensionState(found), /not registered/);
 });
 
 test('two user-data directories are the same profile only when they really are', () => {

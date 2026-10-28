@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.20.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.21.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.21.0 把「哪个浏览器是我的」这个问题交给了唯一知道答案的人。0.20.0 的打分器把稳定版 `Default` 排在前面，用户当场否掉并选了 **Canary / Default**；随后按写入时间取证才发现两份 profile **是同一个账号的克隆**（`Login Data` 都是 192KB），Canary 那份已经 78 天没写入、真正在写的是稳定版那份——所以「记一次」之后还必须能发现「记错了」。现在 `config.json` 里的 `browserTarget: { channel, exePath, userDataDir, profileDirectory }` 记一次、之后逐字使用，脚本回 `targetSource: "explicit"`；只有没记录时才退回启发式，`doctor` 会提醒。**记录也会过期**，所以同一轮又加了活跃度证据：`-DryRun` 报 `wouldLaunch.ageMinutes` / `profileName` / `accounts` 与全渠道最新的 `liveCandidate`，目标陈旧时给 `warnings: ["recorded_target_looks_stale"]` 且 `doctor` 直接判红。**登录账号只能证明「我用过一次」，只有写入时间能证明「我在用」。** 另外两条实测结论：`--load-extension` 在 Chrome 156/159 上**被忽略**（不能当兜底）；`SW_SHOWNOACTIVATE` **不足以**阻止 Chrome 抢前台（它对第一个窗口会显式 ShowWindow），所以改成「抢了就把焦点还回去」——`AttachThreadInput` + `SetForegroundWindow` 恢复原前台窗口，再测一次并如实报 `focusRestored`。诊断也修了：Chrome 退出时会把扩展记录压缩成只剩 `disable_reasons`、`path` 消失，只按路径匹配会误报「未安装」，现在 id 也参与匹配。
 
 0.20.0 修的是用户直接指出的两件事：**不要再开一个没有历史信息的浏览器**，以及**不要把浏览器界面弹到前台打断正在做别的事的人**。前者查清了根因——本机 `HKCU\...\App Paths\chrome.exe` 指向 **Chrome SxS（Canary 渠道）**，而 Windows 解析 `chrome` 时 HKCU 优先于 HKLM，每个渠道又有自己的 user-data 目录，所以「起了一个没登录、没书签、没历史的浏览器」不是玄学而是**选错渠道**。现在脚本对每个已安装渠道的 profile 做磁盘取证（`last_used` profile 是否存在、有无书签、`Login Data` 是否空壳）打分选二进制，得分全为 0 时**拒绝启动**而不是开一个空壳；服务侧启动前先探测可见窗口（有窗口就绝不启动），启动后比对 `userDataDir`，不一致直接 `launched_wrong_profile` 且**不继续原调用**。后者改成 `CreateProcess` + `SW_SHOWNOACTIVATE`，窗口出现在当前窗口后面；并且不承诺、只测量——启动前后各取一次 `GetForegroundWindow`，抢了焦点就如实报 `activated: true`。`browser_reload_extension` 的 UIA 回退同样不再自动抢前台，改为需要显式 `allowFocus: true`。`doctor` 新增 `auto-start-target`，用 `-DryRun` 在不启动任何东西的前提下回答「会起哪个浏览器、用哪份 profile」。
 

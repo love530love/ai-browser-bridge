@@ -1,3 +1,18 @@
+## 0.21.0 — 2026-10-28（**浏览器目标由用户指定，不再猜**；两处抢焦点被实测并收口）
+
+- **启发式选浏览器彻底失败，而且是被用户当场指出的**。0.20.0 的打分器把「稳定版 4 分」排在「Canary 2 分」前面，还在渠道内部按 `Local State` 的 `last_used` 选了 `Profile 1`。用户的回答是：**日常用的是 Canary / Default**。更糟的是，两边的证据根本不足以区分——本轮逐 profile 取证发现 Canary/Default 与稳定版/Default **是同一个 Google 账号、`Login Data` 都是 192KB**，属于同一份数据的克隆；而按写入时间看，Canary 那份的 `Preferences`/`History`/`Cookies` 全部停在 78 天前，稳定版那份几分钟前还在写。也就是说：**「书签/历史/登录」这一整套信号都无法回答「哪个人在用」**。
+  ⇒ 结论写进代码：**任何按文件大小/时间/书签数推断「哪个浏览器是我的」的逻辑都会开错**。`config.json` 新增 `browserTarget: { channel, exePath, userDataDir, profileDirectory }`，**记一次、之后逐字使用**，脚本里 `targetSource: 'explicit'`；只有没记录时才退回打分，且 `doctor` 会明确提示「没有记录，正在用启发式」。
+- **profile 只有在人指定时才加 `--profile-directory`**。渠道内部再猜一次是同一个错误降一层；`profileFlags` 现在如实报 `profile-directory-explicit` 或 `none`。
+- **`--load-extension` 在 Chrome 156/159 上被忽略（负面结论，实测）**。开发者模式在这台机器上无法持久化（`extensions.ui` 的值被 Chrome 丢弃、MAC 留下），所以试了用启动参数加载本项目自己的扩展：结果 `Secure Preferences` 里没有出现任何 `location:4` 记录，扩展也没回连。**不要把这条当兜底**。
+- **`SW_SHOWNOACTIVATE` 不足以阻止 Chrome 抢前台（实测）**。真机启动返回 `activated: true`：Chrome 对自己的第一个窗口会显式 `ShowWindow`，覆盖掉启动时的 `nCmdShow`。修法是**把焦点还回去**——`AttachThreadInput` + `SetForegroundWindow` 把启动前的那个前台窗口放回前面，然后**再测一次**，结果报 `focusRestored`。文案也不再无条件说「没有抢焦点」，而是按实测三种情况分别说。
+- **`findBridgeExtension` 增加 id 匹配**。Chrome 退出时会把扩展记录压缩成 `{"disable_reasons":[16777216]}`——`path` 字段消失，于是只按路径匹配的诊断报「未安装」，而正确的修法是「启用开发者模式」。现在 path 或 id 任一命中即算，结果带 `matchedBy`；`describeExtensionState` 也把「开发者模式被关」和「开发者模式在这台机器上不可持久化」分开说。
+- **新增 `developerModeInEffect()`**：直接读 `Secure Preferences` 的 `extensions.ui.developer_mode`；**有 MAC 但没有值**就是「这个 pref 被 Chrome 丢弃」的指纹，和「从未设置」区分开。
+- `doctor` 的 `auto-start-target` 现在比对 `browserTarget`（而不是硬编码的稳定版目录），并输出 `configuredTarget`、`wouldLaunch`、`sameProfileAsThisMachine`；没配目标时直接给一条建议。
+- **`launchChrome` 的 stderr 不再被吞掉**：`chrome_launch_result_invalid` 现在带 `stderr`/`stdout` 尾巴。本轮就是靠它一眼看出是 `Add-Type` 的 `CS0111`（重复声明 `GetWindowThreadProcessId`），否则只能看到一个「结果无效」。
+- **记录的目标也会过期，所以加了活跃度证据**。`browserTarget` 解决了「别猜」，但没解决「记录的东西本身已经不对了」：本机实测两份 profile **登录账号相同、`Login Data` 都是 192KB**（是同一份数据的克隆），其中一份 `Preferences`/`History`/`Cookies` 全部停在 78 天前，另一份几分钟前还在写。**登录账号只能证明「我用过一次」，只有写入时间能证明「我在用」**。`-DryRun` 现在输出 `wouldLaunch.ageMinutes` / `profileName` / `accounts`、顶层 `liveCandidate`（全渠道最新写入的 profile）、`targetIsLive` 和 `warnings: ["recorded_target_looks_stale"]`；真实启动的结果也带 `profileAgeMinutes`，并在消息里点名「这个 profile 已经 N 分钟没写入，而 X 分钟前还在写另一个」。
+- **`doctor` 的 `auto-start-target` 在目标陈旧时 `ok=false`**。以前它只校验「启动的就是记录的那个」——记录错了就永远是绿的。现在「记录的那个还是人在用的那个」是独立的一项，过不了就红。
+- 测试：`bridge.test.js` +2（固定目标逐字传给启动器、没有目标时不强加任何东西）、`chrome-profile.test.js` 断言文案更新。受影响文件 51/51，全量见下。
+
 ## 0.20.0 — 2026-10-28（**不再开错浏览器，也不再抢前台**）
 
 用户的反馈是这一轮的全部起点，三条都指向同一个设计底线：基座替代的是**人类工程师的手**，所以它既不能把人正在用的会话换掉，也不能把人正在看的窗口抢走。

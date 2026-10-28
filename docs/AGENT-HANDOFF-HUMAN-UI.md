@@ -4,6 +4,36 @@
 
 ## 目标
 
+## 2026-10-28 接手增量（0.21.0）：浏览器目标由用户指定
+
+- **本机的正确答案（用户当场确认）**：日常浏览器 = **Chrome SxS（Canary）/ profile `Default`**，
+  已登录 `love530love@gmail.com`。稳定版的 `Default` 虽然历史更大、cookies 更多，但**没有登录 Google 账号**，
+  所以启发式选出来的是「看起来最干净」的那个。已写入 `.local/config.json` 的
+  `browserTarget: { channel: "canary", exePath, userDataDir, profileDirectory: "Default" }`。
+  ⚠ **但这个记录本身可能是错的，先看下一条再动手。**
+- **登录账号不能区分「我在用」和「我用过一次」（本轮实测）**：Canary/Default（`Zack`）与稳定版/Default
+  （`您的 Chrome 数据`）**是同一个账号、`Login Data` 都是 192KB**，是同一份数据的克隆；Canary 那份的
+  `Preferences`/`History`/`Cookies` 全部停在 2026-08-11，稳定版那份几分钟前还在写。**唯一能回答
+  「人在用哪个」的信号是 profile 目录里这几个文件的最大 mtime**，不是历史大小、书签数、`last_used`、登录账号。
+  `-DryRun` 现在给 `wouldLaunch.ageMinutes` / `profileName` / `accounts` + 顶层 `liveCandidate` /
+  `targetIsLive` / `warnings:["recorded_target_looks_stale"]`，`doctor` 在目标陈旧时直接判红。
+  **换记录前先问用户，不要自己翻。**
+- **不要再写「按证据打分选浏览器」的兜底逻辑**。打分只在**没有 `browserTarget`** 时使用，并且 `doctor`
+  会明确提示正在用启发式。渠道内部也**不要**再按 `last_used` 猜 profile——本机 `last_used` 是 `Profile 1`，
+  而两份数据都在 `Default`。
+- **本机有多个安装根**：`C://Program Files`、`D://Program Files`（本机 `Program Files` 实际指向 D:）、
+  `%LOCALAPPDATA%\Google\Chrome SxS`（Canary，159.0.8128.2）。三者共用各自渠道的 user-data 目录，
+  所以**换安装根不改 profile，换渠道才改**。
+- **两条实测负面结论，别再试**：① `--load-extension` 在 Chrome 156/159 上被忽略（`Secure Preferences`
+  里不会出现 `location:4`，扩展不回连）；② `SW_SHOWNOACTIVATE` 挡不住 Chrome 抢前台（第一个窗口会显式
+  `ShowWindow`）。焦点必须**事后归还**：`AttachThreadInput` + `SetForegroundWindow`，然后重新测量。
+- **开发者模式在本机不可持久化**：Chrome 退出时把 `extensions.ui.developer_mode` 的值丢掉、MAC 留下
+  （`developerModeInEffect()` 就是读这个指纹）。所以「重启后扩展被停用」是稳定复现，不是偶发。
+  当前扩展**在任何渠道里都没有注册记录**（被 Chrome prune），需要在用户选定的 Canary/Default 里
+  `chrome://extensions` → 开发者模式 → Load unpacked 一次。
+- 诊断修正：扩展记录被压缩成 `{"disable_reasons":[...]}` 时 `path` 会消失，只按路径匹配会误报
+  「未安装」；现在 id 也参与匹配（`matchedBy: "id"`）。
+
 ## 2026-10-28 接手增量（0.20.0）：不再开错浏览器，也不再抢前台
 
 - **本机有一条必须先知道的事实**：`HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe`
