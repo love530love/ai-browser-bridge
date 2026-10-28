@@ -2,7 +2,7 @@
 // Both are pure functions so the rules can be pinned without a running Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reuseKey, samePage, visibleTab, createTabOwnership } from '../extension/tab-identity.js';
+import { reuseKey, samePage, visibleTab, createTabOwnership, describeTab, internalUrlLabel, isInternalPage } from '../extension/tab-identity.js';
 
 test('a fragment and a trailing slash do not make a different page', () => {
   assert.equal(reuseKey('https://a.example/x'), reuseKey('https://a.example/x/'));
@@ -87,4 +87,39 @@ test('invalid tab ids are ignored rather than stored', async () => {
   await owned.mark('7');
   await owned.mark(-1);
   assert.equal((await owned.ids()).size, 0);
+});
+
+test('a tab the bridge cannot read is described, not hidden', () => {
+  const internal = { id: 5, url: 'chrome://newtab/', title: '新标签页', active: true, windowId: 1, incognito: false };
+  const row = describeTab(internal, { owned: false, allowed: false, restrictedReason: 'non_http' });
+  // It exists, so it is listed; its content is not this agent's business.
+  assert.equal(row.id, 5);
+  assert.equal(row.restricted, true);
+  assert.equal(row.restrictedReason, 'non_http');
+  assert.equal(row.title, null);
+  assert.equal(row.url, 'chrome://newtab/');
+  assert.equal(row.active, true);
+  // A disallowed web origin is different: its URL *is* the content.
+  const foreign = describeTab({ id: 6, url: 'https://bank.example/accounts?q=x', title: 'Bank' }, { allowed: false, restrictedReason: 'origin_not_allowed' });
+  assert.equal(foreign.url, null);
+  assert.equal(foreign.title, null);
+  assert.equal(foreign.restricted, true);
+  // An allowed tab keeps the fields every existing caller reads.
+  const allowed = describeTab({ id: 7, url: 'https://a.example/x', title: 'A', active: false, windowId: 2 }, { owned: true });
+  assert.deepEqual(allowed, { id: 7, active: false, windowId: 2, incognito: false, bridgeCreated: true,
+    title: 'A', url: 'https://a.example/x', restricted: false });
+});
+
+test('an internal page label keeps the scheme and path but not the query', () => {
+  assert.equal(internalUrlLabel('chrome://newtab/'), 'chrome://newtab/');
+  assert.equal(internalUrlLabel('chrome://settings'), 'chrome://settings/');
+  // The query on an internal page can be the same kind of information as its
+  // content, and it is not needed to recognise the tab.
+  assert.equal(internalUrlLabel('chrome://history/?q=bank'), 'chrome://history/');
+  assert.equal(internalUrlLabel('chrome-extension://abc/page.html?a=1#x'), 'chrome-extension://abc/page.html');
+  assert.equal(internalUrlLabel('not a url'), null);
+  assert.equal(isInternalPage('chrome://newtab/'), true);
+  assert.equal(isInternalPage('file:///C:/x.txt'), true);
+  assert.equal(isInternalPage('https://a.example/'), false);
+  assert.equal(isInternalPage(null), false);
 });

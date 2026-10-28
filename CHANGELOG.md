@@ -1,3 +1,14 @@
+## 0.17.0 — 2026-10-28（已部署，真实 Chrome 实测）
+
+- **`browser_tabs` 不再静默隐藏标签**。上一轮发现的问题：invoke 能打开 `chrome://` 面，而 `browser_tabs` 过滤非 http(s) 标签，于是基座**看不见也关不掉自己造成的那一个**——「我打开了什么」在基座里不可见。现在**列出**它们并标 `restricted: true`，`restrictedReason` 区分两类：`non_http`（内部页，如 `chrome://newtab`）与 `origin_not_allowed`（本 agent 无权读的站点）。
+- **列出身份，不列出内容**。`title` 一律为 `null`；内部页只给 `scheme://host/path`（**去掉 query 与 fragment**——`chrome://history/?q=bank` 和页面内容是同一种信息）；`origin_not_allowed` 连 URL 都不给，因为那条 URL 就是内容。实测 `browser_tabs` 从「19 条、0 条受限」变成「23 条、4 条受限」，其中 3 条是我上一轮 invoke 验收留下的 `chrome://newtab`。
+- **可见不等于可读**：对受限标签调 `browser_read` / `browser_screenshot` 仍然报 `Site not allowed`，边界没有被这次改动放宽。
+- **`browser_close` 能关受限标签，但只在 `force:true` 时**。实现上把「关标签」从 URL 授权检查里摘出来——关闭是标签的生命周期操作，不是读取内容；不摘的话这类标签永远关不掉，而且会用一个 URL 策略错误掩盖真正适用的所有权判断。实测：不带 force → `denied / tab_not_created_by_bridge`；带 force → `{closed:true}`。
+- **真机自清理**：`npm run test:native` 从 17 条涨到 **21/21**，新增 4 条正是这件事——invoke 打开的标签现在对基座可见、无 force 仍被拒、带 force 能关、跑完不留残留。**上一轮每次跑都留一个隐形标签，现在不会了**。顺手把 `browser_tabs` 里那个「先切到一个已有 http 标签再 invoke」的步骤用上了真实返回值（这次 `before="VeryAI - Google Chrome"`，交叉验证是真的在比对）。
+- 清理动作本身也做了：把上一轮验收留下的 3 个 `chrome://newtab` 全部由基座关掉（`force:true`），`browser_tabs` 受限条目从 4 降到 1（剩下的 `chrome://extensions` 是本次会话之前就存在的，没有动）。
+- 新增纯函数 `describeTab` / `internalUrlLabel` / `isInternalPage`（`extension/tab-identity.js`，无 chrome 依赖可直接单测），`test/tab-identity.test.js` 9 → **11** 条。
+- 全量单测 **377/377**；`doctor` 10/10；工具数仍 69（本轮不加工具）。
+
 ## 0.16.0 — 2026-10-28（已部署，真实 Chrome 实测）
 
 - **`browser_native_action` 增加 `invoke`**：交接文档指定的下一步——「选菜单项」这条链的第一块，也是打开 DevTools 面板与改设置项的共同前提。`action` 现在是 `expand` / `collapse` / `invoke`，工具数仍为 69（扩的是同一个工具）。

@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.16.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.17.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.17.0 修的是上一轮暴露的一个盲区：**基座看不见自己造成的东西**。invoke 一个菜单项（比如 New tab）能打开 `chrome://` 面，而 `browser_tabs` 会过滤非 http(s) 标签，于是「我打开了什么」既查不到也关不掉。现在这类标签会被**列出**并标 `restricted:true`，`restrictedReason` 区分 `non_http`（内部页）与 `origin_not_allowed`（无权读的站点）——但只给身份不给内容：`title` 恒为 `null`，内部页只留 `scheme://host/path`（去掉 query 和 fragment），无权站点连 URL 都不给，因为那条 URL 就是内容。**可见不等于可读**（`browser_read` 仍报 `Site not allowed`），而 `browser_close` 在 `force:true` 时能关掉它——关闭是标签生命周期操作，不是读取内容。真机验收从 17 条涨到 **21/21**，多出来的 4 条正是「可见 / 无 force 仍被拒 / 带 force 能关 / 跑完不留残留」，**验收脚本现在会自己收尾**。
 
 0.16.0 让原生 UI 第一次**选中一个菜单项**：`browser_native_action` 增加 `invoke`，并强制要求 `expect.afterInvoke:"control_gone"`。理由和 expand/collapse 完全不同——expand/collapse 幂等，所以「不确定就重试」是安全指令；invoke 不幂等，同一个菜单项选两次命令就跑两次，而 UI Automation 只能观测到「控件还在不在树里」，命令执行了什么这一层看不见。所以 `success` 只表示**声明的后置条件被观测到了**，永远不表示命令成功；invoke 也不提供 `failed`（项还在只说明没观测到效果，不说明命令没跑）。菜单关闭时树会重建、runtime id 会换，因此必须连续两次遍历都找不到「同名+同角色+同 automationId」才算 gone。真机 17/17：invoke `New tab Ctrl+T` 后菜单自己折叠、该项消失，**窗口标题变成 `New Tab`**——标题是另一个 API 读到的，这才证明命令真的跑了（第一版断言恒真，已改掉）。
 

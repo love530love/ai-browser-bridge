@@ -123,10 +123,12 @@ invoke `New tab Ctrl+T` → `success / verified / controlGone`（settleMs 461）
 验收脚本还会先把窗口切到一个已存在的 http 标签再 invoke——第一版没这么做，而窗口本来就是
 New Tab，「标题变了」这条断言恒真，等于没测。
 
-**已知缺口（下一步）**：invoke 可以打开 `chrome://` 面（New tab / Downloads / Settings…），
+**已知缺口 → 已在 0.17.0 解决**：invoke 可以打开 `chrome://` 面（New tab / Downloads / Settings…），
 而 `browser_tabs` 会把非 http(s) 标签过滤掉，于是基座既看不见、也关不掉自己造成的那一个标签。
-实测已留下一个。正解是让 `browser_tabs` 报告被过滤标签的**数量与 id（不含标题/内容）**，
-并允许 `browser_close` 关闭这些 id——否则「我打开了什么」在基座里是不可见的。
+现在这类标签会被**列出**并标 `restricted:true`（`title` 为 `null`，内部页只给 `scheme://host/path`，
+无权站点连 URL 都不给），`browser_close` 在 `force:true` 时能关掉它。**可见不等于可读**：
+`browser_read` / `browser_screenshot` 对受限标签仍然报 `Site not allowed`。
+真机验收因此从 17 条涨到 21 条，并且**验收脚本会自己清掉它打开的标签**。
 
 **部署后复验抓到两件事**：
 
@@ -143,8 +145,8 @@ New Tab，「标题变了」这条断言恒真，等于没测。
 
 1. ~~对近期快照 ref 绑定的原生控件执行 Expand/Collapse，回读展开状态。~~ 已完成（0.14.0）。
 2. ~~**Invoke**：绑定 `MenuItem` 的 ref 做单次 Invoke，并回读菜单是否关闭。~~ 已完成（0.16.0）。
-3. **让 invoke 造成的 `chrome://` 标签可见可关**（`browser_tabs` 报告被过滤的 id、`browser_close` 能关）。
-   这是「我打开了什么必须看得见」的直接要求，也是当前唯一会留下残留的一步。
+3. ~~**让 invoke 造成的 `chrome://` 标签可见可关**。~~ 已完成（0.17.0）：`browser_tabs` 列出
+   `restricted:true` 的条目（只给身份不给内容），`browser_close` 在 `force:true` 时能关。
 4. 从实际菜单树选择开发者工具入口（`More tools → Developer tools`），验证目标页面与 DevTools 文档。
 5. 对 Select、Toggle、Value、Scroll 原语分别补前后证据与异常结果。Toggle 若要实现，
    必须先解决「重试会反转」——例如只暴露 SetState 式的语义，不暴露裸 toggle。

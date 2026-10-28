@@ -23,9 +23,10 @@
 //      left the tree. A pattern call that returned is not evidence a command
 //      ran, so the run also checks the window title afterwards: choosing "New
 //      tab" must produce a window that says New tab. That is the only step here
-//      that changes anything, and its residue is one new tab which the bridge
-//      cannot see (chrome:// tabs are filtered out of browser_tabs) and
-//      therefore cannot close - so it is reported instead of hidden.
+//      that changes anything, and it now cleans up after itself - the tab it
+//      creates is an internal page, so browser_tabs lists it as restricted and
+//      browser_close can close it with force. Before that existed, every run
+//      left an invisible tab behind.
 //
 // It also records one fact that was assumed wrongly until it was measured: an
 // open Chrome menu is a child of the browser window in the UIA control view, so
@@ -171,7 +172,9 @@ try {
       // nothing (reuse, not create) and makes the pre-state deterministic
       // instead of depending on what the user happened to leave in front.
       const listedTabs = await call('browser_tabs', {});
-      const home = (listedTabs.tabs ?? listedTabs)[0];
+      const tabsBefore = listedTabs.tabs ?? listedTabs;
+      const home = tabsBefore[0];
+      const idsBefore = new Set(tabsBefore.map(tab => tab.id));
       let titleBefore = '';
       if (home?.url) {
         const refocus = await call('browser_open', { url: home.url, active: true });
@@ -203,7 +206,29 @@ try {
       const title = after.windows?.[0]?.title ?? '';
       record('the command really ran: the window moved to a new tab', true,
         /new tab|新标签页/i.test(title) && title !== titleBefore, `before=${JSON.stringify(titleBefore)} after=${JSON.stringify(title)}`);
-      step('residue: one new tab was opened; chrome:// tabs are invisible to browser_tabs, so it cannot be closed from here');
+      // The tab the command opened is an internal page, so it used to be
+      // invisible to browser_tabs and impossible to close - the run left residue
+      // every time. Now it is listed (restricted, no title) and closable with
+      // force, so the acceptance can clean up after itself and prove both halves.
+      const afterTabs = await call('browser_tabs', {});
+      const tabsAfter = afterTabs.tabs ?? afterTabs;
+      const opened = tabsAfter.filter(tab => tab.restricted && tab.url === 'chrome://newtab/' && !idsBefore.has(tab.id));
+      record('the tab the command opened is visible to the bridge', true, opened.length > 0,
+        `${opened.length} restricted tab(s) new since the invoke; total ${tabsAfter.length}`);
+      const noForce = opened[0] ? await call('browser_close', { tabId: opened[0].id }).catch(error => ({ error: error.message })) : null;
+      record('...but the ownership rule still refuses it without force', 'tab_not_created_by_bridge', noForce?.reason,
+        `status=${noForce?.status}`);
+      const closedIds = [];
+      for (const tab of opened) {
+        const result = await call('browser_close', { tabId: tab.id, force: true }).catch(error => ({ error: error.message }));
+        if (result?.closed === true) closedIds.push(tab.id);
+      }
+      record('...and the bridge can close it, leaving no residue', opened.length, closedIds.length,
+        `closed ${closedIds.join(',') || 'none'}`);
+      const finalRaw = await call('browser_tabs', {});
+      const finalTabs = finalRaw.tabs ?? finalRaw;
+      record('nothing this run created is still open', true,
+        closedIds.every(id => !finalTabs.some(tab => tab.id === id)));
     }
   }
 } catch (error) {

@@ -4,6 +4,24 @@
 
 ## 目标
 
+## 2026-10-28 接手增量（0.17.0）：看不见的标签变成看得见、关得掉
+
+- **`browser_tabs` 不再静默隐藏标签**。上一轮的缺口是：invoke 能打开 `chrome://` 面，
+  而列表会过滤非 http(s) 标签，于是「我打开了什么」在基座里不可见。现在列出并标
+  `restricted:true`，`restrictedReason` 为 `non_http` 或 `origin_not_allowed`。
+- **只给身份不给内容**：`title` 恒 `null`；内部页只给 `scheme://host/path`（去掉 query/fragment）；
+  `origin_not_allowed` 连 URL 都不给（URL 就是内容）。**可见不等于可读**——`browser_read` 仍报
+  `Site not allowed`。
+- **`browser_close` 在 `force:true` 时能关受限标签**。实现上把「关标签」从 URL 授权检查里摘出来：
+  关闭是生命周期操作不是读取；不摘则这类标签永远关不掉，而且会用 URL 策略错误掩盖所有权判断。
+  实测：无 force → `denied / tab_not_created_by_bridge`；有 force → `{closed:true}`。
+- 真机 `npm run test:native` **21/21**（+4：可见 / 无 force 仍被拒 / 带 force 能关 / 跑完不留残留）。
+  **验收脚本现在会自己收尾**，上一轮每跑一次留一个隐形标签的问题不再存在。
+- 纯函数 `describeTab` / `internalUrlLabel` / `isInternalPage` 在 `extension/tab-identity.js`，
+  单测 `test/tab-identity.test.js` 9 → 11 条。全量单测 **377/377**；工具数仍 69。
+- **下一步**：`More tools → Developer tools`（用 invoke 打开 DevTools 面板），以及 Select / Toggle /
+  Value / Scroll 原语。
+
 ## 2026-10-28 接手增量（0.16.0）：invoke，选中一个菜单项
 
 - `browser_native_action` 的 `action` 增加 `invoke`，**必须**带 `expect.afterInvoke:"control_gone"`。

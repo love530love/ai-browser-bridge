@@ -6,7 +6,7 @@ import { captureDevtools, createTabSubscription } from './cdp-capture.js';
 import { readStorage, writeStorage } from './cdp-storage.js';
 import { replayRequest } from './cdp-replay.js';
 import { createSessionManager } from './cdp-session.js';
-import { reuseKey, samePage, visibleTab, createTabOwnership } from './tab-identity.js';
+import { reuseKey, samePage, visibleTab, isInternalPage, describeTab, createTabOwnership } from './tab-identity.js';
 let socket = null;
 let keepalive = null;
 let connectDeadline = null;
@@ -559,12 +559,23 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   }
   if (name === 'browser_tabs') {
     const owned = await tabOwnership.ids();
-    return (await chrome.tabs.query({})).filter(tab => {
-      if (!visibleTab(tab, { includeIncognito: args.includeIncognito === true })) return false;
-      try { checkedUrl(tab.url, config); return true; } catch { return false; }
-    }).map(({ id, title, url, active, windowId, incognito }) => ({
-      id, title, url, active, windowId, incognito: incognito === true, bridgeCreated: owned.has(id)
-    }));
+    const rows = [];
+    for (const tab of await chrome.tabs.query({})) {
+      if (!visibleTab(tab, { includeIncognito: args.includeIncognito === true })) continue;
+      const mine = owned.has(tab.id);
+      try {
+        checkedUrl(tab.url, config);
+        rows.push(describeTab(tab, { owned: mine }));
+      } catch {
+        // Listed, not hidden. An internal page or a tab on an origin this agent
+        // may not read still exists, and choosing a native menu item such as New
+        // tab creates exactly one of these - so hiding it left the caller unable
+        // to answer "what did I just open" or to clean it up.
+        rows.push(describeTab(tab, { owned: mine, allowed: false,
+          restrictedReason: isInternalPage(tab.url) ? 'non_http' : 'origin_not_allowed' }));
+      }
+    }
+    return rows;
   }
   if (name === 'browser_open') {
     const targetUrl = checkedUrl(args.url, config);
@@ -601,7 +612,12 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   }
   if (!Number.isInteger(args.tabId) || args.tabId < 1) throw new Error('Invalid tabId');
   const tab = await chrome.tabs.get(args.tabId);
-  checkedUrl(tab.url, config);
+  // Closing is about a tab's lifecycle, not its content. Requiring the origin
+  // check here made every tab the bridge cannot read permanently unclosable -
+  // including the ones a native menu invocation creates - and it answered with
+  // a URL-policy error instead of the ownership decision that actually applies.
+  // browser_close still refuses tabs the bridge did not open unless force:true.
+  if (name !== 'browser_close') checkedUrl(tab.url, config);
   // A phase wait is the one command that is supposed to run while the tab is
   // between documents: it is called right after a submit, which is exactly when
   // pendingUrl is set. Refusing it here made untilPhase unreachable for every

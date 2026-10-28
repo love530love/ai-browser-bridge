@@ -45,6 +45,40 @@ export function visibleTab(tab, { includeIncognito = false } = {}) {
   return Boolean(tab) && (includeIncognito || tab.incognito !== true);
 }
 
+// Is this a browser-internal surface rather than a web page?
+export function isInternalPage(raw) {
+  let url;
+  try { url = new URL(String(raw ?? '')); } catch { return false; }
+  return url.protocol !== 'http:' && url.protocol !== 'https:';
+}
+
+// A label for a page the bridge will not read: scheme, host and path only. The
+// query and the fragment are dropped on purpose - chrome://history/?q=bank is
+// the same kind of information as the page content, and none of it is needed to
+// recognise which tab this is.
+export function internalUrlLabel(raw) {
+  let url;
+  try { url = new URL(String(raw ?? '')); } catch { return null; }
+  const path = url.pathname.replace(/\/+$/, '') || '/';
+  return `${url.protocol}//${url.host}${path}`.slice(0, 120);
+}
+
+// How one tab is described to a caller.
+//
+// A tab the bridge cannot read is still a tab that exists. Hiding those made
+// "what did I just open?" unanswerable: choosing New tab in Chrome's own menu
+// creates one, and nothing in the bridge could see it afterwards. So the
+// identity is reported and the content is not - no title, and for a disallowed
+// web origin not even the URL, because that URL is the content.
+export function describeTab(tab, { owned = false, allowed = true, restrictedReason = null } = {}) {
+  const base = { id: tab.id, active: tab.active === true, windowId: tab.windowId,
+    incognito: tab.incognito === true, bridgeCreated: owned === true };
+  if (allowed) return { ...base, title: tab.title ?? '', url: tab.url ?? '', restricted: false };
+  const reason = restrictedReason ?? (isInternalPage(tab.url) ? 'non_http' : 'origin_not_allowed');
+  return { ...base, title: null, restricted: true, restrictedReason: reason,
+    url: reason === 'origin_not_allowed' ? null : internalUrlLabel(tab.url) };
+}
+
 // Tab ownership, kept in chrome.storage.session so it survives a service worker
 // suspension but still disappears when the browser closes. In-memory only would
 // forget ownership on every worker restart and then refuse to close tabs the
