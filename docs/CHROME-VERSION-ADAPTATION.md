@@ -12,6 +12,48 @@
 | 安装根 | `C:\Program Files\Google\Chrome\Application` 与 `D:\Program Files\Google\Chrome\Application` **各有一份** | 同上 |
 | 基座 / 扩展源码 | `0.15.0`（本轮）；抓基线时**运行中**的是 `0.14.0` | `/status` |
 
+## 「重启了，但版本没变」——先分清三种状态
+
+这台机器上真实发生过一次：用户以为重启了 Chrome，`browserVersion` 仍是 154。三条证据说明浏览器进程
+根本没退出过（最早一个 chrome.exe 从 18:23 一直活到 20:52；磁盘 `chrome.exe` 仍是 154；而 Omaha 的
+`ClientState.pv` 已经是 156）。**升级有三种完全不同的状态，混在一起就会一直「重启无效」**：
+
+| 状态 | 怎么认 | 怎么办 |
+| --- | --- | --- |
+| 只下载了 | `Application\<newer>\` 存在，`chrome.exe` 是旧版，**没有** `new_chrome.exe` | 正常重启即可应用 |
+| **已安装、只差换启动器** | `Application\` 下有 **`new_chrome.exe`**（新版启动器），`chrome.exe` 仍是旧版 | 重启**不会**生效。见下 |
+| 已应用 | `chrome.exe` 的 FileVersion = 新版 | — |
+
+`new_chrome.exe` 是 Chrome 暂存更新的标准形态：整份新构建写进自己的版本目录，然后在旧启动器旁边
+放一个新版启动器，**最后一步是把它改名成 `chrome.exe`**。这一步由更新程序在「没有浏览器在跑」时做。
+如果这台机器上的 Chrome 没有注册 Omaha（`HKLM/HKCU` 的 Uninstall 里查不到 Google Chrome），
+就没人来做这一步，于是「已安装、已下载、重启无效」可以无限期持续。
+
+查当前状态（不需要浏览器在跑，这正是要查的时刻）：
+
+```powershell
+node scripts/chrome-compat-baseline.js --disk
+```
+
+修复（等于替更新程序做那一次改名，可回滚）：
+
+```powershell
+# 1. 完全退出 Chrome，确认没有 chrome.exe 残留
+# 2. 备份并换上暂存的启动器
+Copy-Item "D:\Program Files\Google\Chrome\Application\chrome.exe" "D:\Program Files\Google\Chrome\Application\chrome.exe.154.bak"
+Move-Item "D:\Program Files\Google\Chrome\Application\new_chrome.exe" "D:\Program Files\Google\Chrome\Application\chrome.exe" -Force
+# 3. 启动后确认版本
+node src/cli.js doctor
+```
+
+本机 2026-10-28 实测：C: 那份安装自己完成了换名（`chrome.exe` 已是 156），D: 那份一直卡在
+`new_chrome.exe` 上，手工换名后两个根都是 `156.0.8078.49`，`chrome.exe.154.bak` 保留作回滚。
+
+**另一个坑：基座不能替用户启动 Chrome。** 从工具里 `Start-Process chrome.exe` 能起来（32–40 个进程、
+窗口正常），但**工具调用一结束，整棵进程树就被清理掉**——两次不同启动方式（PowerShell 的
+`Start-Process`、bash 的后台执行）都是同一结果，`Crashpad` 里也没有当天的转储，说明不是崩溃而是被回收。
+这与项目「基座从不启动浏览器」的设计一致，只是现在有了实测依据：**最后一下必须由人点**。
+
 Chrome 156 于 **2026-10-20** 进入稳定通道（`156.0.8078.47/.48`，本机是 `.49`），含 **353 项安全修复、其中 6 个严重漏洞**，覆盖图形、无障碍、渲染、通信等模块。稳定通道公告的措辞是「修复与改进」，**没有逐项功能清单**。
 
 ## 公开变更里唯一影响本项目判断的一条

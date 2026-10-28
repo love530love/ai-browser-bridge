@@ -10,6 +10,7 @@
 //
 //   node scripts/chrome-compat-baseline.js                 capture a baseline
 //   node scripts/chrome-compat-baseline.js --diff A B      compare two captures
+//   node scripts/chrome-compat-baseline.js --disk          install facts only, no browser needed
 //
 // Captures land in .local/chrome-compat-<version>.json and are never committed:
 // they contain the names of the user's toolbar buttons, which is machine state,
@@ -51,6 +52,24 @@ function installedVersions() {
     }
   }
   return found;
+}
+
+// Chrome stages an update by writing the whole new build into its own version
+// directory and dropping a `new_chrome.exe` next to the current launcher. The
+// last step - renaming that file over chrome.exe - is done by the updater while
+// no browser is running. If it never runs, the update is *downloaded and
+// installed* but the browser keeps starting the old launcher, so "restart
+// Chrome" changes nothing. That is a different state from "not downloaded yet"
+// and it needs a different fix, so it is reported separately instead of being
+// folded into "pending update".
+function stagedLaunchers() {
+  const staged = [];
+  for (const root of INSTALL_ROOTS) {
+    if (!root || !existsSync(root)) continue;
+    const candidate = join(root, 'new_chrome.exe');
+    if (existsSync(candidate)) staged.push({ root, file: candidate });
+  }
+  return staged;
 }
 
 const compareVersions = (a, b) => {
@@ -106,6 +125,7 @@ async function capture() {
   if (snapshot?.status !== 'success') throw new Error(`native snapshot unavailable: ${JSON.stringify(snapshot).slice(0, 200)}`);
   const running = await runningBrowserVersion(status);
   const installed = installedVersions();
+  const staged = stagedLaunchers();
   const pending = running.version
     ? installed.map(item => item.version).filter(version => compareVersions(version, running.version) > 0).sort(compareVersions).pop() ?? null
     : null;
@@ -115,6 +135,7 @@ async function capture() {
     extensionVersion: status?.extensionVersion ?? null,
     running,
     pendingUpdate: pending,
+    stagedLaunchers: staged,
     installed,
     target,
     snapshot: { controls: snapshot.controls.length, partial: snapshot.partial, omittedDocuments: snapshot.omittedDocuments },
@@ -153,6 +174,26 @@ if (args[0] === '--diff') {
     process.exit(2);
   }
   console.log(diff(JSON.parse(readFileSync(args[1], 'utf8')), JSON.parse(readFileSync(args[2], 'utf8'))));
+} else if (args[0] === '--disk') {
+  // The interesting moment to inspect an install is exactly when no browser is
+  // running, which is also when a capture is impossible. This mode answers the
+  // one question that matters then: is the update applied, staged, or absent?
+  const installed = installedVersions();
+  const staged = stagedLaunchers();
+  console.log(`installed builds: ${installed.map(item => `${item.version} (${item.root})`).join(', ') || 'none found'}`);
+  console.log(`staged launchers: ${staged.map(item => item.root).join(', ') || 'none'}`);
+  const status = await call('browser_queue_status', {}).catch(() => null);
+  const running = status ? await runningBrowserVersion(status) : { version: null };
+  if (running.version) {
+    console.log(`running browser: ${running.version}`);
+    const newer = installed.map(item => item.version).filter(version => compareVersions(version, running.version) > 0).sort(compareVersions).pop();
+    console.log(newer ? `VERDICT: ${newer} is on disk but the browser is still ${running.version}` : 'VERDICT: the browser is running the newest build on disk');
+  } else {
+    console.log('running browser: not connected (no extension session)');
+  }
+  console.log(staged.length
+    ? 'VERDICT: a staged launcher is waiting for the rename that only the updater performs while no browser runs; restarting the browser alone will not apply the update'
+    : 'VERDICT: no staged launcher pending');
 } else {
   const result = await capture();
   mkdirSync(OUT_DIR, { recursive: true });
@@ -161,6 +202,12 @@ if (args[0] === '--diff') {
   console.log(`captured ${result.label}  (identity source: ${result.running?.source ?? 'unknown'})`);
   console.log(`  bridge ${result.bridgeVersion} / extension ${result.extensionVersion}`);
   console.log(`  installed on disk: ${result.installed.map(item => item.version).join(', ') || 'none found'}`);
+  if (result.stagedLaunchers?.length) {
+    console.log(`  STAGED LAUNCHER: ${result.stagedLaunchers.map(item => item.root).join(', ')}`);
+    console.log('    The new build is installed, but the launcher was never swapped over. Restarting the');
+    console.log('    browser will NOT apply it; the updater has to rename new_chrome.exe over chrome.exe');
+    console.log('    while no browser is running. See docs/CHROME-VERSION-ADAPTATION.md.');
+  }
   if (result.pendingUpdate) console.log(`  PENDING UPDATE: ${result.pendingUpdate} is downloaded and applies on the next browser restart`);
   console.log(`  controls: ${result.snapshot.controls}  partial=${result.snapshot.partial}  omittedDocuments=${result.snapshot.omittedDocuments}`);
   console.log(`  identity rows: ${result.inventory.length}`);

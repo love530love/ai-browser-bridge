@@ -1,4 +1,18 @@
+## 0.18.1 — 2026-10-28（工具链；156 已装上但浏览器尚未由用户启动，**不宣称已适配**）
+
+- **查清了一次「重启了但版本没变」**。用户重启 Chrome 后 `browserVersion` 仍是 `154.0.8037.93`。三条独立证据说明浏览器进程根本没退出过：最早一个 `chrome.exe` 从 18:23 一直活到 20:52（2 小时 24 分）、磁盘 `chrome.exe` 的 FileVersion 仍是 154、而 Omaha 的 `ClientState.pv` 已经是 `156.0.8078.49`。
+- **升级其实有三种状态，混在一起就会一直「重启无效」**：① 只下载了（有 `<newer>` 目录、没有 `new_chrome.exe`）→ 正常重启生效；② **已安装、只差换启动器**（`Application\` 下有 `new_chrome.exe`）→ **重启不会生效**；③ 已应用（`chrome.exe` FileVersion 是新版）。`new_chrome.exe` 是 Chrome 暂存更新的标准形态：新构建写进自己的版本目录，旧启动器旁边放一个新启动器，**最后一步是把它改名成 `chrome.exe`，由更新程序在「没有浏览器在跑」时做**。这台机器的 Chrome 没有注册 Omaha（Uninstall 里查不到 Google Chrome），所以没人来做这一步。
+- **`scripts/chrome-compat-baseline.js` 增加 `--disk` 模式**，专答「现在到底属于哪种状态」——**不需要浏览器在跑**，而那正是唯一值得查的时刻（此前的 capture 模式要求有可见窗口，恰好查不了）。capture 输出里也新增 `STAGED LAUNCHER` 告警，把「下载了」「只差换名」这两件事分开报，因为它们的修法完全不同。
+- **本机实测修复**：C: 那份安装已自行完成换名（`chrome.exe` = 156），D: 那份卡在 `new_chrome.exe`；在「零 chrome.exe 进程」的窗口里备份后改名，两个根现在都是 `156.0.8078.49`，`chrome.exe.154.bak` 留作回滚。**这一步等于替更新程序做它没做的那一次改名**，写在 [docs/CHROME-VERSION-ADAPTATION.md](docs/CHROME-VERSION-ADAPTATION.md) 里含回滚步骤。
+- **顺手拿到一条负面结论**：**基座不能替用户启动 Chrome**。从工具里 `Start-Process chrome.exe` 能起来（32–40 个进程、窗口正常），但**工具调用一结束整棵进程树就被清理**；PowerShell 的 `Start-Process` 与 bash 后台执行两种方式结果一致，`Crashpad` 里没有当天转储（不是崩溃，是被回收）。这与「基座从不启动浏览器」的设计一致，只是现在有了实测依据：**最后一下必须由人点**。
+- 用上了上一轮做的能力：**退出浏览器是用 `browser_native_action invoke` 点 Chrome 自己的「Exit」菜单项**完成的，返回 `success / verified / controlGone / settleMs 684`，之后 `tasklist` 里 chrome.exe 归零——比 `Stop-Process` 干净，且没有丢会话。
+- **顺手补掉上一轮漏改的第四份版本号**：`package-lock.json` 的 `version` 与 `packages[""].version` 还停在 `0.17.0`（0.18.0 那次是先跑完测试再改版本，正好绕过了 `test/version.test.js` 那条「四份副本必须一致」的断言）。这类「改完再测」的顺序错误，等于让那条断言失去意义。
+- 全量单测 **385/385**（本轮只改脚本与文档，未动服务端）；`--disk` 实测输出 `staged launchers: none` / `VERDICT: no staged launcher pending`。
+- **仍未做的**：156 的真实验收一条都没跑（`--diff`、`test:native`、`test:devtools`、`test:capture`、`test:debugger`、`test:bench` 都需要一个**由用户启动**的 156 浏览器）。所以这一轮只记「更新已装上」，**不写「已适配 156」**。
+
 ## 0.18.0 — 2026-10-28（已部署，真实 Chrome 实测）
+
+
 
 - **`browser_devtools` 支持 `open` / `close`**：交接文档里「More tools → Developer tools」那一步。0.9 撤下它的原因写在撤下时就写明了——当时只有合成 F12，而全局按键会与「检查与按键之间谁获得焦点」竞态；撤下时也写明要回来需要什么：**绑定到目标窗口、可回读的原生动作 + 充分的负证据**。0.14.0 的 expand、0.16.0 的 invoke 把这两样补齐了，这一轮把它接成完整链路。
 - **对外是「请求一个状态」，不是「切换」**。菜单项本身是 toggle（菜单形式的 Ctrl+Shift+I），所以**永远不以 toggle 暴露**：先 observe 当前状态，已在目标状态就 `dispatched:false / alreadyInState:true` 什么都不派发，否则走 `expand 应用菜单 → expand More tools → invoke Developer tools → 再 observe 判定`。**幂等性由此而来**——这也是「`uncertain` 之后允许重试」在这里成立、而在裸 invoke 上不成立的唯一原因。

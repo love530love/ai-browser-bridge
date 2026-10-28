@@ -4,6 +4,21 @@
 
 ## 目标
 
+## 2026-10-28 接手增量（0.18.1）：「重启了但版本没变」的三种状态
+
+- 用户重启 Chrome 后 `browserVersion` 仍是 154。证据链：最早一个 chrome.exe 从 18:23 活到 20:52、
+  磁盘 `chrome.exe` FileVersion 仍是 154、Omaha `ClientState.pv` 已是 156 ⇒ **浏览器进程根本没退出过**。
+- **升级有三种状态**：① 只下载（有 `<newer>` 目录、无 `new_chrome.exe`）→ 正常重启生效；
+  ② **已安装、只差换启动器**（`Application\` 下有 `new_chrome.exe`）→ **重启不会生效**；
+  ③ 已应用（`chrome.exe` FileVersion 是新版）。这台机器卡在 ②，因为没有 Omaha 注册，没人做最后那次改名。
+- `node scripts/chrome-compat-baseline.js --disk` 就是查这个的（**不需要浏览器在跑**，而那正是唯一值得查的时刻）。
+  capture 输出也新增 `STAGED LAUNCHER` 告警。
+- **基座不能替用户启动 Chrome**：从工具里 `Start-Process chrome.exe` 能起来，但工具调用一结束整棵进程树
+  就被回收（PowerShell 与 bash 两种方式一致，Crashpad 无当天转储）。**最后一下必须由人点。**
+- 退出浏览器改用 `browser_native_action invoke` 点「Exit」菜单项，`success / controlGone / settleMs 684`，
+  比 `Stop-Process` 干净且保留会话。
+- 补掉上一轮漏改的 `package-lock.json` 版本号（先跑测试再改版本，正好绕过一致性断言——顺序错了）。
+
 ## 2026-10-28 接手增量（0.18.0）：expand + invoke 组合成「打开/关闭 DevTools」
 
 - **`browser_devtools` 支持 `open` / `close`**，走浏览器自己的菜单
