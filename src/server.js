@@ -70,7 +70,7 @@ function withContentBoundaries(result) {
   }
   return next;
 }
-export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000 } = {}) {
+export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true } = {}) {
   config = { ...config, uploadRoots: config.uploadRoots ?? [] };
   let extension = null;
   let current = null;
@@ -184,6 +184,19 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       modelRequired: false, arbitraryCommands: false
     },
     desktopAdapter: { available: desktopAdapter.available === true, platform: process.platform, resultVerification: 'service-reported extension version; UI invocation alone is not success' },
+    // Starting the browser is not an answer an agent can act on being denied:
+    // when nothing is running, the first call that needs the extension starts it
+    // and then runs itself, so a closed browser does not become a dead end.
+    autoStart: {
+      enabled: autoLaunchEnabled,
+      trigger: 'any call that needs the extension, when no chrome process is running',
+      launchesOnlyWhenNothingIsRunning: true,
+      afterLaunch: 'the original call is repeated once, with autoLaunched describing what was started',
+      staleTabId: 'a tab id from the previous session is answered with tab_gone_after_browser_launch plus the current tab list instead of "tab not found"',
+      runningButDisconnected: 'chrome_running_extension_not_connected - a second instance would be a second profile, so nothing is launched',
+      disabledBy: 'config autoLaunchBrowser:false or AIB_AUTO_LAUNCH=0',
+      profileFlags: 'none - the same profile a human double-clicking the icon gets, so existing cookies and logins apply'
+    },
     nativeMessaging: { status: 'not_configured', purpose: ['lifecycle', 'health', 'diagnostics'], arbitraryShell: false },
     collection: {
       networkSummary: { source: 'current main-frame Resource Timing buffer', responseBodies: false, includesPreAttachmentEntries: 'if retained', emptyIsProofOfNoTraffic: false },
@@ -823,24 +836,90 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // Launching only applies when no browser exists. The adapter refuses when any
   // chrome process is alive, so this can never create a competing instance or a
   // second profile - which is what would lose the user's cookies.
-  async function launchCall(name, args) {
-    const startedAt = Date.now();
+  async function launchBrowserOnce(args) {
     const launched = await desktopAdapter.launchChrome({ url: args.url });
-    if (launched?.status !== 'success') return recordDesktopAudit(name, args, launched, startedAt);
+    if (launched?.status !== 'success') return launched;
     const deadline = Date.now() + launchConnectTimeoutMs;
     while (Date.now() < deadline && !(extension && extensionVersion === VERSION)) await sleep(400);
     const connected = Boolean(extension) && extensionVersion === VERSION;
     if (connected) {
-      return recordDesktopAudit(name, args, { ...launched, extensionConnected: true, extensionVersion, focusRequired: false }, startedAt);
+      return { ...launched, extensionConnected: true, extensionVersion, focusRequired: false };
     }
     // The browser is up; the bridge is not. Saying "success" here would be a lie
     // about what the caller can actually do next.
-    return recordDesktopAudit(name, args, { ...launched, status: 'uncertain', verified: false,
+    return { ...launched, status: 'uncertain', verified: false,
       reason: 'chrome_launched_extension_not_connected', extensionConnected: false, extensionVersion: extensionVersion ?? null,
-      message: 'Chrome started with the user profile, but the bridge extension has not connected. The browser is running; load the extension or press Reconnect before issuing page operations.' }, startedAt);
+      message: 'Chrome started with the user profile, but the bridge extension has not connected. The browser is running; load the extension or press Reconnect before issuing page operations.' };
   }
 
-  function call(name, args, owner = null) {
+  async function launchCall(name, args) {
+    const startedAt = Date.now();
+    return recordDesktopAudit(name, args, await launchBrowserOnce(args), startedAt);
+  }
+
+  // --- starting the browser on demand -------------------------------------
+  //
+  // "The browser is not open" is not an answer an agent can act on: it either
+  // gives up or asks the user to do something the bridge can do itself. So a
+  // call that needs the extension starts the browser and then runs the original
+  // call, instead of returning a dead end.
+  //
+  // The rule stays narrow on purpose. It launches only when *no* Chrome process
+  // exists (the adapter enforces that). A browser that is running but has not
+  // dialled back in is a different problem - paused extension, evicted worker -
+  // and starting a second instance would lose cookies rather than fix it, so
+  // that case reports what is actually wrong instead of pretending to launch.
+  const autoLaunchEnabled = autoLaunchBrowser === true && process.env.AIB_AUTO_LAUNCH !== '0';
+  let launchInFlight = null;
+
+  const disconnectedResult = () => ({ status: 'waiting', retryable: true, reason: 'extension_disconnected', suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true }, recommendedNextAction: 'Keep the task alive. Ask the user to reconnect once if the bridge does not recover; do not open extension settings automatically.', queue: queueSnapshot() });
+
+  const launchNote = launched => ({
+    status: launched.status, reason: launched.reason ?? null, chromePath: launched.chromePath ?? null,
+    processId: launched.processId ?? null, windowHandle: launched.windowHandle ?? null,
+    extensionConnected: launched.extensionConnected === true, method: launched.method ?? null
+  });
+
+  // Two agents asking at the same moment must not race into two launches; the
+  // adapter would refuse the second anyway, but the first answer would then be
+  // "already running" for a browser this very request just started.
+  function launchOnce(args) {
+    if (!launchInFlight) launchInFlight = launchBrowserOnce(args).finally(() => { launchInFlight = null; });
+    return launchInFlight;
+  }
+
+  async function reviveBrowser({ name, args, owner, context }) {
+    if (!autoLaunchEnabled || stopped || maintenanceState()) return disconnectedResult();
+    if (typeof desktopAdapter.launchChrome !== 'function' || desktopAdapter.available !== true) return disconnectedResult();
+    const launched = await launchOnce(args).catch(error => ({ status: 'not_dispatched', retryable: false, reason: 'chrome_launch_failed', message: error.message }));
+    if (launched?.status === 'success' && launched.extensionConnected === true) {
+      // A tab id from the previous browser session cannot survive a restart, and
+      // "tab not found" is exactly the dead end this path exists to remove.
+      if (Number.isInteger(args.tabId)) {
+        const listed = await call('browser_tabs', { agent: args.agent }, owner, { revived: true }).catch(() => null);
+        const tabs = listed?.tabs ?? listed;
+        if (Array.isArray(tabs) && !tabs.some(tab => tab.id === args.tabId)) {
+          return { status: 'waiting', retryable: true, dispatched: false, reason: 'tab_gone_after_browser_launch',
+            requestedTabId: args.tabId, tabs: tabs.slice(0, 50).map(tab => ({ id: tab.id, title: tab.title ?? null, url: tab.url ?? null, restricted: tab.restricted === true })),
+            autoLaunched: launchNote(launched),
+            recommendedNextAction: 'The browser was just started, so the tab id from the previous session is gone. Open the target page with browser_open (it reuses an existing tab for the same url) or pick a tab from tabs, then repeat the call with the new id.' };
+        }
+      }
+      const result = await call(name, args, owner, { ...context, revived: true });
+      return { ...result, autoLaunched: launchNote(launched) };
+    }
+    if (launched?.reason === 'chrome_already_running') {
+      // The browser exists, so nothing was started. This is a bridge problem, not
+      // a browser problem, and the caller has to know which one it is.
+      return { ...disconnectedResult(), reason: 'chrome_running_extension_not_connected', autoLaunched: launchNote(launched),
+        howToResume: 'A Chrome process is already running, so starting another one would create a second profile and lose cookies. Reload the 自主浏览器 extension (or press Reconnect) instead.',
+        recommendedNextAction: 'Do not retry blindly: the browser is up, the bridge is not attached. Reload the extension, then repeat the call.' };
+    }
+    if (launched?.status === 'success') return { ...launched, dispatched: true, verified: false, autoLaunched: launchNote(launched) };
+    return { ...disconnectedResult(), launchAttempt: launched ?? null, autoLaunched: launchNote(launched ?? {}) };
+  }
+
+  function call(name, args, owner = null, context = {}) {
     const tool = validateCall(name, args);
     if (name === 'browser_agent_guide') return agentGuide();
     if (name === 'browser_capabilities') return capabilities();
@@ -905,7 +984,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       // as a dead service, so they restarted everything instead of just
       // clicking Reconnect. The extension now says so before it disconnects.
       if (extensionPaused) return { status: 'waiting', retryable: true, reason: 'extension_paused', suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true }, howToResume: 'Click the 自主浏览器 extension icon and press 重新连接 (Reconnect).', recommendedNextAction: 'The extension is paused by the user. Nothing will run until they resume it; do not keep retrying.', queue: queueSnapshot() };
-      return { status: 'waiting', retryable: true, reason: 'extension_disconnected', suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true }, recommendedNextAction: 'Keep the task alive. Ask the user to reconnect once if the bridge does not recover; do not open extension settings automatically.', queue: queueSnapshot() };
+      if (!context.revived && autoLaunchEnabled) return reviveBrowser({ name, args, owner, context });
+      return disconnectedResult();
     }
     if (queue.length >= 16) return { status: 'waiting', retryable: true, reason: 'queue_full', suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true }, recommendedNextAction: 'Keep the task alive and wait for queued browser jobs to drain before retrying.', queue: queueSnapshot() };
     if (WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) {

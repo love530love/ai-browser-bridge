@@ -14,7 +14,13 @@ export function loadConfig(create = false) {
       port: 19387,
       agentToken: randomBytes(32).toString('hex'),
       extensionToken: randomBytes(32).toString('hex'),
-      uploadRoots: []
+      uploadRoots: [],
+      // Off means every call that needs the extension while no browser is
+      // running comes back as extension_disconnected. On means the bridge starts
+      // the user's own Chrome and then runs that call. It is opt-in in the file
+      // rather than implied, so an operator can see and change the behaviour
+      // without reading the source.
+      autoLaunchBrowser: true
     }, null, 2), { flag: 'wx', mode: 0o600 });
   }
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
@@ -22,6 +28,7 @@ export function loadConfig(create = false) {
       !/^[a-f0-9]{64}$/.test(config.agentToken) || !/^[a-f0-9]{64}$/.test(config.extensionToken) ||
       (config.uploadRoots !== undefined && (!Array.isArray(config.uploadRoots) || config.uploadRoots.some(root => typeof root !== 'string' || !root))) ||
       (config.contentBoundaries !== undefined && typeof config.contentBoundaries !== 'boolean') ||
+      (config.autoLaunchBrowser !== undefined && typeof config.autoLaunchBrowser !== 'boolean') ||
       (config.requireAgentIdentity !== undefined && typeof config.requireAgentIdentity !== 'boolean')) {
     throw new Error('Invalid local configuration.');
   }

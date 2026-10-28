@@ -4,6 +4,22 @@
 
 ## 目标
 
+## 2026-10-28 接手增量（0.19.0）：浏览器没开时基座自己启动，并把原调用重跑一次
+
+- **「浏览器没开」不再是回答，而是动作**。需要扩展的调用在浏览器关着时不再直接返回 `extension_disconnected`：
+  **没有 chrome 进程时先启动浏览器，再重跑原调用**，结果带 `autoLaunched`。
+- **规则窄得刻意**：只在**一个 chrome 进程都不存在**时启动。浏览器在跑却没回连（扩展暂停 / worker 被回收）
+  再起一个就是**第二个 profile**，那是丢 cookie 而不是修好它 ⇒ 返回 `chrome_running_extension_not_connected`
+  并说明该重载扩展。
+- **旧 tabId 的死角一起拆掉**：重启后旧 `tabId` 必然失效，「tab not found」和「浏览器没开」是同一种阻滞。
+  现在返回 `tab_gone_after_browser_launch` + 当前标签列表 + 下一步（`browser_open` 会复用同 url 标签）。
+- **并发去重**：同时多个调用只启动一次，否则第二个会得到「已经在跑」——而那正是它自己刚启动的那个。
+- 配置 `autoLaunchBrowser`（setup 写 `true`，本机已补），`AIB_AUTO_LAUNCH=0` 关闭；**测试默认关闭**，
+  所以 385 条既有用例行为不变、跑测试不会真的弹浏览器。
+- **两条真机事实**：① 从**服务进程**启动的 Chrome 能活（工具调用里启动的会被沙箱连树回收）⇒ 这件事必须做在
+  服务里；② Chrome 的「Restore pages?」是**独立顶层窗口**，`browser_native_action invoke` 点它的 `Restore`
+  返回 `success / controlGone / settleMs 384`，标签 1 → 20 —— 原生通道点浏览器自己的对话框也是可行的。
+
 ## 2026-10-28 接手增量（0.18.1）：「重启了但版本没变」的三种状态
 
 - 用户重启 Chrome 后 `browserVersion` 仍是 154。证据链：最早一个 chrome.exe 从 18:23 活到 20:52、

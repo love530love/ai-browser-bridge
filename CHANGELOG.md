@@ -1,3 +1,14 @@
+## 0.19.0 — 2026-10-28（已部署，真实 Chrome 156 实测）
+
+- **「浏览器没开」不再是一个回答，而是一个动作**。此前任何需要扩展的调用在浏览器关着时都返回 `extension_disconnected` 让 agent 自己想办法——它要么放弃，要么去求人做一件基座自己就能做的事。现在这条路上多了一步：**没有 chrome 进程在跑时，先启动浏览器，再把它自己重跑一次**，结果里带 `autoLaunched`（启动了什么、连上没有、进程/窗口句柄）。实测：退出浏览器后直接发 `browser_read`，基座自己拉起 Chrome、扩展回连、原始调用完成。
+- **规则窄得刻意**：只在**一个 chrome 进程都不存在**时启动。浏览器在跑但没回连是另一个问题（扩展被暂停、worker 被回收），这时候再起一个实例是**第二个 profile**——那会丢 cookie 而不是修好它。这种情况返回 `chrome_running_extension_not_connected`，并说清楚"该重新加载扩展，不是该重试"。
+- **顺手拆掉第二个死角：旧 tabId**。浏览器重启后上一轮的 `tabId` 必然失效，而「tab not found」和「浏览器没开」是同一种阻滞。现在启动之后如果发现 `args.tabId` 不在当前标签里，直接返回 `tab_gone_after_browser_launch` + **当前标签列表** + 下一步（用 `browser_open` 打开目标地址，它本来就会复用同 url 的标签）。agent 拿到的是可以继续的信息，不是终点。
+- **并发不打架**：两个 agent 同时发调用时只会有一次启动（in-flight 去重），否则第二个会得到「已经在跑」——而那正是它自己刚启动的那个。
+- **默认开、但写进配置而不是隐式**：`config.json` 的 `autoLaunchBrowser`（`npm run setup` 会写 `true`，本机已补上），`AIB_AUTO_LAUNCH=0` 可临时关。**测试默认关闭**——`createBridge` 只在 `config.autoLaunchBrowser === true` 时启用，所以既有的 385 条用例行为一条没变，不会因为跑测试而真的弹出浏览器。
+- `browser_capabilities` 新增 `autoStart` 段，写清触发条件、只在无进程时启动、启动后重跑一次、旧 tabId 的处理、以及"不加任何 profile 参数，所以拿到的就是人双击图标时的那份 cookie 与登录态"。
+- **同一轮里还验证了两件真机事实**（156 上）：① `browser_launch` 从**服务进程**里启动 Chrome 能活下来（pid 57456，扩展回连 0.18.1，`extensionConnected: true`），而从工具调用里启动的会被沙箱连树回收——这解释了为什么这件事必须做在服务里而不是脚本里；② **Chrome 的「Restore pages?」是一个独立的顶层窗口**（标题就是 `Restore pages?`），`browser_native_action invoke` 点它的 `Restore` 按钮返回 `success / verified / controlGone / settleMs 384`，标签从 1 恢复到 20，全部是上一轮关掉的那批。这条顺带证明了「用原生通道点浏览器自己的对话框」是可行的，不只是菜单。
+- 全量单测 **389/389**（+4：启动后重跑原调用、已在跑时不重复启动、旧 tabId 给列表、默认关闭）。
+
 ## 0.18.1 — 2026-10-28（工具链；156 已装上但浏览器尚未由用户启动，**不宣称已适配**）
 
 - **查清了一次「重启了但版本没变」**。用户重启 Chrome 后 `browserVersion` 仍是 `154.0.8037.93`。三条独立证据说明浏览器进程根本没退出过：最早一个 `chrome.exe` 从 18:23 一直活到 20:52（2 小时 24 分）、磁盘 `chrome.exe` 的 FileVersion 仍是 154、而 Omaha 的 `ClientState.pv` 已经是 `156.0.8078.49`。

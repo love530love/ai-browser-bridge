@@ -447,3 +447,98 @@ test('desktop reload is one-shot, target-bound, auditable, and excludes concurre
   assert.ok(!auditJson.includes('"processId":17'));
   assert.ok(!auditJson.includes('Work - Chrome'));
 });
+
+// --- starting the browser instead of reporting it is not running -----------
+//
+// "The browser is not open" is a dead end for an agent: it either gives up or
+// asks a human to do something the bridge can do itself. These tests pin the
+// three shapes that decision can take, and the default that keeps it off when a
+// caller did not ask for it.
+
+async function extensionWithVersion(url, version) {
+  const ws = new WebSocket(url, { origin: `chrome-extension://${'a'.repeat(32)}` });
+  await once(ws, 'open');
+  const ready = once(ws, 'message');
+  ws.send(JSON.stringify({ type: 'hello', token: config.extensionToken, version }));
+  assert.equal(JSON.parse((await ready)[0]).type, 'ready');
+  return ws;
+}
+
+const autoLaunchOptions = (holder, launchChrome, extra = {}) => ({
+  autoLaunchBrowser: true,
+  launchConnectTimeoutMs: 4000,
+  desktopAdapter: { available: true, listChromeWindows: async () => ({ status: 'success', windows: [] }), launchChrome },
+  ...extra
+});
+
+test('a call that needs the extension starts the browser and then runs itself', async t => {
+  const holder = {};
+  let launches = 0;
+  const { b, wsUrl } = await setup(t, autoLaunchOptions(holder, async () => {
+    launches++;
+    // The extension dials back in only after the browser exists, which is the
+    // real ordering this path has to survive.
+    const ws = await extensionWithVersion(holder.wsUrl, (await import('../src/version.js')).VERSION);
+    ws.on('message', raw => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type !== 'command') return;
+      const result = msg.name === 'browser_tabs' ? [{ id: 5, title: 'started tab' }] : { read: { title: 'started by the bridge' } };
+      ws.send(JSON.stringify({ type: 'result', id: msg.id, result }));
+    });
+    return { status: 'success', reason: 'chrome_launched', dispatched: true, verified: true, chromePath: 'C:/Chrome/chrome.exe', processId: 4242, windowHandle: 99 };
+  }));
+  holder.wsUrl = wsUrl;
+
+  const result = await b.call('browser_read', { tabId: 5, agent: 'starter' });
+  assert.equal(result.read.title, 'started by the bridge');
+  assert.equal(result.autoLaunched.reason, 'chrome_launched');
+  assert.equal(result.autoLaunched.extensionConnected, true);
+  assert.equal(launches, 1);
+});
+
+test('a running browser with no bridge attached is not launched twice', async t => {
+  let launches = 0;
+  const { b } = await setup(t, autoLaunchOptions({}, async () => {
+    launches++;
+    return { status: 'not_dispatched', retryable: false, reason: 'chrome_already_running',
+      message: 'Chrome is already running; a second instance would be a second profile.' };
+  }));
+  const result = await b.call('browser_read', { tabId: 5, agent: 'starter' });
+  assert.equal(launches, 1);
+  assert.equal(result.status, 'waiting');
+  assert.equal(result.reason, 'chrome_running_extension_not_connected');
+  assert.equal(result.autoLaunched.reason, 'chrome_already_running');
+  assert.match(result.howToResume, /second profile/);
+});
+
+test('a tab id from before the restart is answered with the tabs that exist now', async t => {
+  const holder = {};
+  const { b, wsUrl } = await setup(t, autoLaunchOptions(holder, async () => {
+    const ws = await extensionWithVersion(holder.wsUrl, (await import('../src/version.js')).VERSION);
+    ws.on('message', raw => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === 'command' && msg.name === 'browser_tabs') {
+        ws.send(JSON.stringify({ type: 'result', id: msg.id, result: [{ id: 9, title: 'New Tab', url: 'https://example.test/' }] }));
+      }
+    });
+    return { status: 'success', reason: 'chrome_launched', dispatched: true, verified: true, chromePath: 'C:/Chrome/chrome.exe', processId: 4242, windowHandle: 99 };
+  }));
+  holder.wsUrl = wsUrl;
+
+  const result = await b.call('browser_read', { tabId: 5, agent: 'starter' });
+  assert.equal(result.status, 'waiting');
+  assert.equal(result.reason, 'tab_gone_after_browser_launch');
+  assert.equal(result.requestedTabId, 5);
+  assert.deepEqual(result.tabs.map(tab => tab.id), [9]);
+  assert.match(result.recommendedNextAction, /browser_open/);
+});
+
+test('auto start stays off unless it was asked for', async t => {
+  let launches = 0;
+  const { b } = await setup(t, {
+    desktopAdapter: { available: true, listChromeWindows: async () => ({ status: 'success', windows: [] }), launchChrome: async () => { launches++; return { status: 'success' }; } }
+  });
+  const result = await b.call('browser_read', { tabId: 5, agent: 'starter' });
+  assert.equal(launches, 0);
+  assert.equal(result.reason, 'extension_disconnected');
+});

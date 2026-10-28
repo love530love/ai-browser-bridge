@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.18.1**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.19.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.19.0 把「浏览器没开」从一个回答变成一个动作。此前任何需要扩展的调用在浏览器关着时都返回 `extension_disconnected`，让 agent 自己去求人——而这是基座自己就能做的事。现在**没有 chrome 进程在跑时，第一次需要扩展的调用会先启动浏览器，再把它自己重跑一次**，结果里带 `autoLaunched`（启动了谁、连上没有、进程与窗口句柄）。规则窄得刻意：只在**一个 chrome 进程都不存在**时启动；浏览器在跑却没回连是另一个问题（扩展被暂停、worker 被回收），再起一个实例等于**第二个 profile**，那是丢 cookie 而不是修好它，所以那种情况返回 `chrome_running_extension_not_connected` 并说明该重新加载扩展。顺手拆掉第二个死角：浏览器重启后旧 `tabId` 必然失效，现在启动后若发现该 id 不在当前标签里，直接返回 `tab_gone_after_browser_launch` + 当前标签列表 + 下一步，而不是一句「tab not found」。启动用服务进程完成（工具调用里起的 Chrome 会被沙箱连树回收，实测），参数不含任何 profile 标志，所以拿到的就是人双击图标时那份 cookie 与登录态。默认开，配置项 `autoLaunchBrowser`，`AIB_AUTO_LAUNCH=0` 可关；测试默认关闭。
 
 0.18.0 把 DevTools 的**打开与关闭**接了回来。0.9 撤下它时写明的两个前提是「绑定到目标窗口、可回读的原生动作」和「充分的负证据」，0.14.0 的 expand 与 0.16.0 的 invoke 把这两样补齐，这一轮把它们接成链路：`browser_devtools` 的 `open` / `close` 走浏览器自己的菜单（More tools → Developer tools），不合成 F12，**因此没有焦点竞态**。对外是「请求一个状态」而不是切换——菜单项本身是 toggle，所以先 observe，已在目标状态就 `dispatched:false` 什么都不派发；幂等性由此而来，这也是「`uncertain` 之后允许重试」在这里成立、在裸 invoke 上不成立的唯一原因。打开只认正证据（`devtools://` 文档 + ≥2 个面板 TabItem），关闭必须同时有负证据（走查完整 `partial:false` 且没有 DevTools 文档）——「没看到打开」本身也描述了「遍历提前放弃」。真机验收 `npm run test:devtools` 从「只能 PARTIAL」变成 **11/11**：`ensure-closed → open → open again（必须不派发）→ 选/重选 Console·Network·Elements → close` 全链自驱。
 
