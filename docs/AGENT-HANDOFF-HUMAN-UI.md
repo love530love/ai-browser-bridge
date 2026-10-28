@@ -4,16 +4,31 @@
 
 ## 目标
 
-2026-10-28 接手增量：当前磁盘基线已为 `8271b5a` / 0.13.0，下方历史版本数字不是当前部署证明。
-本轮认领原生 UI 控件状态证据，改动 `native-ui-snapshot` 的 PS/JS 与测试，
-补充 ExpandCollapse/Toggle/SelectionItem 状态、unknown 与不支持的区分和契约校验。
-定向快照/DevTools/desktop 测试 17/17，PS 解析通过；提交 `7678b29` 已推送 `origin/main`。
-随后已重启服务并重载当前 Chrome 扩展，doctor 10/10 通过；运行 buildId 与源码一致，扩展会话已更新。
-真实 Chrome 只读验收：`npm run test:capture` 9/9；`browser_desktop_windows` 找到唯一可见 Chrome
-窗口，`browser_native_snapshot` 返回 121 个控件、`partial=false`、`omittedDocuments=1`，并观察到
-`New Chrome available` 与用户资料按钮的 `expandCollapse=Collapsed`，以及当前 FlagOS 标签
-`selected=true`。本增量尚未执行 Expand/Collapse 写动作。
-下一步仍是基于精确原生控件身份实现 Expand/Collapse 单次动作和状态回读，不能把状态读取记成动作已完成。
+2026-10-28 接手增量（0.14.0）：磁盘基线 `85f2435` → 本轮新增 `browser_native_action`。
+原生 UI 从「状态可读」推进到「单个控件可写且可证」，工具数 68 → 69。
+
+- `browser_native_action({processId, windowHandle, ref, action, expect})`，`action` 只有
+  `expand` / `collapse`。**没有 Toggle**：toggle 派发两次回到原点，结果不确定时无法重试；
+  expand/collapse 构造上幂等（已在该状态则不派发，返回 `alreadyInState:true`）。
+- `expect` 必须重复至少一个从快照读到的属性（`name` 或 `automationId`），否则在校验层
+  就被拒——runtime ref 会被树重建复用，只有可重复的属性才是身份。
+- 证据：`stateBefore`/`stateAfter` 都由控件自己读出，派发后 1.5s 内轮询回读；pattern
+  不抛异常不算成功；`LeafNode` 在派发前拒绝；派发后读不回 → `uncertain`；状态没变 →
+  `failed/native_state_not_reached`，两者都不许重按。
+- 真机 `npm run test:native` **13/13**；单测 `test/native-ui-action.test.js` **10/10**。
+  实测：`All Bookmarks` Collapsed→Expanded（settleMs 161）→ 独立快照确认 → 45 个
+  MenuItem 可见 → Collapsed → 独立快照确认 → 未留下打开的菜单。
+- **实测修正一条旧结论**：Chrome 自绘菜单是浏览器窗口的**子 HWND**，展开时快照能看到
+  完整 `MenuBar/Menu/ControlType.MenuItem` 树（111 → 166 控件）。所以「不含 popup」
+  只对独立顶层窗口成立。这让「选菜单项」比原先设想的近得多。
+- 顺手修掉一个真机才暴露的缺陷：桌面目标「近期观察」TTL 30s 是**按墙钟**算的，而单次
+  UIA 遍历实测约 10s，连续三次调用就会在目标已被两次重新校验通过的情况下被拒。现在
+  重新校验成功即续期——校验本身就列了一次窗口并匹配了这对精确句柄，比调用方手里的
+  那次列新。
+
+下一步：**Invoke**。菜单项已在快照里，缺的是「绑定 MenuItem 的 ref 做单次 Invoke 并
+回读菜单是否关闭」。这是打开 DevTools 面板的真正入口，也是「改设置项」的第一块。
+Toggle 若要实现，必须先解决「重试会反转」——只暴露 SetState 式语义，不暴露裸 toggle。
 
 让 Agent 能通过当前用户已授权的 Chrome 界面完成工程师可人工执行的浏览器工作。页面 URL 前缀（包括 `chrome://`、`devtools://`、`chrome-extension://`）本身不是永久拒绝理由；应按真实执行表面选用扩展 DOM/Chrome API、CDP、Windows UI Automation、视觉/坐标或人工接管通路。用户/接入 Agent 负责任务意图与业务授权，基座负责可用能力、精确目标绑定、真实执行状态/证据、日志、技术异常处理与不确定结果不重放。
 
@@ -72,7 +87,14 @@
 
 代码改动后按这三步走，每一步都是可调用、可回读、有状态证据的能力，而不是人工操作：
 
+0. **推送用 `git push sshpush main`，不要用 `origin`**。两个远程指向同一仓库，但 https 的
+   `origin` 在非交互环境下会卡在凭据弹窗直到超时被 SIGTERM（推不上去，也不给错误内容）。
+   推完 sshpush 再 `git fetch origin` 同步 tracking ref，否则 `git status -sb` 会一直显示
+   `ahead 1`。`GIT_TERMINAL_PROMPT=0` 可以避免卡住。
 1. `node src/cli.js doctor` —— 看 `service-build-current`。红就说明运行的服务还是旧源码：停掉 `.local/server.pid` 里的进程再跑 `start.ps1`。**不要只看版本号**，版本相同但 buildId 不同也意味着没部署。
+   `stop.ps1` 偶发 `Service identity query timed out`（本机 WMI 不可用），可靠绕法是
+   `netstat -ano | grep 19387` 取 PID → `Stop-Process -Id <pid> -Force`；watchdog 会自动
+   拉起并加载新代码。
 2. `browser_reload_extension` 带 `confirmation: "reload_extension_once"` —— 一条调用完成「解析目标窗口 → 打开固定 ID 详情页并保留当前页 → 点 Reload → 观察新扩展会话与版本」，成功回 `verified: true` 与 `targetResolution`。不需要先手工跑 `browser_desktop_windows`。
 3. `node src/cli.js doctor` 应回到 10/10；需要真实浏览器行为证据时再跑 `npm run test:capture` / `npm run test:devtools`。
 

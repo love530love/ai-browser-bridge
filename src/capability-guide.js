@@ -112,11 +112,11 @@ const INTENTS = [
     why: 'Reads the live DOM; no foreground requirement.',
     backgroundSafe: true, prefer: 'browser_find_text before a full read on large pages.', fallback: READ },
   { id: 'chrome-internal', match: /chrome:\/\/|设置|扩展|证书|代理|settings|extensions|certificate|proxy/i,
-    tools: ['browser_protected_ui_plan', 'browser_desktop_windows', 'browser_native_snapshot'], focusRequired: true,
+    tools: ['browser_protected_ui_plan', 'browser_desktop_windows', 'browser_native_snapshot', 'browser_native_action'], focusRequired: true,
     why: 'Chrome internal pages are not ordinary DOM targets; they are driven through Windows UI Automation, which operates the real window and therefore needs it in front.',
     backgroundSafe: false,
-    prefer: 'browser_protected_ui_plan first to see which action is actually implemented, then browser_native_snapshot to bind a precise control.',
-    fallback: ['browser_protected_ui_plan', 'browser_native_snapshot', 'browser_desktop_windows'] },
+    prefer: 'browser_protected_ui_plan first to see which action is actually implemented, then browser_native_snapshot to bind a precise control. browser_native_action can expand or collapse one control by ref plus a repeated name/automationId; it cannot click menu items yet.',
+    fallback: ['browser_protected_ui_plan', 'browser_native_snapshot', 'browser_native_action', 'browser_desktop_windows'] },
   { id: 'multi-agent', match: /并发|多 ?agent|租约|排队|lease|concurrent|priority|优先级/i,
     tools: ['browser_claim_tab', 'browser_renew_tab', 'browser_release_tab', 'browser_queue_status'], focusRequired: false,
     why: 'Leases are answered by the service, never by the browser, so contention is resolved before anything is dispatched.',
@@ -132,7 +132,7 @@ const NOT_IMPLEMENTED = [
   { capability: 'edit a live script in place, the way Sources live-edit does', status: 'blocked_by_browser', note: 'Breakpoints, stepping, call-frame inspection and evaluation all work through browser_debugger. Rewriting a script\'s source in the running page does not, and this was measured rather than assumed: current Chrome answers Debugger.setScriptSource with ServerError "setScriptSource functionality no longer available", which V8 returns from an unconditional stub in V8DebuggerAgentImpl::setScriptSource before looking at any argument. browser_debugger action set_script_source is wired up and reports this as reason "script_edit_removed_by_v8" with blockedBy "v8_inspector" instead of a generic failure, so nothing retries it by mistake. The reachable substitute is action:"evaluate", which redefines a function or a global immediately - that changes behaviour but not the script text, its line numbers or its source map.' },
   { capability: 'replay a request straight out of a capture, with its original headers and body', status: 'not_implemented', note: 'browser_replay_request sends a request the caller describes. Replaying one that was captured is a different thing and is not wired up, because browser_devtools_capture deliberately drops headers, cookies and bodies: it is a read-only diagnostic, and turning it into a request archive would make every capture a secret store. Supply method, url, headers and body yourself.' },
   { capability: 'read IndexedDB records', status: 'not_implemented', note: 'browser_storage_read answers with structure only: databases, object stores, key paths and indexes. Reading records needs a cursor inside a transaction, which is page-context JavaScript, so it is browser_debugger action:"evaluate" work rather than a storage call; the reply carries a ready-to-use expression template for exactly that. One trap the template handles: indexedDB.open() on a name that does not exist CREATES that database, so a read must check indexedDB.databases() first - which is also why browser_storage_read refuses an unregistered name instead of opening it.' },
-  { capability: 'write Chrome settings, certificates or proxy', status: 'not_implemented', note: 'Planner and native snapshot exist; the write/read-back loop does not.' }
+  { capability: 'write Chrome settings, certificates or proxy', status: 'not_implemented', note: 'Planner, native snapshot and one native write exist; the read-modify-write loop for a setting does not. browser_native_action can expand or collapse a single native control and prove the new state, which is enough to open a menu and not enough to change a value. Invoke, Select, Toggle and Value patterns are not implemented yet, and none of them should be added without the same before/after evidence this one carries.' }
 ];
 
 const FOCUS_POLICY = {

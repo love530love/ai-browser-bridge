@@ -46,7 +46,9 @@ export function protectedUiPlan({ url = '', action = 'observe', target = '', des
   const actionTool = {
     reload_extension: 'browser_reload_extension',
     observe_devtools: 'browser_devtools',
-    select_devtools_panel: 'browser_devtools'
+    select_devtools_panel: 'browser_devtools',
+    expand_native_control: 'browser_native_action',
+    collapse_native_control: 'browser_native_action'
   }[String(action)];
   const supportedDesktopAction = !!actionTool && implementedActions.has(String(action));
   const executableHere = protectedPage && supportedDesktopAction;

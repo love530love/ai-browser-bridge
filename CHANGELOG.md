@@ -1,3 +1,16 @@
+## 0.14.0 — 2026-10-28（已部署，真实 Chrome 实测）
+
+- **原生 UI 从「状态可读」推进到「单个控件可写且可证」**：新增 `browser_native_action`（工具 68 → 69），`action` 只有 `expand` / `collapse`。0.13.0 能读出 121 个原生控件的 `expandCollapse` 状态，但读状态不是写动作，两者绝不能混为一谈——所以这一轮只做一个写，并把它的证据做到位。
+- **刻意不提供 Toggle**。这是 F12 那条教训的直接应用：toggle 派发两次就回到原点，所以「结果不确定」时**根本无法重试**。expand/collapse 是**构造上幂等**的——目标状态已经成立时不派发任何东西，直接返回 `alreadyInState:true` 与它读到的状态。只有这样的语义才能让「不确定之后重试一次」变成安全指令，而不是赌博。
+- **ref 不是身份**。runtime ref 是本次观察的 id，树重建后可能被别的控件复用。所以 `expect` 必须重复至少一个从快照读到的属性（`name` 或 `automationId`，可选 `role`），三个都比对，任一不符即 `native_control_identity_mismatch` 且**不派发**。只给 `role` 的调用在校验层就被拒（`a ref alone is not an identity`），连桌面互斥都不会占用。
+- **证据链**：`stateBefore` 由控件自己读出；派发后 1.5s 内轮询回读（菜单有动画），`stateAfter` 也是控件自己读出的。`success` 只表示「读回了请求的状态」——pattern 调用不抛异常**不算**成功。`PartiallyExpanded` 计为 expand 成功（真的展开了，只是子项没全显）；`LeafNode` 在派发**之前**就拒绝（它根本没有可展开内容）；派发后读不回来 → `uncertain`；派发后状态没变 → `failed/native_state_not_reached`，两者都不许重按。校验层还钉住一条：**`failed` 结果不许携带它声称没达到的那个状态**。
+- **没有焦点竞态**。走的是绑定到元素的 `ExpandCollapsePattern`，不是 `SendKeys('{F12}')`，所以不存在「检查焦点」与「按键」之间的 TOCTOU。代价是它打开的菜单**可能**夺取焦点，但派发本身不依赖前台。脚本里没有任何 `SendKeys` / `SetForegroundWindow` / `WScript.Shell`，这一点由单测按源码断言钉住，防止后人改回去。
+- **实测修正一条旧结论**：Chrome 自己画的菜单是浏览器窗口的**子 HWND**，在 UIA control view 里是窗口的后代，所以菜单展开时快照**能看到**完整的 `MenuBar / Menu / ControlType.MenuItem` 树（实测 111 → 166 个控件，其中 45 个 `MenuItem`，均带 ref）。「不含 popup」只对独立顶层窗口成立。这让「选菜单项」这一步比原先设想的近得多，下一条执行链因此从「先做 owner 关联」改成「直接做 Invoke」。
+- **顺手修掉一个真机才暴露的缺陷**：桌面目标「近期观察」的 30s 窗口是按墙钟算的，而单次 UIA 遍历实测约 10s（111 个控件），连续三次调用就会在目标**已经被两次重新校验通过**的情况下被第三次拒掉。现在重新校验成功即续期——那次校验本身就列了一遍可见窗口并匹配了这对精确句柄，比调用方手里的那次列更新。`test/native-ui-action.test.js` 里有一条负控制（不调用就会真的过期）和一条续期用例。
+- 新增 `scripts/native-ui-action.ps1`（遍历预算与 `native-ui-snapshot.ps1` 完全一致：同一个 walker、同样排除 Document 与 offscreen、同样 400 行 / 3000ms / 深度 32，否则 ref 可能因为预算不同而找不到）、`src/native-ui-action.js`、`test/native-ui-action.test.js`（10 条）、`test/live-native-action.js`（`npm run test:native`）。
+- 真机 `npm run test:native` **13/13**：不存在的 ref 与名字不符的 ref 都 `not_dispatched`；只给 role 在校验层被拒；`collapse` 打在已折叠的控件上返回 `dispatched:false`；`expand` 让 `All Bookmarks`（view_1026）Collapsed→Expanded（settleMs 161）并由**独立快照**确认为 Expanded；展开期间 45 个 MenuItem 可见；`collapse` 回到 Collapsed 并由独立快照确认；结束时窗口里没有任何打开的菜单。
+- 全量单测 **371/371**（56 个测试文件全部有贡献，skipped=0）；`doctor` 10/10 全绿；扩展与服务同为 0.14.0；工具数 68 → 69。
+
 ## 0.13.0 — 2026-10-27（已部署，本机实测）
 
 - **`browser_otp_fetch` 的「时效」做成证据，而不是过滤器**。刻意不做 `sinceMinutes`：时区猜错、locale 不认识、或者一行写着「昨天 23:58」，都会**静默藏掉那个能用的码**，而回复只会说「没找到码」——和「邮箱里确实没有」长得一模一样，代价是调用方去重新申请、白烧一次频控。现在每个候选带 `ageHint`：`kind` 为 `just_now / minutes / hours / days / weeks_or_more / absolute_date / clock_only / not_stated`，`text` 是页面自己的原话，中英文都认（`刚刚 / 3分钟前 / yesterday / 3 weeks ago`）。**裸 `14:32` 单独归为 `clock_only`**，因为那可能是今天也可能是别的日子，猜成「今天」正是这个字段要避免的静默推断。

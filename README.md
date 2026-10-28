@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.13.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.14.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.14.0 让原生 Chrome UI 从「状态可读」走到「单个控件可写且可证」：`browser_native_action` 只做 `expand` / `collapse`，**故意没有 Toggle**——toggle 派发两次回到原点，所以「结果不确定」时根本无法重试；而 expand/collapse 构造上幂等（已在该状态就不派发，返回 `alreadyInState:true`），这才让「不确定之后重试一次」变成安全指令。`ref` 不算身份，必须再重复一个 `name` 或 `automationId`，不符即拒绝且不派发。成功只认「从控件自己读回的状态」，pattern 不抛异常不算成功。它走绑定到元素的 `ExpandCollapsePattern`，不是 `SendKeys('{F12}')`，因此没有焦点 TOCTOU。实测还纠正了一条旧结论：Chrome 自绘菜单是窗口的**子 HWND**，展开时快照能看到完整的 `MenuItem` 树（111 → 166 控件、45 个菜单项），所以「不含 popup」只对独立顶层窗口成立。真机 `npm run test:native` 13/13。
 
 0.13.0 只改一件事，但它是个反复被提的坑：`browser_otp_fetch` 要不要按「几分钟内」过滤。答案是**不要**——时区猜错、locale 不认识、或者一行写着「昨天 23:58」，都会静默藏掉那个能用的码，而回复只会说「没找到码」，和「邮箱里确实没有」长得一模一样。所以改成**证据**：每个候选带 `ageHint`（`just_now / minutes / hours / days / weeks_or_more / absolute_date / clock_only / not_stated` + 页面原话），并把这个理由写进返回值本身。
 
@@ -235,7 +237,10 @@ node src/cli.js call browser_tabs
 npm test
 npm run test:e2e
 npm run test:bench
+npm run test:native
 ```
+
+`npm run test:native` 是**唯一会真的操作你窗口的验收**：它在你的 Chrome 里展开一个菜单按钮、用独立快照确认、再折叠回去，结束时不留打开的菜单。它只挑浏览器自己画的菜单（书签 / 应用菜单），不碰扩展工具栏按钮——那会运行别人的代码。拒绝路径（不存在的 ref、名字不符的 ref、只给 role 的 ref）全部不派发。没有可用的菜单按钮时它报 `BLOCKED` 并以退出码 2 结束，那不是通过。
 
 `npm run test:bench` 是**能力之外的另一种验收**：5 个任务 × 3 种调用风格（blind / guarded / recipe），度量「一个读不懂页面的调用方能不能把事做完、会不会弄坏东西」，输出完成率、确认率、步数与危险动作数。它不调用任何模型——注入的是失败模式，不是推理能力。数字和「这个套件不证明什么」都写在 [调研文档第 5 节](docs/AGENT-ROBUSTNESS-RESEARCH.md)。
 

@@ -69,7 +69,7 @@ function withContentBoundaries(result) {
   }
   return next;
 }
-export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS } = {}) {
+export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000 } = {}) {
   config = { ...config, uploadRoots: config.uploadRoots ?? [] };
   let extension = null;
   let current = null;
@@ -80,7 +80,6 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let lease = null;
   let desktopOperation = null;
   const observedDesktopTargets = new Map();
-  const desktopTargetTtlMs = 30000;
   let extensionVersion = null;
   const desktopAdapter = suppliedDesktopAdapter ?? createDesktopAdapter({ scriptPath: join(ROOT, 'scripts', 'reload-extension.ps1') });
   const maintenance = createMaintenanceStore({ file: maintenanceStateFile });
@@ -167,8 +166,11 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     protectedUi: {
       status: desktopAdapter.available ? 'partial' : 'unavailable',
       channels: desktopAdapter.available ? ['windows_uia'] : [],
-      implementedActions: desktopAdapter.available ? ['list_chrome_windows', 'reload_extension', ...(typeof desktopAdapter.devtools === 'function' ? ['observe_docked_devtools', 'select_docked_devtools_panel'] : [])] : [],
-      notImplemented: ['chrome_settings_changes', 'devtools_script_execution', 'extension_install_or_remove', 'browser_data_access'],
+      implementedActions: desktopAdapter.available ? ['list_chrome_windows', 'reload_extension',
+        ...(typeof desktopAdapter.devtools === 'function' ? ['observe_docked_devtools', 'select_docked_devtools_panel'] : []),
+        ...(typeof desktopAdapter.nativeSnapshot === 'function' ? ['read_native_controls'] : []),
+        ...(typeof desktopAdapter.nativeAction === 'function' ? ['expand_native_control', 'collapse_native_control'] : [])] : [],
+      notImplemented: ['chrome_settings_changes', 'devtools_script_execution', 'extension_install_or_remove', 'browser_data_access', 'invoke_native_menu_item', 'toggle_native_control'],
       pages: ['chrome://extensions', 'chrome://settings', 'chrome://inspect', 'chrome-extension://*'],
       confirmationModel: 'The fixed confirmation field is a caller attestation; the service cannot independently verify human approval.',
       modelRequired: false, arbitraryCommands: false
@@ -677,9 +679,20 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         return { status: 'denied', retryable: false, reason: 'chrome_target_no_longer_visible', dispatched: false,
           message: 'The selected processId/windowHandle pair is no longer a visible Chrome window. List windows and reconfirm the target.' };
       }
+      // The check above just listed the visible Chrome windows and matched this
+      // exact pair, which is fresher evidence than the listing the caller used.
+      // Renewing the window here is therefore not a weakening: without it, three
+      // consecutive UI Automation calls can exceed the ttl on their own latency
+      // alone and the third is refused for a target that was verified twice in
+      // the same minute. Measured live: 111-control walks at roughly 10s each.
+      observedDesktopTargets.set(targetKey, Date.now());
       if (name === 'browser_native_snapshot') {
         if (typeof desktopAdapter.nativeSnapshot !== 'function') return { status: 'unavailable', reason: 'native_snapshot_unavailable', dispatched: false };
         return desktopAdapter.nativeSnapshot(args);
+      }
+      if (name === 'browser_native_action') {
+        if (typeof desktopAdapter.nativeAction !== 'function') return { status: 'unavailable', reason: 'native_action_unavailable', dispatched: false, retryable: false };
+        return desktopAdapter.nativeAction(args);
       }
       if (name === 'browser_devtools') {
         if (typeof desktopAdapter.devtools !== 'function') return { status: 'unavailable', reason: 'devtools_adapter_unavailable', dispatched: false, retryable: false };
@@ -848,7 +861,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     // flows exist.
     if (name === 'browser_recipe_list') return recipeListCall(name, args);
     if (name === 'browser_recipe_delete') return recipeDeleteCall(name, args);
-    if (name === 'browser_desktop_windows' || name === 'browser_devtools' || name === 'browser_native_snapshot') return desktopCall(name, args);
+    if (name === 'browser_desktop_windows' || name === 'browser_devtools' || name === 'browser_native_snapshot' ||
+        name === 'browser_native_action') return desktopCall(name, args);
     if (name === 'browser_storage_write' && args.confirmation !== STORAGE_WRITE_CONFIRMATION) return denyUnconfirmed(name, args, STORAGE_WRITE_CONFIRMATION);
     if (name === 'browser_replay_request' && args.confirmation !== REPLAY_REQUEST_CONFIRMATION) return denyUnconfirmed(name, args, REPLAY_REQUEST_CONFIRMATION);
     if (name === 'browser_recipe_run' && args.confirmation !== RECIPE_RUN_CONFIRMATION) return denyUnconfirmed(name, args, RECIPE_RUN_CONFIRMATION);

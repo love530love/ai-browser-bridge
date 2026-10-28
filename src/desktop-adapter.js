@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { delimiter, join } from 'node:path';
 import { VERSION } from './version.js';
 import { nativeUiSnapshot } from './native-ui-snapshot.js';
+import { nativeUiAction } from './native-ui-action.js';
 
 export const RELOAD_EXTENSION_CONFIRMATION = 'reload_extension_once';
 export const BRIDGE_EXTENSION_ID = 'mmopbppoabmhliflinadkgnedjpmbgig';
@@ -201,8 +202,13 @@ export function createDesktopAdapter({
       reason: 'devtools_result_unverified', dispatched: action !== 'observe' && result.spawned ? null : false, retryable: false };
   }
   const implementedActions = available
-    ? ['reload_extension', 'launch_chrome', 'observe_devtools', 'select_devtools_panel']
+    ? ['reload_extension', 'launch_chrome', 'observe_devtools', 'select_devtools_panel',
+      'expand_native_control', 'collapse_native_control']
     : [];
   return { available, implementedActions, listChromeWindows, reloadExtension, launchChrome, devtools,
-    nativeSnapshot: target => nativeUiSnapshot(target, { platform }) };
+    nativeSnapshot: target => nativeUiSnapshot(target, { platform }),
+    // The service passes one flat argument object, so the target fields and the
+    // action fields arrive together; split them here rather than making every
+    // caller reshape the same object.
+    nativeAction: args => nativeUiAction(args, { ref: args.ref, action: args.action, expect: args.expect, platform }) };
 }

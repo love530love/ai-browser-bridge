@@ -38,6 +38,17 @@ export const TOOLS = [
     processId: { type: 'integer', minimum: 1, maximum: 2147483647 },
     windowHandle: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, agent
   }, ['processId', 'windowHandle'], true),
+  tool('browser_native_action', 'Expand or collapse exactly one native Chrome control, then read the resulting state back from the control itself. Pass a ref from a recent browser_native_snapshot together with at least one identity attribute (name or automationId, optionally role) that you also read from that snapshot: a runtime ref alone is not accepted, because ids can be reused by a different control after the tree is rebuilt. Only expand and collapse exist. Toggle is deliberately not implemented - a toggle dispatched twice returns the control to where it started, so an uncertain result could not be retried, while expand and collapse are idempotent and a request for the state the control is already in dispatches nothing and returns alreadyInState:true. success means the new state was read back (stateBefore/stateAfter); a pattern call that returned without raising is not success. This drives UIA ExpandCollapsePattern bound to the element, so unlike a synthesised F12 there is no global focus race, but the menu it opens may take focus. It does not click menu items: an opened Chrome menu is a separate popup window that browser_native_snapshot does not cover. After uncertain, take a new snapshot instead of repeating. Invoke, Select, Toggle, Value and Scroll are not implemented.', {
+    processId: { type: 'integer', minimum: 1, maximum: 2147483647 },
+    windowHandle: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    ref: text(120),
+    action: { type: 'string', enum: ['expand', 'collapse'] },
+    expect: {
+      type: 'object', minProperties: 1, additionalProperties: false,
+      properties: { name: text(300), role: text(80), automationId: text(200) }
+    },
+    agent
+  }, ['processId', 'windowHandle', 'ref', 'action', 'expect']),
   tool('browser_devtools', 'Observe the existing Chrome window and select a panel in already-open docked DevTools. First enumerate browser_desktop_windows. select_panel requires the exact current address as expectedUrl. Opening DevTools is not exposed until a target-window-bound Chrome UIA menu action can be verified; this avoids sending a global F12 shortcut during a focus race. Detached DevTools target binding and Console/script execution are not yet implemented. Agent decides user intent and authorization; this tool handles target verification and serialization.', {
     action: { type: 'string', enum: ['observe', 'select_panel'] },
     processId: { type: 'integer', minimum: 1, maximum: 2147483647 },
@@ -406,6 +417,26 @@ export function validateCall(name, args) {
       if (!field || typeof value !== 'string' || value.length > field.maxLength || value.length < (field.minLength ?? 0) || (key !== 'valueMatches' && !value.trim())) {
         throw new Error(`Invalid expect condition: ${key}`);
       }
+    }
+  }
+  if (name === 'browser_native_action') {
+    const expect = args.expect;
+    const expectSchema = s.properties.expect;
+    if (!expect || typeof expect !== 'object' || Array.isArray(expect) || !Object.keys(expect).length) {
+      throw new Error(`expect must be a non-empty identity object. ${argSummary(name, s)}`);
+    }
+    for (const [key, value] of Object.entries(expect)) {
+      const field = Object.hasOwn(expectSchema.properties, key) ? expectSchema.properties[key] : null;
+      if (!field || typeof value !== 'string' || value.length < 1 || value.length > field.maxLength) {
+        throw new Error(`Invalid expect identity: ${key}. Allowed: ${Object.keys(expectSchema.properties).join(' | ')}`);
+      }
+    }
+    // A runtime ref identifies a control only while the tree that produced it
+    // is unchanged. Requiring one repeatable attribute turns "the ref I
+    // remembered" into "the control I described", which is the only thing that
+    // can be checked after the tree is rebuilt.
+    if (!expect.name && !expect.automationId) {
+      throw new Error('expect must repeat name or automationId from the snapshot; a ref alone is not an identity');
     }
   }
   if (args.url) {
