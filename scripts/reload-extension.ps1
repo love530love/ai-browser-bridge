@@ -31,7 +31,11 @@ public static class NativeWindow {
     EnumWindows((hWnd, lParam) => {
       uint processId;
       GetWindowThreadProcessId(hWnd, out processId);
-      if ((targetProcessId == 0 || processId == (uint)targetProcessId) && IsWindowVisible(hWnd)) handles.Add(hWnd);
+      // A titleless window is not a browser window. An open Chrome menu can be
+      // its own top-level window owned by chrome.exe, and offering it as a
+      // target is how a caller ends up binding a ref inside a popup that
+      // vanishes the moment the menu closes.
+      if ((targetProcessId == 0 || processId == (uint)targetProcessId) && IsWindowVisible(hWnd) && WindowTitle(hWnd).Length > 0) handles.Add(hWnd);
       return true;
     }, IntPtr.Zero);
     return handles.ToArray();

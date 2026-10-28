@@ -23,7 +23,11 @@
 - **下一步**：invoke 能打开 `chrome://` 面，但 `browser_tabs` 过滤非 http(s) 标签，
   所以基座看不见也关不掉自己造成的那个标签（实测已留下一个）。正解：`browser_tabs`
   报告被过滤标签的数量与 id（不含标题/内容），`browser_close` 能关这些 id。
-- 全量单测 **374/374**；工具数仍 69；`scripts/native-ui-action.ps1` AST `parse-ok`。
+- **部署后复验抓到两件事**：① 应用菜单打开时会作为一个**标题为空的顶层窗口**出现在
+  `browser_desktop_windows` 里，绑上去的 ref 会在菜单关闭瞬间失效——枚举现在要求标题非空
+  （实测修好后菜单打开期间只返回真窗口）。② Zoom 的两个菜单项**不关闭菜单**，
+  所以 `control_gone` 对它们永远不成立，稳定返回 `uncertain`（设计正确，但划出了能力边界）。
+- 全量单测 **375/375**；工具数仍 69；`scripts/native-ui-action.ps1` AST `parse-ok`。
 
 ## 2026-10-28 接手增量（0.15.0）：Chrome 156 适配轮
 

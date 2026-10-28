@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { WebSocket } from 'ws';
 import { createBridge } from '../src/server.js';
 import { VERSION } from '../src/version.js';
@@ -135,4 +136,14 @@ test('a reload that is never observed is uncertain, not success', async t => {
   assert.equal(result.reason, 'extension_reload_not_observed');
   assert.equal(result.verified, false);
   assert.equal(result.dispatched, true, 'it was dispatched; that is exactly why it cannot be called success');
+});
+
+test('window enumeration never offers a titleless popup as a Chrome window', () => {
+  // An open Chrome menu can be its own top-level window owned by chrome.exe and
+  // carrying no title. Listing it as "a Chrome window" is how a caller binds a
+  // ref inside a popup that disappears the moment the menu closes. Measured
+  // live: with the app menu open, enumeration returned the real window plus a
+  // second titleless handle.
+  const source = readFileSync(new URL('../scripts/reload-extension.ps1', import.meta.url), 'utf8');
+  assert.match(source, /IsWindowVisible\(hWnd\) && WindowTitle\(hWnd\)\.Length > 0/);
 });
