@@ -2,10 +2,11 @@ param(
   [Parameter(Mandatory)][int]$ChromeProcessId,
   [Parameter(Mandatory)][long]$ChromeWindowHandle,
   [Parameter(Mandatory)][string]$Ref,
-  [Parameter(Mandatory)][ValidateSet('expand', 'collapse')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('expand', 'collapse', 'invoke')][string]$Action,
   [string]$ExpectName = '',
   [string]$ExpectRole = '',
-  [string]$ExpectAutomationId = ''
+  [string]$ExpectAutomationId = '',
+  [ValidateSet('', 'control_gone')][string]$ExpectAfterInvoke = ''
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -38,37 +39,50 @@ try {
   # cap. A ref only resolves if the same traversal that produced it runs again,
   # so a control that was visible in the snapshot cannot be missed here because
   # of a different budget.
+  #
+  # It is a function because invoke needs a second walk after dispatch, and a
+  # post-check with different exclusions would not be evidence about the same
+  # tree. Pass TargetRef '' to count identity matches instead of resolving a ref.
   $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
   $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-  $queue = [Collections.Generic.Queue[object]]::new()
-  $queue.Enqueue(@{ element = $root; depth = 0 })
-  $found = $null
-  $visited = 0
-  $timer = [Diagnostics.Stopwatch]::StartNew()
-  while ($queue.Count -gt 0) {
-    if ($visited -ge 400 -or $timer.ElapsedMilliseconds -ge 3000) { break }
-    $entry = $queue.Dequeue()
-    $element = $entry.element
-    $current = $element.Current
-    if ($current.ControlType -eq [System.Windows.Automation.ControlType]::Document) { continue }
-    if ($current.IsOffscreen) { continue }
-    $visited++
-    if (($element.GetRuntimeId() -join '.') -eq $Ref) { $found = $element; break }
-    if ($entry.depth -ge 32) { continue }
-    $child = $walker.GetFirstChild($element)
-    while ($child) {
-      if ($queue.Count -ge 800 -or $timer.ElapsedMilliseconds -ge 3000) { break }
-      $queue.Enqueue(@{ element = $child; depth = ($entry.depth + 1) })
-      $child = $walker.GetNextSibling($child)
+  function Scan-Tree([string]$TargetRef, [string]$IdentityName, [string]$IdentityRole, [string]$IdentityAutomationId) {
+    $queue = [Collections.Generic.Queue[object]]::new()
+    $queue.Enqueue(@{ element = $root; depth = 0 })
+    $byRef = $null
+    $identityMatches = 0
+    $visited = 0
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ($queue.Count -gt 0) {
+      if ($visited -ge 400 -or $timer.ElapsedMilliseconds -ge 3000) { break }
+      $entry = $queue.Dequeue()
+      $element = $entry.element
+      $current = $element.Current
+      if ($current.ControlType -eq [System.Windows.Automation.ControlType]::Document) { continue }
+      if ($current.IsOffscreen) { continue }
+      $visited++
+      if ($TargetRef -ne '' -and ($element.GetRuntimeId() -join '.') -eq $TargetRef) { $byRef = $element; break }
+      if ($IdentityName -ne '' -and [string]$current.Name -eq $IdentityName -and $current.ControlType.ProgrammaticName -eq $IdentityRole -and [string]$current.AutomationId -eq $IdentityAutomationId) { $identityMatches++ }
+      if ($entry.depth -ge 32) { continue }
+      $child = $walker.GetFirstChild($element)
+      while ($child) {
+        if ($queue.Count -ge 800 -or $timer.ElapsedMilliseconds -ge 3000) { break }
+        $queue.Enqueue(@{ element = $child; depth = ($entry.depth + 1) })
+        $child = $walker.GetNextSibling($child)
+      }
     }
+    return @{ element = $byRef; identityMatches = $identityMatches; scanned = $visited }
   }
+
+  $scan = Scan-Tree $Ref '' '' ''
+  $found = $scan.element
   if ($null -eq $found) {
-    Emit @{ status = 'not_dispatched'; reason = 'native_control_not_found'; dispatched = $false; retryable = $true; scanned = $visited
+    Emit @{ status = 'not_dispatched'; reason = 'native_control_not_found'; dispatched = $false; retryable = $true; scanned = $scan.scanned
       message = 'No visible native control currently has this runtime ref. Take a new snapshot; the window may have changed since the ref was issued. Nothing was dispatched.' }
   }
 
+  $fullName = [string]$found.Current.Name
   $observed = @{
-    name = ([string]$found.Current.Name).Substring(0, [Math]::Min(300, ([string]$found.Current.Name).Length))
+    name = $fullName.Substring(0, [Math]::Min(300, $fullName.Length))
     role = $found.Current.ControlType.ProgrammaticName
     automationId = [string]$found.Current.AutomationId
     enabled = $found.Current.IsEnabled
@@ -85,9 +99,71 @@ try {
       mismatched = $mismatched; observed = $observed
       message = 'The control at this ref is not the control the caller described. Take a new snapshot and bind the current ref. Nothing was dispatched.' }
   }
-
-  $patternId = [System.Windows.Automation.ExpandCollapsePattern]::Pattern
   $patterns = @($found.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
+
+  # --- invoke: choose a menu item -------------------------------------------
+  # Unlike expand/collapse this is NOT idempotent: choosing the same item twice
+  # runs its command twice. So it is only offered together with a declared
+  # post-condition, and the only one this layer can actually observe is that the
+  # chosen item left the tree (which is what closing a menu does). "The pattern
+  # call returned" is not evidence that a command ran, so it can never be the
+  # success criterion on its own.
+  if ($Action -eq 'invoke') {
+    if ($ExpectAfterInvoke -eq '') {
+      Emit @{ status = 'not_dispatched'; reason = 'native_post_condition_required'; dispatched = $false; retryable = $false
+        message = 'invoke requires a declared post-condition. Without one there is nothing to compare the dispatch against, and a successful pattern call is not evidence the command ran.' }
+    }
+    $invokePatternId = [System.Windows.Automation.InvokePattern]::Pattern
+    if ($patterns -notcontains $invokePatternId.ProgrammaticName) {
+      Emit @{ status = 'not_dispatched'; reason = 'native_pattern_not_supported'; dispatched = $false; retryable = $false
+        patterns = $patterns; observed = $observed
+        message = 'This control does not support InvokePattern, so no invoke was attempted. Menu items support it; plain labels and containers do not.' }
+    }
+    if (-not $found.Current.IsEnabled) {
+      Emit @{ status = 'not_dispatched'; reason = 'native_control_disabled'; dispatched = $false; retryable = $true
+        observed = $observed
+        message = 'The control is disabled. Invoking it would do nothing, and reporting that as an uncertain outcome would invite a pointless retry.' }
+    }
+    try {
+      $invokePattern = $found.GetCurrentPattern($invokePatternId)
+      $invokePattern.Invoke()
+    } catch {
+      # The call raised, so whether the provider started the command is unknown.
+      Emit @{ status = 'uncertain'; dispatched = $null; verified = $false; reason = 'native_invoke_dispatch_threw'
+        postCondition = $ExpectAfterInvoke; observed = $observed
+        error = ([string]$_.Exception.Message).Substring(0, [Math]::Min(200, ([string]$_.Exception.Message).Length))
+        message = 'The invoke call raised. Do not invoke again: the command may already be running. Take a new snapshot and inspect the window.' }
+    }
+    # Menus animate and the tree is rebuilt as they close, so a single miss is
+    # not proof of absence. Require the identity to be absent from two
+    # consecutive walks before calling the post-condition observed - otherwise a
+    # re-render that hands out new runtime ids would look like "the item went
+    # away" while the menu is still open.
+    $settle = [Diagnostics.Stopwatch]::StartNew()
+    $absentStreak = 0
+    $lastScan = $null
+    $gone = $false
+    while ($settle.ElapsedMilliseconds -lt 2500) {
+      $lastScan = Scan-Tree '' $fullName $observed.role $observed.automationId
+      if ($lastScan.identityMatches -eq 0) {
+        $absentStreak++
+        if ($absentStreak -ge 2) { $gone = $true; break }
+      } else { $absentStreak = 0 }
+      Start-Sleep -Milliseconds 150
+    }
+    if ($gone) {
+      Emit @{ status = 'success'; dispatched = $true; verified = $true; controlGone = $true
+        postCondition = $ExpectAfterInvoke; settleMs = $settle.ElapsedMilliseconds; observed = $observed
+        message = 'The invoke call returned and the control is no longer present in the window, which is the post-condition the caller declared. This proves the item was chosen; it does not prove the command it runs succeeded.' }
+    }
+    Emit @{ status = 'uncertain'; dispatched = $true; verified = $false; reason = 'native_invoke_effect_unobserved'
+      controlGone = $false; postCondition = $ExpectAfterInvoke; settleMs = $settle.ElapsedMilliseconds
+      observed = $observed; scanned = $lastScan.scanned
+      message = 'The invoke call returned but the control is still in the tree, so the declared post-condition was not observed. Do not invoke again: running the same command twice is not recoverable by retrying. Inspect the window first.' }
+  }
+
+  # --- expand / collapse -----------------------------------------------------
+  $patternId = [System.Windows.Automation.ExpandCollapsePattern]::Pattern
   if ($patterns -notcontains $patternId.ProgrammaticName) {
     Emit @{ status = 'not_dispatched'; reason = 'native_pattern_not_supported'; dispatched = $false; retryable = $false
       patterns = $patterns; observed = $observed

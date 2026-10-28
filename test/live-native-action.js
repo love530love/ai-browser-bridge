@@ -19,6 +19,13 @@
 //      raising is not success.
 //   4. The window is left exactly as it was found. The menu that is opened is
 //      closed again, and the final snapshot proves it.
+//   5. invoke chooses one menu item, and "success" only ever means the item
+//      left the tree. A pattern call that returned is not evidence a command
+//      ran, so the run also checks the window title afterwards: choosing "New
+//      tab" must produce a window that says New tab. That is the only step here
+//      that changes anything, and its residue is one new tab which the bridge
+//      cannot see (chrome:// tabs are filtered out of browser_tabs) and
+//      therefore cannot close - so it is reported instead of hidden.
 //
 // It also records one fact that was assumed wrongly until it was measured: an
 // open Chrome menu is a child of the browser window in the UIA control view, so
@@ -39,6 +46,7 @@ const call = async (name, args = {}) => (await request('/call', { name, argument
 const startedAt = Date.now();
 const step = message => console.error(`[${((Date.now() - startedAt) / 1000).toFixed(1)}s] ${message}`);
 const rows = [];
+const skipped = [];
 const record = (name, expected, actual, detail) => rows.push({ name, expected, actual, ok: expected === actual, detail });
 
 const status = await call('browser_queue_status', {}).catch(error => ({ error: error.message }));
@@ -137,6 +145,67 @@ try {
   const closedButton = closed.controls.find(control => control.name === picked.name && control.state?.expandCollapse);
   record('an independent snapshot agrees the menu is closed again', picked.state.expandCollapse, closedButton?.state?.expandCollapse);
   record('no menu was left open', 0, closed.controls.filter(control => control.role === 'ControlType.Menu').length);
+
+  // --- invoke: choose one menu item ---------------------------------------
+  // Only an item whose command is harmless and whose effect shows up in the
+  // window title is eligible. "New tab" qualifies; "Exit", "Print", "Delete
+  // browsing data" and "Settings" do not, and a bookmark would navigate the
+  // user's page away.
+  const appMenu = closed.controls.find(control => control.automationId === 'view_1007' && control.state?.expandCollapse)
+    ?? closed.controls.find(menuButton);
+  if (!appMenu) {
+    skipped.push('invoke: no browser-drawn menu button was found, so no command was chosen');
+  } else {
+    const appIdentity = { name: appMenu.name, automationId: appMenu.automationId };
+    const reopened = await call('browser_native_action', { ...target, ref: appMenu.ref, action: 'expand', expect: appIdentity });
+    step(`reopened "${appMenu.name}" for invoke: ${reopened?.status} ${reopened?.stateBefore}->${reopened?.stateAfter}`);
+    const menu = await call('browser_native_snapshot', target);
+    const item = (menu.controls ?? []).find(control => control.role === 'ControlType.MenuItem' && /^New tab\b/i.test(control.name ?? ''));
+    if (!item) {
+      skipped.push('invoke: no MenuItem named "New tab" in this menu (the label is localized), so no command was chosen');
+      const tidy = await call('browser_native_action', { ...target, ref: appMenu.ref, action: 'collapse', expect: appIdentity });
+      step(`closed the menu again: ${tidy?.status}`);
+    } else {
+      // The cross-channel check below only proves anything if the window does
+      // not already say "New tab". Activating an existing http tab costs
+      // nothing (reuse, not create) and makes the pre-state deterministic
+      // instead of depending on what the user happened to leave in front.
+      const listedTabs = await call('browser_tabs', {});
+      const home = (listedTabs.tabs ?? listedTabs)[0];
+      let titleBefore = '';
+      if (home?.url) {
+        const refocus = await call('browser_open', { url: home.url, active: true });
+        step(`activated an existing tab as the pre-state: reused=${refocus?.reused} ${refocus?.url ?? ''}`);
+        await new Promise(resolve => setTimeout(resolve, 600));
+        titleBefore = (await call('browser_desktop_windows', {})).windows?.[0]?.title ?? '';
+      }
+      if (/new tab|新标签页/i.test(titleBefore)) {
+        skipped.push(`invoke: the window still showed a new tab (${JSON.stringify(titleBefore)}) before the invoke, so "the title changed" could not prove the command ran`);
+      }
+      // Only the attributes the snapshot actually gave are repeated; an empty
+      // automationId is not an identity and must not be sent as one.
+      const itemIdentity = { name: item.name };
+      if (item.automationId) itemIdentity.automationId = item.automationId;
+      const invoke = await call('browser_native_action', { ...target, ref: item.ref, action: 'invoke',
+        expect: { ...itemIdentity, afterInvoke: 'control_gone' } });
+      record('invoke verifies the post-condition it declared', true,
+        invoke?.status === 'success' && invoke?.verified === true && invoke?.dispatched === true && invoke?.controlGone === true,
+        `status=${invoke?.status} verified=${invoke?.verified} controlGone=${invoke?.controlGone} settleMs=${invoke?.settleMs} ${invoke?.reason ?? ''}`);
+      const afterInvoke = await call('browser_native_snapshot', target);
+      record('the chosen item is no longer in the tree', false,
+        (afterInvoke.controls ?? []).some(control => control.role === 'ControlType.MenuItem' && control.name === item.name));
+      record('the menu it lived in closed itself', 'Collapsed',
+        (afterInvoke.controls ?? []).find(control => control.automationId === appMenu.automationId)?.state?.expandCollapse);
+      // Cross-channel proof that the command ran, not just that a menu closed:
+      // UI Automation chose the item, and the window title - read from a
+      // different API - is what changed.
+      const after = await call('browser_desktop_windows', {});
+      const title = after.windows?.[0]?.title ?? '';
+      record('the command really ran: the window moved to a new tab', true,
+        /new tab|新标签页/i.test(title) && title !== titleBefore, `before=${JSON.stringify(titleBefore)} after=${JSON.stringify(title)}`);
+      step('residue: one new tab was opened; chrome:// tabs are invisible to browser_tabs, so it cannot be closed from here');
+    }
+  }
 } catch (error) {
   record('acceptance run', 'no exception', 'error', error.message);
 } finally {
@@ -155,4 +224,12 @@ for (const row of rows) {
   console.log(`${JSON.stringify(row.expected)} | ${JSON.stringify(row.actual)} | ${row.ok ? 'OK' : 'MISMATCH'} | ${row.name}${row.detail ? ` — ${row.detail}` : ''}`);
 }
 console.log(`\n${rows.length - failed.length}/${rows.length} native action promises held`);
+// A step that did not run is never a pass. The exit code says so, because the
+// one thing this project keeps relearning is that a silent skip reads exactly
+// like success.
+if (skipped.length) {
+  for (const line of skipped) console.log(`SKIPPED (not a pass) — ${line}`);
+  if (failed.length) process.exit(1);
+  process.exit(2);
+}
 process.exit(failed.length ? 1 : 0);

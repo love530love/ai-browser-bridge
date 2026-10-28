@@ -38,14 +38,17 @@ export const TOOLS = [
     processId: { type: 'integer', minimum: 1, maximum: 2147483647 },
     windowHandle: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, agent
   }, ['processId', 'windowHandle'], true),
-  tool('browser_native_action', 'Expand or collapse exactly one native Chrome control, then read the resulting state back from the control itself. Pass a ref from a recent browser_native_snapshot together with at least one identity attribute (name or automationId, optionally role) that you also read from that snapshot: a runtime ref alone is not accepted, because ids can be reused by a different control after the tree is rebuilt. Only expand and collapse exist. Toggle is deliberately not implemented - a toggle dispatched twice returns the control to where it started, so an uncertain result could not be retried, while expand and collapse are idempotent and a request for the state the control is already in dispatches nothing and returns alreadyInState:true. success means the new state was read back (stateBefore/stateAfter); a pattern call that returned without raising is not success. This drives UIA ExpandCollapsePattern bound to the element, so unlike a synthesised F12 there is no global focus race, but the menu it opens may take focus. It does not click menu items: an opened Chrome menu is a separate popup window that browser_native_snapshot does not cover. After uncertain, take a new snapshot instead of repeating. Invoke, Select, Toggle, Value and Scroll are not implemented.', {
+  tool('browser_native_action', 'Act on exactly one native Chrome control, then report what was observed afterwards. Pass a ref from a recent browser_native_snapshot together with at least one identity attribute (name or automationId, optionally role) that you also read from that snapshot: a runtime ref alone is not accepted, because ids can be reused by a different control after the tree is rebuilt. Actions: expand and collapse dispatch a state; invoke dispatches a command (a menu item) and requires expect.afterInvoke:"control_gone" - the chosen item has to leave the tree, which is what closing a menu does. Toggle is deliberately not implemented: a toggle dispatched twice returns the control to where it started, so an uncertain result could not be retried, while expand and collapse are idempotent and a request for the state the control is already in dispatches nothing and returns alreadyInState:true. expand/collapse success means the new state was read back from the control itself (stateBefore/stateAfter). invoke success means the declared post-condition was observed after the call returned; it proves the item was chosen, never that the command it runs succeeded, and invoke never returns failed because the command itself is not observable through UI Automation. Invoke is not idempotent, so an uncertain invoke must never be repeated: take a new snapshot and inspect the window. This drives UIA patterns bound to the element (ExpandCollapsePattern, InvokePattern), so unlike a synthesised F12 there is no global focus race, but the menu it opens may take focus. Select, Toggle, Value and Scroll are not implemented.', {
     processId: { type: 'integer', minimum: 1, maximum: 2147483647 },
     windowHandle: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
     ref: text(120),
-    action: { type: 'string', enum: ['expand', 'collapse'] },
+    action: { type: 'string', enum: ['expand', 'collapse', 'invoke'] },
     expect: {
       type: 'object', minProperties: 1, additionalProperties: false,
-      properties: { name: text(300), role: text(80), automationId: text(200) }
+      properties: {
+        name: text(300), role: text(80), automationId: text(200),
+        afterInvoke: { type: 'string', enum: ['control_gone'], maxLength: 40 }
+      }
     },
     agent
   }, ['processId', 'windowHandle', 'ref', 'action', 'expect']),
@@ -427,7 +430,8 @@ export function validateCall(name, args) {
     }
     for (const [key, value] of Object.entries(expect)) {
       const field = Object.hasOwn(expectSchema.properties, key) ? expectSchema.properties[key] : null;
-      if (!field || typeof value !== 'string' || value.length < 1 || value.length > field.maxLength) {
+      if (!field || typeof value !== 'string' || value.length < 1 || value.length > field.maxLength ||
+          (Array.isArray(field.enum) && !field.enum.includes(value))) {
         throw new Error(`Invalid expect identity: ${key}. Allowed: ${Object.keys(expectSchema.properties).join(' | ')}`);
       }
     }
@@ -437,6 +441,15 @@ export function validateCall(name, args) {
     // can be checked after the tree is rebuilt.
     if (!expect.name && !expect.automationId) {
       throw new Error('expect must repeat name or automationId from the snapshot; a ref alone is not an identity');
+    }
+    // Invoke is not idempotent, so it is only offered with a post-condition the
+    // result can be judged against. Refused here, before any desktop mutex is
+    // taken or any process is spawned.
+    if (args.action === 'invoke' && expect.afterInvoke !== 'control_gone') {
+      throw new Error('invoke requires expect.afterInvoke:"control_gone"; without an observable post-condition a successful pattern call is not evidence the command ran');
+    }
+    if (args.action !== 'invoke' && expect.afterInvoke !== undefined) {
+      throw new Error('expect.afterInvoke only applies to action:"invoke"');
     }
   }
   if (args.url) {

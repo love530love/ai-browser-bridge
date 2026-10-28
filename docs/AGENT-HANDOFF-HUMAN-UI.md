@@ -4,6 +4,27 @@
 
 ## 目标
 
+## 2026-10-28 接手增量（0.16.0）：invoke，选中一个菜单项
+
+- `browser_native_action` 的 `action` 增加 `invoke`，**必须**带 `expect.afterInvoke:"control_gone"`。
+  expand/collapse 幂等所以「不确定就重试」安全；invoke 不幂等（选两次命令跑两次），
+  而 UIA 只看得见「控件还在不在树里」，命令执行了什么看不见。所以 `success` 只表示
+  **声明的后置条件被观测到了**，永远不表示命令成功。
+- 派发后必须**连续两次**遍历都找不到「同名+同角色+同 automationId」的控件才算 gone——
+  菜单关闭时树会重建、runtime id 会换，「ref 不见了」不等于「项被选中了」。
+  两次遍历用同一个 `Scan-Tree`、同一套预算，否则不是同一次观测的证据。
+- invoke **不提供 `failed`**（项还在只说明没观测到效果，不说明命令没跑），只剩
+  `not_dispatched` / `success` / `uncertain`；`uncertain` = 命令可能已经在跑，**不许重按**。
+  禁用控件在派发前拒绝。
+- 真机 `npm run test:native` **17/17**：invoke `New tab Ctrl+T` → `controlGone`（settleMs 461）
+  → 独立快照确认菜单折叠且该项消失 → **窗口标题变成 `New Tab`**（另一个 API 读到的，
+  才证明命令真的跑了）。验收脚本第一版断言恒真（窗口本来就是 New Tab），已改成先切到
+  一个已存在的 http 标签再比 before/after。
+- **下一步**：invoke 能打开 `chrome://` 面，但 `browser_tabs` 过滤非 http(s) 标签，
+  所以基座看不见也关不掉自己造成的那个标签（实测已留下一个）。正解：`browser_tabs`
+  报告被过滤标签的数量与 id（不含标题/内容），`browser_close` 能关这些 id。
+- 全量单测 **374/374**；工具数仍 69；`scripts/native-ui-action.ps1` AST `parse-ok`。
+
 ## 2026-10-28 接手增量（0.15.0）：Chrome 156 适配轮
 
 用户要重启 Chrome 应用更新到 156。这一轮**不加原语**，先把「升级会坏什么」变成可测量的事，

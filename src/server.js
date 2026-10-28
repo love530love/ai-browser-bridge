@@ -174,8 +174,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       implementedActions: desktopAdapter.available ? ['list_chrome_windows', 'reload_extension',
         ...(typeof desktopAdapter.devtools === 'function' ? ['observe_docked_devtools', 'select_docked_devtools_panel'] : []),
         ...(typeof desktopAdapter.nativeSnapshot === 'function' ? ['read_native_controls'] : []),
-        ...(typeof desktopAdapter.nativeAction === 'function' ? ['expand_native_control', 'collapse_native_control'] : [])] : [],
-      notImplemented: ['chrome_settings_changes', 'devtools_script_execution', 'extension_install_or_remove', 'browser_data_access', 'invoke_native_menu_item', 'toggle_native_control'],
+        ...(typeof desktopAdapter.nativeAction === 'function' ? ['expand_native_control', 'collapse_native_control', 'invoke_native_menu_item'] : [])] : [],
+      notImplemented: ['chrome_settings_changes', 'devtools_script_execution', 'extension_install_or_remove', 'browser_data_access', 'toggle_native_control'],
       pages: ['chrome://extensions', 'chrome://settings', 'chrome://inspect', 'chrome-extension://*'],
       confirmationModel: 'The fixed confirmation field is a caller attestation; the service cannot independently verify human approval.',
       modelRequired: false, arbitraryCommands: false

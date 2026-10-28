@@ -64,8 +64,7 @@ Chrome 版本变化可能改变这些标识，必须每次观察，不硬编码�
 菜单**可能**夺取焦点，但派发本身不依赖前台。脚本里没有任何 `SendKeys` /
 `SetForegroundWindow` / `WScript.Shell`，这一点由单测按源码断言钉住。
 
-**未实现**：Invoke、Select、Toggle、Value、Scroll。选菜单项需要 Invoke + 同一套前后
-证据，属于下一轮。
+**未实现**：Select、Toggle、Value、Scroll（Invoke 已在 0.16.0 补上，见下）。
 
 验证：`npm run test:native`（`test/live-native-action.js`）真机 **13/13**；
 `test/native-ui-action.test.js` 单测 **10/10**。真机记录：`All Bookmarks`（view_1026）
@@ -96,13 +95,47 @@ Collapsed → 独立快照确认 Collapsed → 没有留下打开的菜单。同
 判断与理由见 [CHROME-VERSION-ADAPTATION.md](CHROME-VERSION-ADAPTATION.md)。
 **升级未实际应用前不宣称已适配**；基线为 154.0.8037.93，156.0.8078.49 已下载待应用。
 
+## 2026-10-28：invoke（选中一个菜单项，0.16.0）
+
+`browser_native_action` 的 `action` 增加 `invoke`，**必须**同时给 `expect.afterInvoke: "control_gone"`。
+
+**为什么必须带后置条件**：expand/collapse 是幂等的，所以「不确定就重试一次」是安全指令；
+invoke 不是——同一个菜单项选两次，命令就跑两次。而 UIA 能观测到的只有「这个控件还在不在树里」，
+命令本身执行了什么在这一层完全看不见。所以 invoke 只在调用方声明了它可被判定的效果时才提供，
+且 `success` 只表示「声明的后置条件被观测到了」，**永远不表示命令执行成功**。
+
+**证据怎么来**：`controlGone` 由派发后的重新遍历得出，遍历与产生 ref 的那次完全一致
+（同一个 walker、同样排除 Document 与 offscreen、同样 400 行 / 3000ms / 深度 32、同一个 `Scan-Tree`）。
+菜单关闭时树会重建、runtime id 会变，所以「ref 不见了」不等于「项被选中了」——必须**连续两次**
+遍历都找不到同名 + 同角色 + 同 automationId 的控件才算 gone。实测 settleMs 461–625。
+
+**不提供 failed**：`failed` 在 expand/collapse 里表示「派发成功但状态没变」。对 invoke 这个判断
+不成立——项还在，只说明没观测到效果，不说明命令没跑。所以 invoke 只有
+`not_dispatched` / `success` / `uncertain`，而 `uncertain` 的含义是「命令可能已经在跑，不许重按」。
+
+**禁用控件在派发前拒绝**（`native_control_disabled`）。否则「什么都没发生」会被报成不确定，
+诱导调用方做一次毫无意义的重复。
+
+**真机验收**（`npm run test:native`，**17/17**）：展开应用菜单 → 快照拿到 26 个 MenuItem →
+invoke `New tab Ctrl+T` → `success / verified / controlGone`（settleMs 461）→ 独立快照确认
+应用菜单已折叠、该项不在树里 → **窗口标题从空变成 `New Tab - Google Chrome`**。最后一条是关键：
+菜单关闭只能证明「项被选中了」，标题是另一个 API 读到的，才证明命令真的跑了。
+验收脚本还会先把窗口切到一个已存在的 http 标签再 invoke——第一版没这么做，而窗口本来就是
+New Tab，「标题变了」这条断言恒真，等于没测。
+
+**已知缺口（下一步）**：invoke 可以打开 `chrome://` 面（New tab / Downloads / Settings…），
+而 `browser_tabs` 会把非 http(s) 标签过滤掉，于是基座既看不见、也关不掉自己造成的那一个标签。
+实测已留下一个。正解是让 `browser_tabs` 报告被过滤标签的**数量与 id（不含标题/内容）**，
+并允许 `browser_close` 关闭这些 id——否则「我打开了什么」在基座里是不可见的。
+
 ## 下一条执行链
 
 1. ~~对近期快照 ref 绑定的原生控件执行 Expand/Collapse，回读展开状态。~~ 已完成（0.14.0）。
-2. **Invoke**：展开后菜单项已在快照里，下一步是绑定 `MenuItem` 的 ref 做单次 Invoke
-   并回读菜单是否关闭；这是打开 DevTools 面板的真正入口，也是「设置项」的第一块。
-3. 从实际菜单树选择开发者工具入口，验证目标页面与 DevTools 文档。
-4. 对 Select、Toggle、Value、Scroll 原语分别补前后证据与异常结果。Toggle 若要实现，
+2. ~~**Invoke**：绑定 `MenuItem` 的 ref 做单次 Invoke，并回读菜单是否关闭。~~ 已完成（0.16.0）。
+3. **让 invoke 造成的 `chrome://` 标签可见可关**（`browser_tabs` 报告被过滤的 id、`browser_close` 能关）。
+   这是「我打开了什么必须看得见」的直接要求，也是当前唯一会留下残留的一步。
+4. 从实际菜单树选择开发者工具入口（`More tools → Developer tools`），验证目标页面与 DevTools 文档。
+5. 对 Select、Toggle、Value、Scroll 原语分别补前后证据与异常结果。Toggle 若要实现，
    必须先解决「重试会反转」——例如只暴露 SetState 式的语义，不暴露裸 toggle。
 
 未恢复有焦点竞态的全局 F12 路径。未声称已完成 Console 执行、设置修改或完整人类等价能力。

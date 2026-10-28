@@ -1,3 +1,15 @@
+## 0.16.0 — 2026-10-28（已部署，真实 Chrome 实测）
+
+- **`browser_native_action` 增加 `invoke`**：交接文档指定的下一步——「选菜单项」这条链的第一块，也是打开 DevTools 面板与改设置项的共同前提。`action` 现在是 `expand` / `collapse` / `invoke`，工具数仍为 69（扩的是同一个工具）。
+- **invoke 必须带后置条件，且只能是 `expect.afterInvoke:"control_gone"`**。这不是形式主义：expand/collapse 幂等，所以「不确定就重试」是安全指令；**invoke 不是**——同一个菜单项选两次，命令就跑两次。而 UI Automation 能观测到的只有「这个控件还在不在树里」，命令本身执行了什么在这一层完全看不见。所以只在调用方声明了可被判定的效果时才提供 invoke，`success` 只表示**声明的后置条件被观测到了**，永远不表示命令执行成功。缺 `afterInvoke` 的调用在参数校验层就被拒，连桌面互斥都不会占用；给 `expand`/`collapse` 带 `afterInvoke` 同样被拒（没人会去检验的声明等于没有声明）。
+- **「ref 不见了」不等于「项被选中了」**。菜单关闭时树会重建、runtime id 会换，所以派发后必须**连续两次**遍历都找不到「同名 + 同角色 + 同 automationId」的控件才算 gone。遍历与产生 ref 的那次**完全一致**（同一个 walker、同样排除 Document 与 offscreen、同样 400 行 / 3000ms / 深度 32、同一个 `Scan-Tree`）——预算不同的第二次遍历不能算同一次观测的证据。
+- **invoke 不提供 `failed`**。`failed` 在 expand/collapse 里表示「派发成功但状态没变」，对 invoke 不成立：项还在只说明没观测到效果，不说明命令没跑。所以只剩 `not_dispatched` / `success` / `uncertain`，而 `uncertain` 的含义就是「命令可能已经在跑，不许重按」。禁用控件在派发**之前**拒绝（`native_control_disabled`），否则「什么都没发生」会被报成不确定，诱导一次毫无意义的重复。
+- **真机 `npm run test:native` 17/17**（原 13 条 + invoke 4 条）：展开应用菜单 → 快照拿到 26 个 MenuItem → invoke `New tab Ctrl+T` → `success / verified / controlGone`（settleMs 461）→ 独立快照确认应用菜单已折叠、该项不在树里 → **窗口标题从空变成 `New Tab - Google Chrome`**。最后一条是这轮最关键的证据：菜单关闭只能证明「项被选中了」，标题是另一个 API 读到的，才证明命令真的跑了。
+- **验收脚本第一版是错的，当场改掉**：它只断言「标题是 New Tab」，而当时窗口**本来就是** New Tab——断言恒真，等于没测。现在先把窗口切到一个已存在的 http 标签（复用，不新建）再 invoke，并要求 `after` 与 `before` **不相等**。这条和 0.12.0 的两条正控制是同一个道理：一个看不见失败的报告，它的「通过」没有意义。
+- **顺带修掉 tool 描述里一句已被证伪的话**：旧描述写着「它不点菜单项：打开的 Chrome 菜单是另一个 popup 窗口，快照不覆盖」——0.14.0 的实测已经推翻（菜单是浏览器窗口的子 HWND，快照看得见）。留着它会让后续 Agent 直接放弃这条路径。
+- **已知缺口，已写进文档并列为下一步**：invoke 可以打开 `chrome://` 面（New tab / Downloads / Settings…），而 `browser_tabs` 会过滤非 http(s) 标签，于是基座**既看不见也关不掉**自己造成的那一个标签——实测已经留下一个。正解是让 `browser_tabs` 报告被过滤标签的数量与 id（不含标题/内容），并允许 `browser_close` 关闭这些 id。「我打开了什么」必须在基座里可见。
+- 全量单测 **374/374**（+2：invoke 的后置条件与证据规则、校验层拒绝顺序）；`scripts/native-ui-action.ps1` AST `parse-ok`；`doctor` 10/10。
+
 ## 0.15.0 — 2026-10-28（Chrome 156 升级适配轮；升级前基线已抓，升级后待验收）
 
 - **本轮起因是「基座不知道自己驱动的是哪个 Chrome」**。用户要重启 Chrome 应用更新，而基座对「版本变了」这件事此前完全不可见：没有 `chrome.*` API 报浏览器版本；`navigator.userAgent` 被 UA 减缩成 `154.0.0.0`（补丁号被抹掉，恰好抹掉升级最想确认的那几位）；`browser_debugger action:"evaluate"` 走 `Runtime.evaluate` 且 `awaitPromise: false`，页面侧拿到的只是一个未决 Promise。三条路都不通之后答案是 **service worker 里的 UA-CH**：`getHighEntropyValues(['uaFullVersion'])` 能 await，实测拿到 `154.0.8037.93`。现在它出现在 `/status` 的 `browserVersion` / `browserMajor` / `browserIdentitySource` / `browserBrands`、`browser_health`、以及 `doctor` 的 `extension-connected` 里。**升级不再是谜团，而是一次 diff。**
