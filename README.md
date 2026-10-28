@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.17.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.18.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.18.0 把 DevTools 的**打开与关闭**接了回来。0.9 撤下它时写明的两个前提是「绑定到目标窗口、可回读的原生动作」和「充分的负证据」，0.14.0 的 expand 与 0.16.0 的 invoke 把这两样补齐，这一轮把它们接成链路：`browser_devtools` 的 `open` / `close` 走浏览器自己的菜单（More tools → Developer tools），不合成 F12，**因此没有焦点竞态**。对外是「请求一个状态」而不是切换——菜单项本身是 toggle，所以先 observe，已在目标状态就 `dispatched:false` 什么都不派发；幂等性由此而来，这也是「`uncertain` 之后允许重试」在这里成立、在裸 invoke 上不成立的唯一原因。打开只认正证据（`devtools://` 文档 + ≥2 个面板 TabItem），关闭必须同时有负证据（走查完整 `partial:false` 且没有 DevTools 文档）——「没看到打开」本身也描述了「遍历提前放弃」。真机验收 `npm run test:devtools` 从「只能 PARTIAL」变成 **11/11**：`ensure-closed → open → open again（必须不派发）→ 选/重选 Console·Network·Elements → close` 全链自驱。
 
 0.17.0 修的是上一轮暴露的一个盲区：**基座看不见自己造成的东西**。invoke 一个菜单项（比如 New tab）能打开 `chrome://` 面，而 `browser_tabs` 会过滤非 http(s) 标签，于是「我打开了什么」既查不到也关不掉。现在这类标签会被**列出**并标 `restricted:true`，`restrictedReason` 区分 `non_http`（内部页）与 `origin_not_allowed`（无权读的站点）——但只给身份不给内容：`title` 恒为 `null`，内部页只留 `scheme://host/path`（去掉 query 和 fragment），无权站点连 URL 都不给，因为那条 URL 就是内容。**可见不等于可读**（`browser_read` 仍报 `Site not allowed`），而 `browser_close` 在 `force:true` 时能关掉它——关闭是标签生命周期操作，不是读取内容。真机验收从 17 条涨到 **21/21**，多出来的 4 条正是「可见 / 无 force 仍被拒 / 带 force 能关 / 跑完不留残留」，**验收脚本现在会自己收尾**。
 
@@ -48,7 +50,7 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 - 点击、填写、选择、滚动、上传、下载、导航和关闭标签页，并对关键写操作做结果验证。密码框默认拒绝填写，`browser_fill` / `browser_fill_verified` 需显式 `secret:true` 才放行，且不回显写入的值。
 - 处理 iframe、重型 SPA、虚拟滚动、下拉框、广告、引导层、客服浮窗和透明遮挡。
 - 通过 DOM、Accessibility、Debugger、截图和坐标适配器进行分层兜底；没有 GPT 时仍可使用本地确定性工具链。
-- Windows 0.5.24 候选支持停靠式 DevTools 观察，以及在用户已打开 DevTools 后选择 Elements/Console/Network 面板；由于 UIA 负证据与全局 F12 焦点竞态，当前候选不自动打开 DevTools。
+- 停靠式 DevTools 可观察、可选择 Elements/Console/Network 等面板，也可由基座**打开与关闭**：`browser_devtools` 的 `open` / `close` 走浏览器自己的菜单（More tools → Developer tools），不合成 F12，没有焦点竞态；对外是请求一个状态而非切换，已在目标状态就 `dispatched:false`。关闭要求走查完整（`partial:false`）才算数。分离（detached）DevTools 只报 `detachedDevtools`，尚不能绑定。
 - `browser_devtools_capture` 通过 CDP 在单次 attach 的有界窗口内只读捕获 Console 消息、异常、Network 请求行、Sources 脚本列表和 Performance 指标；空结果不证明没有发生，网络记录不含 header/cookie/body，缓冲溢出以 `dropped`/`truncated` 计数上报。
 - `browser_storage_read` / `browser_storage_write` 是 DevTools Application 面板的等价物，覆盖 `localStorage`、`sessionStorage`、cookie 与 IndexedDB 结构。拆成读、写两个工具而不是一个带 action 的：读是真的只读，能走 read 优先级、超时降级成可重试；写则必须带 `confirmation:"modify_site_storage_once"`。发现式读取只回键名与值长度（cookie 只回属性），要取值必须显式指定 `key`，此时 cookie 返回带 `sensitive:true`；写入回 `verified:false`，要验证就再读一次。cookie 走 `Network.getCookies`，web storage 与 IndexedDB 走 `Runtime.evaluate`——实测 `DOMStorage.enable` 与 `IndexedDB.enable` 都是 `-32601 wasn't found`，扩展只转发 CDP 域的一个子集。IndexedDB 只读结构：库名先用 `indexedDB.databases()` 查名单，名单里没有就拒绝（`open` 会创建库），读记录用返回的 `recordReadTemplate` 交给 `browser_debugger` 的 `evaluate`。清空某源全部 cookie、IndexedDB 的三种写都被刻意拒绝，且一次 CDP 都不发。
 - `browser_replay_request` 是 Network 面板右键 Replay 的等价物，由页面上下文 `fetch` 发出，所以自动带页面当前 cookie 与 CORS 位置；调用方自己给 `method`/`url`/`headers`/`body`，需 `confirmation:"replay_request_once"`。超时回 `status:"uncertain"` + `reason:"replay_timeout"` 而不是 failed（请求可能已到服务器，只是响应丢了），**绝不自动重试**；`Cookie`/`Host`/`Content-Length`/`Connection`/`Transfer-Encoding`/`Referer` 作为请求头直接拒绝，只接受 http/https。带一次性 CSRF token 的请求重放通常 4xx，那是服务端拒绝过期凭据，不是桥的故障。
@@ -58,7 +60,7 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 - 支持多 Agent 队列、优先级、等待状态、标签页写租约、租约续期和服务重启恢复。
 - 支持上传目录白名单、SHA256 校验、Agent 作用域、origin 白名单、内容边界和审计脱敏。
 - 提供 `doctor`、`browser_health`、`browser_execution_profile`、网络/性能诊断和本地滚动日志。
-- 真实 Chrome 本地 fixture 验收可通过 `npm run test:devtools` 运行；该用例仅操作并关闭自身创建的测试标签。
+- 真实 Chrome 本地 fixture 验收可通过 `npm run test:devtools` 运行；该用例仅操作并关闭自身创建的测试标签，并自己把 DevTools 打开再关回去（`ensure-closed → open → open again → select/reselect → close`）。
 - 默认本机监听 `127.0.0.1`，不直接暴露公网；高风险网页内容按不可信输入处理。
 
 完整能力基线、限制、验收指标和升级目标见 [产品路线图](docs/PRODUCT-ROADMAP.md)；新 Agent 接入规则见 [AGENTS.md](AGENTS.md)。

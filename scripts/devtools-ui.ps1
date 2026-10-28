@@ -114,7 +114,7 @@ function Observe {
   # Missing UIA elements are not proof that DevTools is closed. We only claim
   # open on positive evidence and keep every other state unknown.
   $state = if ($open) { 'open' } else { 'unknown' }
-  return @{windowHandle=$ChromeWindowHandle;processId=$ChromeProcessId;url=$url;devtoolsOpen=($state -eq 'open');devtoolsState=$state;panels=$panelValues;selectedPanels=$selectedValues;partial=(-not $complete);detachedDevtools=$detached;pageDocumentCount=$pageDocuments.Count;nodesVisited=$count;targetBinding='selected Chrome window; docked DevTools only; detached DevTools requires explicit binding'}
+  return @{windowHandle=$ChromeWindowHandle;processId=$ChromeProcessId;url=$url;devtoolsOpen=($state -eq 'open');devtoolsState=$state;panels=$panelValues;selectedPanels=$selectedValues;partial=(-not $complete);devtoolsDocumentCount=$devtoolsDocuments.Count;detachedDevtools=$detached;pageDocumentCount=$pageDocuments.Count;nodesVisited=$count;targetBinding='selected Chrome window; docked DevTools only; detached DevTools requires explicit binding'}
 }
 try {
   $before = Observe

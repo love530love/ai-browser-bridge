@@ -141,14 +141,78 @@ New Tab，「标题变了」这条断言恒真，等于没测。
    这是设计在正确工作：宁可报不确定，也不把「菜单还开着」说成成功。代价是当前的 invoke
    只覆盖「选中后会离开树」的菜单项；缩放这类项要另找可观测效果（如 zoom 值）才能验证。
 
+## 2026-10-28：用 invoke 打开/关闭 DevTools（0.18.0）
+
+`browser_devtools` 的 `action` 增加 `open` / `close`。这是执行链第 4 步，也是 expand + invoke
+第一次被组合成一条**完整能力**（而不是两个原语各自可用）。
+
+**不合成 F12**。0.9 撤下 DevTools 自动化时写明的两个前提是「绑定到目标窗口、可回读的原生动作」
+和「充分的负证据」；0.14.0 的 expand 与 0.16.0 的 invoke 把这两样补齐。所以路径是浏览器自己的菜单：
+`expand 应用菜单（view_1007）→ expand More tools → invoke Developer tools`。
+
+**对外是请求一个状态，不是切换**。菜单项本身是 toggle，所以它**永远不以 toggle 暴露**：
+先 observe，已在目标状态就 `dispatched:false / alreadyInState:true`；否则走完整条链，最后**再 observe**
+判定。幂等性由此而来——这也是「`uncertain` 之后允许重试」在这里成立、在裸 invoke 上不成立的唯一原因。
+
+**打开只认正证据，关闭必须同时有负证据**：
+
+| 目标 | 判定 | 失败原因 |
+| --- | --- | --- |
+| `open` | `after.devtoolsOpen === true`（`devtools://` 文档 + ≥2 个面板 TabItem） | `devtools_did_not_open` |
+| `close` | `!after.devtoolsOpen && after.partial === false` | `devtools_close_unverified_partial_walk` / `devtools_still_open` |
+
+关闭这一条要特别写清楚：**「没看到打开」本身也描述了「遍历提前放弃」**。所以关闭的成立条件是
+「一次完整的走查里没有 DevTools 文档」，`partial:true` 时宁可报不确定。光有标题、或页面里有个按钮
+写着 Console，都不算 DevTools 打开的证据。
+
+**唯一一次派发**是 invoke（带 `afterInvoke:"control_gone"`）。它非 success 时结果里带一句
+「不要重复调用：项会 toggle，第二次可能撤销第一次」，且 `dispatched` 照抄原语的值，
+避免把「什么都没发生」报成不确定的点击。找应用菜单是 **id 优先 → 角色+名称唯一兜底 → 否则拒绝**：
+浏览器里通常有好几个可展开按钮（书签、扩展、资料），歧义时宁可 `chrome_menu_not_found`
+也不去展开陌生人的菜单。
+
+**真机验收 `npm run test:devtools` 11/11**（此前该脚本只能打印 PARTIAL）：
+
+```
+ensure-closed: dispatched=false alreadyInState=true
+open:          dispatched=true  after.devtoolsDocumentCount=1
+open again:    dispatched=false alreadyInState=true
+panels:        present=[...10 个...] exercising=["Console","Network","Elements"]
+close:         dispatched=true  after.devtoolsDocumentCount=0
+```
+
+**`panels` 的语义**：它列的是 DevTools 文档里**所有** TabItem——既有顶层面板
+（Elements / Console / Sources / Network…），也有当前面板自己的标签页
+（Computed / Layout / Event Listeners / DOM breakpoints / Styles / Properties）。
+所以 `select_panel` 也能选 `Computed` 这类子标签，且同样自验证（`after.selectedPanels` 必须包含它）。
+顶层面板里超出停靠宽度的那些在 Chrome 里本来就被收进溢出菜单，**不在 TabItem 列表里**——
+这是 Chrome 的 UI 事实，不是遍历漏了。要选它们得先展开溢出菜单，尚未实现。
+
+**验收脚本自身修掉的三处「看着在测其实没测」**：
+
+1. **面板列表读到了半渲染状态**。原来等到 `panels.length >= 3` 就往下走，实测拿到
+   `["Application","Console","Elements"]`（Network / Sources 还没渲染出来），于是 Network 那条被
+   静默跳过。改成**等数量稳定**（连续两次观测不变）后拿到 10 个。
+2. **窗口是按标题绑的，而 Chrome 窗口标题 = 活动标签的标题**。fixture 标签开在已有窗口里但没激活时，
+   枚举里那个窗口叫「Extensions - …」，断言直接 `0 !== 1`。现在先 `browser_history action:"activate"` 再轮询标题。
+3. 预热那步 `browser_observe` 会挑当前活动标签，而 0.17.0 之后活动标签**可能就是受限标签**，
+   于是脚本自己被 `Site not allowed` 打断。现在按 `restricted !== true` 挑一个能读的。
+
+**未做的**：detached（未停靠）DevTools 的绑定。`devtools-ui.ps1` 已经能报 `detachedDevtools`，
+但 `open`/`close` 只处理停靠态——detached 是另一个顶层窗口，需要显式绑定目标窗口。
+
 ## 下一条执行链
 
 1. ~~对近期快照 ref 绑定的原生控件执行 Expand/Collapse，回读展开状态。~~ 已完成（0.14.0）。
 2. ~~**Invoke**：绑定 `MenuItem` 的 ref 做单次 Invoke，并回读菜单是否关闭。~~ 已完成（0.16.0）。
 3. ~~**让 invoke 造成的 `chrome://` 标签可见可关**。~~ 已完成（0.17.0）：`browser_tabs` 列出
    `restricted:true` 的条目（只给身份不给内容），`browser_close` 在 `force:true` 时能关。
-4. 从实际菜单树选择开发者工具入口（`More tools → Developer tools`），验证目标页面与 DevTools 文档。
+4. ~~从实际菜单树选择开发者工具入口（`More tools → Developer tools`），验证目标页面与 DevTools 文档。~~
+   已完成（0.18.0）：`browser_devtools` 的 `open` / `close`，状态式语义 + 幂等，真机 11/11。
 5. 对 Select、Toggle、Value、Scroll 原语分别补前后证据与异常结果。Toggle 若要实现，
    必须先解决「重试会反转」——例如只暴露 SetState 式的语义，不暴露裸 toggle。
+6. DevTools 面板溢出菜单（被收进 chevron 的顶层面板）与 detached DevTools 的显式绑定。
+7. `chrome://settings` 修改类能力：与 DevTools 同构（找控件 → 派发 → 回读状态），但**回读状态必须来自
+   设置页自己的控件值**，不能来自「点了之后没报错」。
 
 未恢复有焦点竞态的全局 F12 路径。未声称已完成 Console 执行、设置修改或完整人类等价能力。

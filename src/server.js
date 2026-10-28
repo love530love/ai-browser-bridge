@@ -17,6 +17,7 @@ import { failureHelp } from './failure-help.js';
 import { capabilityGuide } from './capability-guide.js';
 import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
+import { setDevToolsState } from './devtools-menu.js';
 import { lookupCredential, credentialOriginHash, CREDENTIAL_LOOKUP_CONFIRMATION } from './credential-store.js';
 import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMATION } from './password-manager.js';
 import { STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION, RECIPE_RUN_CONFIRMATION } from './confirmations.js';
@@ -172,7 +173,9 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       status: desktopAdapter.available ? 'partial' : 'unavailable',
       channels: desktopAdapter.available ? ['windows_uia'] : [],
       implementedActions: desktopAdapter.available ? ['list_chrome_windows', 'reload_extension',
-        ...(typeof desktopAdapter.devtools === 'function' ? ['observe_docked_devtools', 'select_docked_devtools_panel'] : []),
+        ...(typeof desktopAdapter.devtools === 'function' ? ['observe_docked_devtools', 'select_docked_devtools_panel',
+          ...(typeof desktopAdapter.nativeSnapshot === 'function' && typeof desktopAdapter.nativeAction === 'function'
+            ? ['open_docked_devtools', 'close_docked_devtools'] : [])] : []),
         ...(typeof desktopAdapter.nativeSnapshot === 'function' ? ['read_native_controls'] : []),
         ...(typeof desktopAdapter.nativeAction === 'function' ? ['expand_native_control', 'collapse_native_control', 'invoke_native_menu_item'] : [])] : [],
       notImplemented: ['chrome_settings_changes', 'devtools_script_execution', 'extension_install_or_remove', 'browser_data_access', 'toggle_native_control'],
@@ -706,6 +709,22 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       }
       if (name === 'browser_devtools') {
         if (typeof desktopAdapter.devtools !== 'function') return { status: 'unavailable', reason: 'devtools_adapter_unavailable', dispatched: false, retryable: false };
+        // Opening and closing are composed from the primitives that already have
+        // their own evidence: menu expansion, one invoke, then a DevTools
+        // observation. The menu item toggles, so the caller asks for a state and
+        // the current state is read first; a request for the state that already
+        // holds dispatches nothing.
+        if (args.action === 'open' || args.action === 'close') {
+          if (typeof desktopAdapter.nativeSnapshot !== 'function' || typeof desktopAdapter.nativeAction !== 'function') {
+            return { status: 'unavailable', reason: 'native_ui_unavailable', dispatched: false, retryable: false };
+          }
+          return setDevToolsState({ processId: args.processId, windowHandle: args.windowHandle }, {
+            want: args.action === 'open' ? 'open' : 'closed',
+            observe: target => desktopAdapter.devtools({ ...target, action: 'observe' }),
+            snapshot: target => desktopAdapter.nativeSnapshot(target),
+            act: target => desktopAdapter.nativeAction(target)
+          });
+        }
         return desktopAdapter.devtools(args);
       }
       return desktopAdapter.reloadExtension(args);

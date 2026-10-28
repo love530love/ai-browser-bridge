@@ -4,6 +4,31 @@
 
 ## 目标
 
+## 2026-10-28 接手增量（0.18.0）：expand + invoke 组合成「打开/关闭 DevTools」
+
+- **`browser_devtools` 支持 `open` / `close`**，走浏览器自己的菜单
+  （`expand 应用菜单 view_1007 → expand More tools → invoke Developer tools → 再 observe`），
+  **不合成 F12，因此没有焦点竞态**。0.9 撤下它时写明的两个前提（绑定目标窗口的可回读原生动作、
+  充分的负证据）在 0.14.0 / 0.16.0 已补齐，这一轮把它们接成一条完整能力。
+- **对外是「请求一个状态」，不是切换**。菜单项本身是 toggle，所以永不以 toggle 暴露：
+  已在目标状态就 `dispatched:false / alreadyInState:true`。**幂等性由此而来**，也是「`uncertain`
+  之后允许重试」在这里成立、在裸 invoke 上不成立的唯一原因。
+- **打开只认正证据，关闭必须同时有负证据**：`open` 要 `devtools://` 文档 + ≥2 个面板 TabItem；
+  `close` 要 `!devtoolsOpen && partial === false`——「没看到打开」本身也描述了「遍历提前放弃」，
+  走查不完整时报 `devtools_close_unverified_partial_walk`。
+- 唯一一次派发是 invoke（带 `afterInvoke:"control_gone"`）；失败结果里带「不要重复调用」，
+  `dispatched` 照抄原语，避免把「什么都没发生」报成不确定的点击。
+- 真机 `npm run test:devtools` 从「只能 PARTIAL」变成 **11/11**：
+  `ensure-closed → open → open again（dispatched=false）→ select/reselect Console·Network·Elements → close`。
+- 验收脚本自身修了三处假测：面板列表读到半渲染状态（改成等数量稳定）、窗口按标题绑但标签未激活
+  （先 activate 再轮询）、预热 observe 撞上受限标签被 `Site not allowed` 打断（按 `restricted !== true` 挑）。
+- `panels` 列的是 DevTools 文档里所有 TabItem（顶层面板 + 当前面板的子标签页），所以 `select_panel`
+  也能选 `Computed` / `Layout` / `Event Listeners`；超出停靠宽度的顶层面板被 Chrome 收进溢出菜单，
+  **不在列表里**——这是 UI 事实，要选它们需先展开 chevron，尚未实现。
+- 全量单测 **385/385**（+8，`test/devtools-menu.test.js` 用真实 toggle 语义模拟）；`doctor` 10/10；工具数仍 69。
+- **下一步**：Select / Toggle / Value / Scroll 原语；DevTools 面板溢出菜单与 detached DevTools 的显式绑定；
+  `chrome://settings` 修改类能力（回读必须来自设置页自己的控件值）。**Chrome 156 适配仍未闭环**（运行版本 154）。
+
 ## 2026-10-28 接手增量（0.17.0）：看不见的标签变成看得见、关得掉
 
 - **`browser_tabs` 不再静默隐藏标签**。上一轮的缺口是：invoke 能打开 `chrome://` 面，
@@ -19,8 +44,8 @@
   **验收脚本现在会自己收尾**，上一轮每跑一次留一个隐形标签的问题不再存在。
 - 纯函数 `describeTab` / `internalUrlLabel` / `isInternalPage` 在 `extension/tab-identity.js`，
   单测 `test/tab-identity.test.js` 9 → 11 条。全量单测 **377/377**；工具数仍 69。
-- **下一步**：`More tools → Developer tools`（用 invoke 打开 DevTools 面板），以及 Select / Toggle /
-  Value / Scroll 原语。
+- **下一步（已在 0.18.0 完成）**：`More tools → Developer tools`（用 invoke 打开 DevTools 面板）。
+  再往后是 Select / Toggle / Value / Scroll 原语。
 
 ## 2026-10-28 接手增量（0.16.0）：invoke，选中一个菜单项
 

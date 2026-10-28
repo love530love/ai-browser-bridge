@@ -48,6 +48,7 @@ node scripts/chrome-compat-baseline.js --diff .local/chrome-compat-154.0.8037.93
 npm test
 node src/cli.js doctor
 npm run test:native
+npm run test:devtools
 npm run test:capture
 npm run test:debugger
 npm run test:bench
@@ -55,7 +56,9 @@ npm run test:bench
 
 - `--diff` 里出现 **GONE** 的 id，意味着有代码按那个 id 绑定了控件，必须改成可发现的绑定，或确认它已不在任何路径上。
 - `npm test` 是契约层，版本升级**不该**让它变红；它红了说明我们自己的代码有问题。
-- `test:native` / `test:capture` / `test:debugger` 是**唯一**能证明 UIA 与 CDP 在 156 上仍成立的东西。
+- `test:native` / `test:devtools` / `test:capture` / `test:debugger` 是**唯一**能证明 UIA 与 CDP 在 156 上仍成立的东西。
+- `test:devtools` 尤其相关：它整条链都压在 `view_1007`（应用菜单）与两个本地化的菜单项名称上，
+  而且要求 `devtools://` 文档与面板 TabItem 都还能从原生树里读出来。**156 若改了菜单结构，这里会先红。**
 - `test:bench` 是不变量层，它红了说明「弱调用方也不会弄坏东西」这条不成立了，比单个能力坏掉更严重。
 
 ### 不需要真实密码也能验证的一条
