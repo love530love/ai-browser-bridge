@@ -53,6 +53,35 @@ node src/cli.js doctor
 窗口正常），但**工具调用一结束，整棵进程树就被清理掉**——两次不同启动方式（PowerShell 的
 `Start-Process`、bash 的后台执行）都是同一结果，`Crashpad` 里也没有当天的转储，说明不是崩溃而是被回收。
 这与项目「基座从不启动浏览器」的设计一致，只是现在有了实测依据：**最后一下必须由人点**。
+（0.19.0 起这件事改由**服务进程**做，从服务里启动的 Chrome 能活下来。）
+
+## 156 上第一次真正重启后：扩展被停用
+
+升级到 156 并真正重启浏览器之后，扩展**没有回连**。症状看起来和「扩展没装」完全一样，但磁盘上的答案很明确：
+
+```
+doctor -> bridge-extension-registered
+  profileDirectory: Default
+  extensionId: mmopbppoabmhliflinadkgnedjpmbgig
+  enabled: false
+  disableReasons: [16777216]
+```
+
+`User Data\Default\Secure Preferences` 里这条扩展记录带 `disable_reasons: [16777216]`，同时
+`extensions.ui.developer_mode` 未设置（开发者模式关闭）。**154 上它一直可用，156 上第一次真正重启后被停用**
+——这是目前最强的解释，但没有 154 的对照实验，所以只记为「强怀疑」。
+
+处理方式（一步，需要人）：`chrome://extensions` → 打开「开发者模式」→ 启用「自主浏览器」。
+之所以要打开开发者模式，是因为**这正是 Chrome 用来管「从目录加载的扩展」的开关**，关着的时候
+Chrome 有权在启动时把它们停用。
+
+顺带得到的两个结论：
+
+1. **「没连上」是三种状态，修法各不相同**：没安装（去加载）、装了但被停用（去启用）、装了也启用但没起来
+   （去重载）。服务此前只能报第一种，现在 `doctor` 的 `bridge-extension-registered` 直接把磁盘上的答案说出来。
+2. **启动成功不等于能干活**。0.19.0 的自动启动确实把 Chrome 拉起来了，但扩展是停用的，于是原始调用仍然
+   完不成——所以那一轮的结果必须是 `chrome_launched_extension_not_connected`（带 `extensionState`），
+   **不能降级成 `extension_disconnected`**，否则「浏览器已经起来了」这个事实就被藏掉了。
 
 Chrome 156 于 **2026-10-20** 进入稳定通道（`156.0.8078.47/.48`，本机是 `.49`），含 **353 项安全修复、其中 6 个严重漏洞**，覆盖图形、无障碍、渲染、通信等模块。稳定通道公告的措辞是「修复与改进」，**没有逐项功能清单**。
 

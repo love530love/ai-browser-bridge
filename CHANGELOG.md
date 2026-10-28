@@ -1,6 +1,15 @@
+## 0.19.1 — 2026-10-28（诊断 + 分支修正；**扩展被 Chrome 停用**这一事实浮出水面）
+
+- **0.19.0 的真机验证暴露了一个更根本的问题**：退出浏览器后发普通调用，Chrome 被拉起了，但扩展没回连。查下去发现扩展在 profile 里被**停用**了：`disable_reasons: [16777216]`，`extensions.ui.developer_mode` 未设置（即开发者模式关闭）。这是一个此前完全看不见的状态——服务只能看到「没连上」，而「没装」「装了但被停用」「装了但没起来」的修法完全不同。
+- **新增 `src/chrome-profile.js`：从磁盘读出扩展到底在哪个 profile、是不是被停用**。读 `User Data\<profile>\Secure Preferences`（以及部分版本的 `Preferences`）里的 `extensions.settings`，按**扩展目录路径**匹配（忽略斜杠方向、大小写、尾部分隔符），返回 profile 名、扩展 id、`enabled`、`disableReasons`。启用副本优先——另一个 profile 里的停用残留不该掩盖能真正服务基座的那一个。
+- **`doctor` 新增 `bridge-extension-registered` 检查**，并把三种状态写成三句不同的话（未安装 / 已启用 / 被停用并给出 `chrome://extensions` + 开发者模式的具体动作），而不是一句笼统的「未连接」。本机实测输出：`profileDirectory: Default`、`enabled: false`、`disableReasons: [16777216]`。
+- **修掉 0.19.0 的一个分支错误**：`launchBrowserOnce` 在「浏览器起来了但扩展没连」时把 `status` 改成了 `uncertain`，而 `reviveBrowser` 用 `status === 'success'` 判断，于是这种情况被降级成 `extension_disconnected`——**恰好把「浏览器已经起来了」这个事实藏掉了**。现在按 `reason` 判断，返回 `chrome_launched_extension_not_connected` 并带上 `extensionState`。
+- 新增 `test/chrome-profile.test.js` 5 条（跨 profile 查找、停用不掩盖启用、停用要报原因位、路径归一化、不误报），全量单测 **394/394**。
+- **给用户的一步操作**：`chrome://extensions` 打开开发者模式（开发者模式），把「自主浏览器」重新启用。**在 154 上它一直好用，156 上第一次真正重启后就被停用了**——这个关联是当前最强的解释，但没有 154 的对照实验，所以记为「强怀疑」，不写成结论。
+
 ## 0.19.0 — 2026-10-28（已部署，真实 Chrome 156 实测）
 
-- **「浏览器没开」不再是一个回答，而是一个动作**。此前任何需要扩展的调用在浏览器关着时都返回 `extension_disconnected` 让 agent 自己想办法——它要么放弃，要么去求人做一件基座自己就能做的事。现在这条路上多了一步：**没有 chrome 进程在跑时，先启动浏览器，再把它自己重跑一次**，结果里带 `autoLaunched`（启动了什么、连上没有、进程/窗口句柄）。实测：退出浏览器后直接发 `browser_read`，基座自己拉起 Chrome、扩展回连、原始调用完成。
+- **「浏览器没开」不再是一个回答，而是一个动作**。此前任何需要扩展的调用在浏览器关着时都返回 `extension_disconnected` 让 agent 自己想办法——它要么放弃，要么去求人做一件基座自己就能做的事。现在这条路上多了一步：**没有 chrome 进程在跑时，先启动浏览器，再把它自己重跑一次**，结果里带 `autoLaunched`（启动了什么、连上没有、进程/窗口句柄）。真机实测：退出浏览器后发一次普通调用，Chrome 确实被拉起（窗口出现、进程存活）；但那一轮扩展没能回连——原因见 0.19.1，**不是启动链的问题，而是 Chrome 把扩展停用了**。
 - **规则窄得刻意**：只在**一个 chrome 进程都不存在**时启动。浏览器在跑但没回连是另一个问题（扩展被暂停、worker 被回收），这时候再起一个实例是**第二个 profile**——那会丢 cookie 而不是修好它。这种情况返回 `chrome_running_extension_not_connected`，并说清楚"该重新加载扩展，不是该重试"。
 - **顺手拆掉第二个死角：旧 tabId**。浏览器重启后上一轮的 `tabId` 必然失效，而「tab not found」和「浏览器没开」是同一种阻滞。现在启动之后如果发现 `args.tabId` 不在当前标签里，直接返回 `tab_gone_after_browser_launch` + **当前标签列表** + 下一步（用 `browser_open` 打开目标地址，它本来就会复用同 url 的标签）。agent 拿到的是可以继续的信息，不是终点。
 - **并发不打架**：两个 agent 同时发调用时只会有一次启动（in-flight 去重），否则第二个会得到「已经在跑」——而那正是它自己刚启动的那个。

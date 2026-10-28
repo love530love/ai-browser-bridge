@@ -4,6 +4,20 @@
 
 ## 目标
 
+## 2026-10-28 接手增量（0.19.1）：扩展被 Chrome 停用这件事，现在看得见了
+
+- 0.19.0 真机验证暴露：浏览器被拉起来了，但扩展没回连。磁盘上的答案是**扩展被停用**
+  （`disable_reasons: [16777216]`，开发者模式关闭）。服务此前只能看到「没连上」。
+- 新增 `src/chrome-profile.js`：读 `User Data\<profile>\Secure Preferences` 的 `extensions.settings`，
+  按**扩展目录路径**匹配（忽略斜杠方向/大小写/尾分隔符），返回 profile 名、id、`enabled`、`disableReasons`；
+  **启用副本优先**（另一个 profile 的停用残留不该掩盖能服务基座的那个）。
+- `doctor` 新增 `bridge-extension-registered`，三种状态三句不同的话（未安装 / 已启用 / 被停用 + 具体动作）。
+- 修 0.19.0 的分支错误：`launchBrowserOnce` 把「起来了但没连」改成 `uncertain`，而 `reviveBrowser` 用
+  `status === 'success'` 判断 ⇒ 被降级成 `extension_disconnected`，把「浏览器已经起来了」藏掉了。
+  现在按 `reason` 判断，返回 `chrome_launched_extension_not_connected` + `extensionState`。
+- **待用户做的一步**：`chrome://extensions` → 开发者模式 → 启用「自主浏览器」。做完之后自动启动链路才算
+  真正闭环（目前只验证到「Chrome 被拉起」这一段）。
+
 ## 2026-10-28 接手增量（0.19.0）：浏览器没开时基座自己启动，并把原调用重跑一次
 
 - **「浏览器没开」不再是回答，而是动作**。需要扩展的调用在浏览器关着时不再直接返回 `extension_disconnected`：

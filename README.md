@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.19.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.19.1**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.19.1 补的是 0.19.0 真机验证时撞见的一个更根本的问题：**扩展被 Chrome 停用了**，而服务只能看到「没连上」。`doctor` 现在多一条 `bridge-extension-registered`，直接从 `User Data\<profile>\Secure Preferences` 读出扩展在哪个 profile、是否启用、`disable_reasons` 是多少——因为「没安装 / 装了但被停用 / 装了但没起来」是三件不同的事，修法完全不同。本机实测：`Default` 里 `enabled: false`、`disable_reasons: [16777216]`、开发者模式关闭；**154 上一直可用，156 上第一次真正重启后被停用**（强怀疑，未做 154 对照）。同时修掉 0.19.0 的一个分支错误：浏览器起来了但扩展没连时，结果被降级成 `extension_disconnected`，**恰好把「浏览器已经起来了」这个事实藏掉**；现在返回 `chrome_launched_extension_not_connected` 并带上 `extensionState`。
 
 0.19.0 把「浏览器没开」从一个回答变成一个动作。此前任何需要扩展的调用在浏览器关着时都返回 `extension_disconnected`，让 agent 自己去求人——而这是基座自己就能做的事。现在**没有 chrome 进程在跑时，第一次需要扩展的调用会先启动浏览器，再把它自己重跑一次**，结果里带 `autoLaunched`（启动了谁、连上没有、进程与窗口句柄）。规则窄得刻意：只在**一个 chrome 进程都不存在**时启动；浏览器在跑却没回连是另一个问题（扩展被暂停、worker 被回收），再起一个实例等于**第二个 profile**，那是丢 cookie 而不是修好它，所以那种情况返回 `chrome_running_extension_not_connected` 并说明该重新加载扩展。顺手拆掉第二个死角：浏览器重启后旧 `tabId` 必然失效，现在启动后若发现该 id 不在当前标签里，直接返回 `tab_gone_after_browser_launch` + 当前标签列表 + 下一步，而不是一句「tab not found」。启动用服务进程完成（工具调用里起的 Chrome 会被沙箱连树回收，实测），参数不含任何 profile 标志，所以拿到的就是人双击图标时那份 cookie 与登录态。默认开，配置项 `autoLaunchBrowser`，`AIB_AUTO_LAUNCH=0` 可关；测试默认关闭。
 

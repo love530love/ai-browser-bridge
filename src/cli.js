@@ -6,6 +6,7 @@ import { callWithWaitingRecovery } from './auto-recovery.js';
 import { createAgentPolicy } from './policy.js';
 import { regressionSummary } from './regression-summary.js';
 import { computeBuildIdentity } from './build-identity.js';
+import { findBridgeExtension, describeExtensionState } from './chrome-profile.js';
 import { usageSummary } from './usage-summary.js';
 
 async function rawToolCall(name, args) {
@@ -38,6 +39,22 @@ async function doctor() {
     if (status.extensionVersion !== manifestVersion) report.recommendations.push(`Loaded extension differs from disk version ${manifestVersion}; reload and verify before claiming deployment complete.`);
     add('service-status', status.service === 'ai-browser-bridge', { version: status.version });
     add('extension-connected', status.connected === true, { extensionVersion: status.extensionVersion ?? null, browserVersion: status.browserVersion ?? null });
+    // "Not connected" and "not installed" and "Chrome disabled it" are the same
+    // symptom and three different fixes, so the profile on disk is read here.
+    const extensionState = findBridgeExtension({ extensionDir: join(ROOT, 'extension') });
+    add('bridge-extension-registered', extensionState.found === true && extensionState.enabled === true, {
+      profileDirectory: extensionState.profileDirectory ?? null,
+      extensionId: extensionState.extensionId ?? null,
+      enabled: extensionState.enabled ?? null,
+      disableReasons: extensionState.disableReasons ?? null,
+      explanation: describeExtensionState(extensionState)
+    });
+    if (extensionState.found && extensionState.enabled === false) {
+      report.recommendations.push(`Chrome has disabled the bridge extension in profile "${extensionState.profileDirectory}". Open chrome://extensions, turn on Developer mode and enable it; until then nothing can connect.`);
+    }
+    if (!extensionState.found) {
+      report.recommendations.push('The bridge extension is not registered in any Chrome profile. Load it with "Load unpacked" from chrome://extensions with Developer mode on.');
+    }
     add('version-match', !!status.version && !!status.extensionVersion && status.version === status.extensionVersion, { serviceVersion: status.version, extensionVersion: status.extensionVersion ?? null });
     add('queue-idle', !status.active && status.queued === 0, { active: status.active, queued: status.queued });
     add('upload-roots', (status.uploadRoots ?? 0) === (config.uploadRoots?.length ?? 0), { count: status.uploadRoots ?? 0 });

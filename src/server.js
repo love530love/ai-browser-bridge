@@ -5,6 +5,7 @@ import { basename, extname, isAbsolute, join, relative, resolve } from 'node:pat
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { loadConfig, ROOT, stateDir } from './config.js';
+import { findBridgeExtension, describeExtensionState } from './chrome-profile.js';
 import { VERSION } from './version.js';
 import { TOOLS, validateCall } from './tools.js';
 import { createTasks } from './tasks.js';
@@ -846,9 +847,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       return { ...launched, extensionConnected: true, extensionVersion, focusRequired: false };
     }
     // The browser is up; the bridge is not. Saying "success" here would be a lie
-    // about what the caller can actually do next.
+    // about what the caller can actually do next. "Not connected" has two very
+    // different causes and they look identical from here, so the profile on disk
+    // is read to say which one it is instead of guessing.
+    const extensionState = findBridgeExtension({ extensionDir: join(ROOT, 'extension') });
     return { ...launched, status: 'uncertain', verified: false,
       reason: 'chrome_launched_extension_not_connected', extensionConnected: false, extensionVersion: extensionVersion ?? null,
+      extensionState: { ...extensionState, explanation: describeExtensionState(extensionState) },
       message: 'Chrome started with the user profile, but the bridge extension has not connected. The browser is running; load the extension or press Reconnect before issuing page operations.' };
   }
 
@@ -914,6 +919,12 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       return { ...disconnectedResult(), reason: 'chrome_running_extension_not_connected', autoLaunched: launchNote(launched),
         howToResume: 'A Chrome process is already running, so starting another one would create a second profile and lose cookies. Reload the 自主浏览器 extension (or press Reconnect) instead.',
         recommendedNextAction: 'Do not retry blindly: the browser is up, the bridge is not attached. Reload the extension, then repeat the call.' };
+    }
+    if (launched?.reason === 'chrome_launched_extension_not_connected') {
+      // The launch worked; the browser just has nothing that can talk back. Do
+      // not downgrade this to extension_disconnected - that hides the fact that a
+      // browser is now running and says nothing about why.
+      return { ...launched, dispatched: true, autoLaunched: launchNote(launched) };
     }
     if (launched?.status === 'success') return { ...launched, dispatched: true, verified: false, autoLaunched: launchNote(launched) };
     return { ...disconnectedResult(), launchAttempt: launched ?? null, autoLaunched: launchNote(launched ?? {}) };
