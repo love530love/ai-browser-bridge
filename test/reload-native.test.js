@@ -74,7 +74,7 @@ test('a connected extension reloads itself, with no window and no keystroke', as
   assert.notEqual(result.extensionSessionId, previousSession, 'verification must be a new session, not the old one');
 });
 
-test('an extension that cannot reload itself degrades to the desktop path instead of claiming success', async t => {
+test('an extension that cannot reload itself offers the desktop path instead of taking it', async t => {
   let desktopCalls = 0;
   const { b, wsUrl } = await setup(t, {
     desktopAdapter: {
@@ -89,23 +89,43 @@ test('an extension that cannot reload itself degrades to the desktop path instea
     onCommand: (command, ws) => ws.send(JSON.stringify({ type: 'result', id: command.id, result: { status: 'success', reloaded: true } }))
   });
 
-  const result = await b.call('browser_reload_extension', CONFIRM);
-  assert.equal(desktopCalls, 1, 'the fallback must actually run');
+  // The remaining path calls SetForegroundWindow, so it must not run on the
+  // caller's behalf: refusing costs one more call, interrupting the user is
+  // irreversible.
+  const refused = await b.call('browser_reload_extension', CONFIRM);
+  assert.equal(desktopCalls, 0, 'nothing may be dispatched without allowFocus');
+  assert.equal(refused.reason, 'focus_required_for_ui_automation');
+  assert.equal(refused.foregroundTaken, false);
+  assert.equal(refused.focusRequired, true);
+  assert.equal(refused.retryWith.arguments.allowFocus, true);
+
+  const result = await b.call('browser_reload_extension', { ...CONFIRM, allowFocus: true });
+  assert.equal(desktopCalls, 1, 'the fallback must actually run once it is allowed');
   assert.equal(result.method, 'windows_ui_automation');
   assert.equal(result.focusRequired, true, 'the fallback must admit it needs the foreground');
+  assert.equal(result.foregroundTaken, true);
   assert.equal(result.fallbackReason, 'extension_did_not_self_reload');
 });
 
-test('with no extension connected the desktop path is used and says it needs the foreground', async t => {
+test('with no extension connected the desktop path is offered, not taken', async t => {
+  let desktopCalls = 0;
   const { b } = await setup(t, {
     desktopAdapter: {
       available: true,
       implementedActions: ['reload_extension'],
       listChromeWindows: async () => ({ status: 'success', windows: [{ processId: 11, windowHandle: 12, title: 'Chrome' }] }),
-      reloadExtension: async () => ({ status: 'success', retryable: false, reason: 'extension_reload_verified', dispatched: true, verified: true })
+      reloadExtension: async () => { desktopCalls++; return { status: 'success', retryable: false, reason: 'extension_reload_verified', dispatched: true, verified: true }; }
     }
   });
-  const result = await b.call('browser_reload_extension', CONFIRM);
+  const refused = await b.call('browser_reload_extension', CONFIRM);
+  assert.equal(desktopCalls, 0);
+  assert.equal(refused.status, 'waiting');
+  assert.equal(refused.reason, 'focus_required_for_ui_automation');
+  assert.equal(refused.dispatched, false);
+  assert.match(refused.howToResume, /chrome:\/\/extensions/);
+
+  const result = await b.call('browser_reload_extension', { ...CONFIRM, allowFocus: true });
+  assert.equal(desktopCalls, 1);
   assert.equal(result.method, 'windows_ui_automation');
   assert.equal(result.focusRequired, true);
   assert.equal(result.verified, true);

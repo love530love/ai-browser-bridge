@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { findBridgeExtension, describeExtensionState } from '../src/chrome-profile.js';
+import { findBridgeExtension, describeExtensionState, sameDirectory } from '../src/chrome-profile.js';
 
 const extensionDir = 'K:\\PythonProjects5\\AI-Browser-Bridge\\extension';
 
@@ -66,4 +66,15 @@ test('a profile without the extension is not a false positive', () => {
   assert.equal(found.found, false);
   assert.equal(found.reason, 'not_installed');
   assert.match(describeExtensionState(found), /not installed/);
+});
+
+test('two user-data directories are the same profile only when they really are', () => {
+  // This comparison decides whether a launch opened the browser the human uses,
+  // so a second install must never be mistaken for the first one.
+  assert.equal(sameDirectory('C://Users//x//AppData//Local//Google//Chrome//User Data',
+    'c:/users/x/appdata/local/google/chrome/user data/'), true);
+  assert.equal(sameDirectory('C://Users//x//AppData//Local//Google//Chrome SxS\\User Data',
+    'C://Users//x//AppData//Local//Google//Chrome//User Data'), false);
+  assert.equal(sameDirectory(null, 'C://x'), false);
+  assert.equal(sameDirectory('C://x', undefined), false);
 });

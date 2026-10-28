@@ -1,3 +1,26 @@
+## 0.20.0 — 2026-10-28（**不再开错浏览器，也不再抢前台**）
+
+用户的反馈是这一轮的全部起点，三条都指向同一个设计底线：基座替代的是**人类工程师的手**，所以它既不能把人正在用的会话换掉，也不能把人正在看的窗口抢走。
+
+> 「不是打开新窗口/标签，也不是打开无痕窗口/标签页，也不是打开一个没有历史信息保存/或账号登录过的浏览器……既没了 cookies 信息，也没有书签等历史信息，更没有了登录信息/密码」
+> 「当用户或 agent 把任务交给后台来执行的话，前台正在干其他事情的情况也不应把浏览器界面弹到前台来导致用户的其他操作中断」
+
+- **查清了「没有历史信息的浏览器」到底是怎么来的，不是靠猜**。`scripts/launch-chrome.ps1` 原来按注册表顺序找 `chrome.exe`：先 HKLM，再 HKCU。本机实测这两项指向**两个不同的安装**——
+  - `HKLM\...\App Paths\chrome.exe` → `C:\Program Files\Google\Chrome\Application\chrome.exe`（稳定版，`User Data` 里 `last_used=Default`，书签 1062 B、`Login Data` 196608 B）
+  - `HKCU\...\App Paths\chrome.exe` → `C:\Users\love\AppData\Local\Google\Chrome SxS\Application\chrome.exe`（**Canary/SxS 渠道**，`Chrome SxS\User Data` 里 `last_used=Profile 1`、`Last Version=158.0.8105.0`，该 profile **没有 Bookmarks**）
+
+  而 Windows 解析 `chrome` 这个 App Path 时**HKCU 优先于 HKLM**。所以「起一个没有登录/没有书签/没有历史的浏览器」不是玄学，是**选错渠道**：每个渠道有自己的 user-data 目录，SxS 那份和用户日常用的那份完全无关。
+- **改法是「按 profile 证据选二进制」，不是「按注册表顺序选」**。脚本现在枚举所有已安装渠道，对每个渠道的 user-data 目录做磁盘取证并打分：`Local State` 里的 `last_used` profile 是否存在（+1）、该 profile 有书签（+2）、`Login Data` 非空壳（+1）。得分最高者胜，平手时**稳定版优先**。本机实测：稳定版 4 分、SxS 2 分 → 选中稳定版，SxS 进 `rejectedCandidates`。
+- **没有可用 profile 时拒绝启动，而不是开一个空壳**。若所有渠道得分都是 0，返回 `not_dispatched / no_used_profile_available` 并说明「开一个空浏览器比不开更糟，因为它看起来像会话被清空」。这是把「绝不打开没有历史信息的浏览器」写成了代码里的拒绝条件，而不是注释里的愿望。
+- **启动不再抢前台**。原来 `Start-Process` 默认前台激活。现在用 `CreateProcess` + `STARTF_USESHOWWINDOW` + `SW_SHOWNOACTIVATE` 起进程，窗口出现在当前窗口**后面**而不打断它。`-Activate` 是显式的反向开关（只有人确实要看屏幕时才用）。而且**不承诺、只测量**：启动前后各取一次 `GetForegroundWindow`，如果前台窗口变成了新窗口就如实报 `activated: true`——不靠「应该不会抢」这句话。
+- **服务侧加了第二道闸：窗口在屏幕上就绝不启动**。`launchBrowserOnce` 在启动前先探测可见 Chrome 窗口，有就返回 `chrome_window_present` 并映射成 `chrome_running_extension_not_connected`。这条独立于脚本的进程判断，因为「进程数为 0 但窗口还在」这种中间态不该被当成「没有浏览器」。
+- **启动后校验 profile 身份**：把脚本报回来的 `userDataDir` 与本机实际使用的目录比对，不一致就返回 `launched_wrong_profile`（`status: failed`, `retryable: false`），**并且不继续原调用**。这条是最后一道保险——即使前面全错了，也不会在一个陌生 profile 上继续跑任务、把结果写进别人的会话里。
+- **`browser_reload_extension` 的 UIA 回退不再自动抢前台**。这条路径是 `SetForegroundWindow` + 往真实窗口里打字，是「时不时弹到屏幕上」的另一个来源。现在没有 `allowFocus: true` 时返回 `status: waiting / reason: focus_required_for_ui_automation / foregroundTaken: false`，**什么都不派发、也不抬窗口**，并给出 `retryWith` 让调用方自己决定要不要打断人。允许后才执行，并如实报 `foregroundTaken: true`。
+- **`doctor` 新增 `auto-start-target`：不启动也能看到「会起哪个浏览器、用哪份 profile」**。脚本加了 `-DryRun`，doctor 用它跑决策，输出 `wouldLaunch`（exe 路径、渠道、user-data 目录、得分、`last_used` profile）、`rejectedCandidates`、`runningSession` 以及 `sameProfileAsThisMachine`。本机实测 `true`——这正是「下次自动启动不会开错浏览器」的可复现证据。
+- **纠正上一轮的一个错误结论**：0.19.1 说扩展被 Chrome 停用（`disable_reasons: [16777216]`）。本轮实测 `Secure Preferences` 里 `extensions.ui.developer_mode` **已经是 `true`**，`doctor` 也报 `enabled: true / disableReasons: []`，扩展当前已连接（0.19.0，Chrome 156.0.8078.49）。所以「开发者模式没开、扩展启用不了」这个状态**已经不成立**，上一轮的判断是当时的真实现场、但已过期，按过期处理而不是继续沿用。
+- **顺带修掉一个一直在误报的数字**：`visibleWindowCount` 原来用 `IsWindowVisible` 数窗口，Chrome 那一堆不可见消息窗口也被算进去，数字长期虚高。现在只算「可见 + 无 owner + 有标题」的顶层窗口，本机从虚高变成正确的 **1**。
+- 测试：`bridge.test.js` +3（屏幕上有窗口就不启动、启动落到别的 profile 必须报错且不继续、启动请求不得要求激活）、`chrome-profile.test.js` +1（`sameDirectory` 不把 SxS 认成同一个 profile）、`reload-native.test.js` 2 条按新契约重写（先拒绝、`allowFocus:true` 才执行）。受影响的 6 个文件 **56/56**，全量 **397/397**。
+
 ## 0.19.1 — 2026-10-28（诊断 + 分支修正；**扩展被 Chrome 停用**这一事实浮出水面）
 
 - **0.19.0 的真机验证暴露了一个更根本的问题**：退出浏览器后发普通调用，Chrome 被拉起了，但扩展没回连。查下去发现扩展在 profile 里被**停用**了：`disable_reasons: [16777216]`，`extensions.ui.developer_mode` 未设置（即开发者模式关闭）。这是一个此前完全看不见的状态——服务只能看到「没连上」，而「没装」「装了但被停用」「装了但没起来」的修法完全不同。

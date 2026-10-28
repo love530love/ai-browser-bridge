@@ -4,6 +4,37 @@
 
 ## 目标
 
+## 2026-10-28 接手增量（0.20.0）：不再开错浏览器，也不再抢前台
+
+- **本机有一条必须先知道的事实**：`HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe`
+  指向 `C:\Users\love\AppData\Local\Google\Chrome SxS\Application\chrome.exe`（**Canary/SxS 渠道**），
+  而 `HKLM` 那一项指向稳定版 `C:\Program Files\Google\Chrome\Application\chrome.exe`。
+  Windows 解析 `chrome` 时 **HKCU 优先**，而每个渠道有**自己的 user-data 目录**
+  （`Chrome SxS\User Data` vs `Chrome\User Data`）⇒ 选错渠道 = 一个没登录、没书签、没历史的浏览器。
+  **这就是「又开了一个没有历史信息的浏览器」的根因**，不是随机故障。
+- `scripts/launch-chrome.ps1` 现在**按 profile 证据选二进制**：对每个已安装渠道的 user-data 目录打分
+  （`last_used` profile 存在 +1、有书签 +2、`Login Data` 非空壳 +1），最高分胜、平手稳定版优先；
+  全 0 分时返回 `no_used_profile_available` **拒绝启动**（空壳比不开更糟，它看起来像会话被清空）。
+- **不抢前台**：改用 `CreateProcess` + `STARTF_USESHOWWINDOW` + `SW_SHOWNOACTIVATE`（不再用 `Start-Process`）。
+  并且**只测量不承诺**：启动前后各取 `GetForegroundWindow`，前台若变成新窗口就报 `activated: true`。
+- **服务侧两道闸**：① 启动前探测可见窗口，有窗口就 `chrome_window_present`（映射成
+  `chrome_running_extension_not_connected`），绝不启动；② 启动后比对 `userDataDir` 与本机实际使用的目录，
+  不一致 → `launched_wrong_profile`（`status: failed`，`retryable: false`）**且不继续原调用**。
+- **`browser_reload_extension` 的 UIA 回退不再自动抢前台**（那是 `SetForegroundWindow` + 往真实窗口打字）。
+  没有 `allowFocus: true` 时返回 `waiting / focus_required_for_ui_automation / foregroundTaken: false`，
+  什么都不派发、也不抬窗口，并给 `retryWith`；允许后才执行并如实报 `foregroundTaken: true`。
+- **`doctor` 新增 `auto-start-target`**：用 `-DryRun` 在不启动任何东西的前提下回答
+  「会起哪个浏览器、用哪份 profile」，输出 `wouldLaunch` / `rejectedCandidates` / `runningSession` /
+  `sameProfileAsThisMachine`。本机实测 `true`，SxS 落在 `rejectedCandidates`。
+- **上一轮结论已过期，按过期处理**：0.19.1 说扩展被 Chrome 停用；本轮实测
+  `Secure Preferences` 的 `extensions.ui.developer_mode` **已是 `true`**，`doctor` 报
+  `enabled: true / disableReasons: []`，扩展当前已连接（0.19.0 / Chrome 156.0.8078.49）。
+  所以**不再需要用户去开开发者模式**——那一步已经完成，别再让用户重做。
+- 顺手修掉 `visibleWindowCount` 长期虚高：原来用 `IsWindowVisible` 把 Chrome 一堆不可见消息窗口也算进去，
+  现在只算「可见 + 无 owner + 有标题」的顶层窗口，本机从虚高变成正确的 **1**。
+- 测试：受影响的 6 个文件 **56/56**，全量 **397/397**。`reload-native.test.js` 两条按新契约重写
+  （先拒绝、`allowFocus: true` 才执行）。
+
 ## 2026-10-28 接手增量（0.19.1）：扩展被 Chrome 停用这件事，现在看得见了
 
 - 0.19.0 真机验证暴露：浏览器被拉起来了，但扩展没回连。磁盘上的答案是**扩展被停用**

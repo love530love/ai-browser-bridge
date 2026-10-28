@@ -104,9 +104,15 @@ export function createDesktopAdapter({
 
   // Launching is only for the case where no browser exists. The script refuses
   // when any chrome process is alive, so this can never create a competing
-  // instance or a second profile. It also passes no profile flags, which is what
-  // keeps the user's cookies and logins intact.
-  async function launchChrome({ url } = {}) {
+  // instance or a second profile. It also passes no profile flags, and picks the
+  // binary whose user-data directory actually holds a used profile, which is
+  // what keeps the user's cookies and logins intact.
+  //
+  // activate defaults to false: the new window is created with
+  // SW_SHOWNOACTIVATE so a background task cannot pull the screen out from under
+  // someone who is working in another window. dryRun answers "which browser and
+  // which profile would this use" without starting anything.
+  async function launchChrome({ url, activate = false, dryRun = false } = {}) {
     if (!available) return unavailable();
     if (url !== undefined && url !== '' && !/^https?:\/\//i.test(String(url))) {
       return { status: 'denied', retryable: false, reason: 'unsupported_url_scheme', dispatched: false,
@@ -114,6 +120,8 @@ export function createDesktopAdapter({
     }
     const args = ['-AsJson'];
     if (url) args.push('-Url', String(url));
+    if (activate) args.push('-Activate');
+    if (dryRun) args.push('-DryRun');
     let result;
     try { result = await runScript(launchScriptPath, args, 45000); }
     catch { return { status: 'uncertain', retryable: false, reason: 'desktop_process_result_unknown', dispatched: null,

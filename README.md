@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.19.1**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.20.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.20.0 修的是用户直接指出的两件事：**不要再开一个没有历史信息的浏览器**，以及**不要把浏览器界面弹到前台打断正在做别的事的人**。前者查清了根因——本机 `HKCU\...\App Paths\chrome.exe` 指向 **Chrome SxS（Canary 渠道）**，而 Windows 解析 `chrome` 时 HKCU 优先于 HKLM，每个渠道又有自己的 user-data 目录，所以「起了一个没登录、没书签、没历史的浏览器」不是玄学而是**选错渠道**。现在脚本对每个已安装渠道的 profile 做磁盘取证（`last_used` profile 是否存在、有无书签、`Login Data` 是否空壳）打分选二进制，得分全为 0 时**拒绝启动**而不是开一个空壳；服务侧启动前先探测可见窗口（有窗口就绝不启动），启动后比对 `userDataDir`，不一致直接 `launched_wrong_profile` 且**不继续原调用**。后者改成 `CreateProcess` + `SW_SHOWNOACTIVATE`，窗口出现在当前窗口后面；并且不承诺、只测量——启动前后各取一次 `GetForegroundWindow`，抢了焦点就如实报 `activated: true`。`browser_reload_extension` 的 UIA 回退同样不再自动抢前台，改为需要显式 `allowFocus: true`。`doctor` 新增 `auto-start-target`，用 `-DryRun` 在不启动任何东西的前提下回答「会起哪个浏览器、用哪份 profile」。
 
 0.19.1 补的是 0.19.0 真机验证时撞见的一个更根本的问题：**扩展被 Chrome 停用了**，而服务只能看到「没连上」。`doctor` 现在多一条 `bridge-extension-registered`，直接从 `User Data\<profile>\Secure Preferences` 读出扩展在哪个 profile、是否启用、`disable_reasons` 是多少——因为「没安装 / 装了但被停用 / 装了但没起来」是三件不同的事，修法完全不同。本机实测：`Default` 里 `enabled: false`、`disable_reasons: [16777216]`、开发者模式关闭；**154 上一直可用，156 上第一次真正重启后被停用**（强怀疑，未做 154 对照）。同时修掉 0.19.0 的一个分支错误：浏览器起来了但扩展没连时，结果被降级成 `extension_disconnected`，**恰好把「浏览器已经起来了」这个事实藏掉**；现在返回 `chrome_launched_extension_not_connected` 并带上 `extensionState`。
 

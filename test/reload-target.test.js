@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import { createBridge } from '../src/server.js';
 
 const row = (processId, windowHandle, title = 'Chrome') => ({ processId, windowHandle, title });
-const CONFIRM = { confirmation: 'reload_extension_once' };
+// This file is about how the UI Automation path resolves and revalidates its
+// target, so it opts into that path explicitly: without allowFocus the call
+// refuses up front because that path raises the Chrome window. The refusal
+// itself is covered in reload-native.test.js.
+const CONFIRM = { confirmation: 'reload_extension_once', allowFocus: true };
 
 function fixture(t, { windows, reload }) {
   const reloadCalls = [];

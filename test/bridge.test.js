@@ -386,7 +386,10 @@ test('desktop reload requires a recently observed target and revalidates it befo
     reloadExtension: async () => { reloadCalls++; return { status: 'success', dispatched: true }; }
   };
   const { b } = await setup(t, { desktopAdapter });
-  const args = { processId: 17, windowHandle: 801, confirmation: 'reload_extension_once' };
+  // allowFocus is required to reach the UI Automation path at all: without it the
+  // call refuses, because that path raises the Chrome window. These assertions are
+  // about target binding, so the flag is passed to get past the focus gate.
+  const args = { processId: 17, windowHandle: 801, confirmation: 'reload_extension_once', allowFocus: true };
   const withoutObservation = await b.call('browser_reload_extension', args);
   assert.equal(withoutObservation.status, 'denied');
   assert.equal(withoutObservation.reason, 'chrome_target_not_recently_observed');
@@ -423,7 +426,7 @@ test('desktop reload is one-shot, target-bound, auditable, and excludes concurre
   const windows = await b.call('browser_desktop_windows', {});
   assert.equal(windows.windows[0].windowHandle, 801);
 
-  const inFlight = b.call('browser_reload_extension', { windowHandle: 801, processId: 17, confirmation: 'reload_extension_once' });
+  const inFlight = b.call('browser_reload_extension', { windowHandle: 801, processId: 17, confirmation: 'reload_extension_once', allowFocus: true });
   assert.equal(reloadCalls, 0);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(reloadCalls, 1);
@@ -431,7 +434,7 @@ test('desktop reload is one-shot, target-bound, auditable, and excludes concurre
   const concurrentWrite = await b.call('browser_click', { tabId: 1, ref: 'current-ref' });
   assert.equal(concurrentWrite.status, 'waiting');
   assert.equal(concurrentWrite.reason, 'desktop_action_in_progress');
-  const secondReload = await b.call('browser_reload_extension', { windowHandle: 801, processId: 17, confirmation: 'reload_extension_once' });
+  const secondReload = await b.call('browser_reload_extension', { windowHandle: 801, processId: 17, confirmation: 'reload_extension_once', allowFocus: true });
   assert.equal(secondReload.status, 'waiting');
   assert.equal(reloadCalls, 1);
 
@@ -541,4 +544,65 @@ test('auto start stays off unless it was asked for', async t => {
   const result = await b.call('browser_read', { tabId: 5, agent: 'starter' });
   assert.equal(launches, 0);
   assert.equal(result.reason, 'extension_disconnected');
+});
+
+test('a browser window on screen is never launched over', async t => {
+  // The extension is missing but the browser is visibly there. Starting another
+  // instance would give a second profile and lose the session, so the window
+  // itself has to block the launch - not just a process count.
+  let launches = 0;
+  const { b } = await setup(t, {
+    autoLaunchBrowser: true,
+    desktopAdapter: {
+      available: true,
+      listChromeWindows: async () => ({ status: 'success', windows: [{ processId: 4916, windowHandle: 6294638, title: 'Inbox - Google Chrome' }] }),
+      launchChrome: async () => { launches++; return { status: 'success', reason: 'chrome_launched' }; }
+    }
+  });
+  const result = await b.call('browser_read', { tabId: 5, agent: 'starter' });
+  assert.equal(launches, 0);
+  assert.equal(result.reason, 'chrome_running_extension_not_connected');
+  assert.equal(result.autoLaunched.reason, 'chrome_window_present');
+  assert.equal(result.autoLaunched.activated, false);
+});
+
+test('a launch that lands on another profile is reported instead of used', async t => {
+  // A second Chrome install (Beta, Dev, Canary/SxS) has its own user-data
+  // directory. Continuing on it looks to the human like a wiped session and
+  // loses every cookie the task needs, so it must fail loudly - even though the
+  // extension on that profile answers perfectly well.
+  const holder = {};
+  let commands = 0;
+  const { b, wsUrl } = await setup(t, autoLaunchOptions(holder, async () => {
+    const ws = await extensionWithVersion(holder.wsUrl, (await import('../src/version.js')).VERSION);
+    ws.on('message', raw => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type !== 'command') return;
+      commands++;
+      ws.send(JSON.stringify({ type: 'result', id: msg.id, result: { read: { title: 'wrong profile' } } }));
+    });
+    return { status: 'success', reason: 'chrome_launched', dispatched: true, verified: true,
+      chromePath: 'C:/Users/x/AppData/Local/Google/Chrome SxS/Application/chrome.exe',
+      channel: 'canary', userDataDir: 'C:/Users/x/AppData/Local/Google/Chrome SxS/User Data',
+      processId: 4242, windowHandle: 99 };
+  }));
+  holder.wsUrl = wsUrl;
+
+  const result = await b.call('browser_read', { tabId: 5, agent: 'starter' });
+  assert.equal(result.reason, 'launched_wrong_profile');
+  assert.equal(result.retryable, false);
+  assert.equal(result.autoLaunched.channel, 'canary');
+  assert.match(result.howToResume, /different install/);
+  assert.equal(commands, 0, 'the original call must not run on the wrong profile');
+});
+
+test('the launch is asked for without taking focus', async t => {
+  const seen = [];
+  const { b } = await setup(t, autoLaunchOptions({}, async options => {
+    seen.push(options);
+    return { status: 'not_dispatched', retryable: false, reason: 'chrome_already_running' };
+  }));
+  await b.call('browser_read', { tabId: 5, agent: 'starter' });
+  assert.equal(seen.length, 1);
+  assert.notEqual(seen[0]?.activate, true, 'a background task must not ask the launcher to activate the window');
 });

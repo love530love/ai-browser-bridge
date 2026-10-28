@@ -5,7 +5,7 @@ import { basename, extname, isAbsolute, join, relative, resolve } from 'node:pat
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { loadConfig, ROOT, stateDir } from './config.js';
-import { findBridgeExtension, describeExtensionState } from './chrome-profile.js';
+import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory } from './chrome-profile.js';
 import { VERSION } from './version.js';
 import { TOOLS, validateCall } from './tools.js';
 import { createTasks } from './tasks.js';
@@ -192,9 +192,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       enabled: autoLaunchEnabled,
       trigger: 'any call that needs the extension, when no chrome process is running',
       launchesOnlyWhenNothingIsRunning: true,
+      refusesWhenAWindowIsOnScreen: 'chrome_window_present - a visible Chrome window means the session exists, so nothing is launched',
       afterLaunch: 'the original call is repeated once, with autoLaunched describing what was started',
       staleTabId: 'a tab id from the previous session is answered with tab_gone_after_browser_launch plus the current tab list instead of "tab not found"',
       runningButDisconnected: 'chrome_running_extension_not_connected - a second instance would be a second profile, so nothing is launched',
+      binaryChoice: 'the launcher scores every installed channel (stable, Beta, Dev, Canary/SxS) on which user-data directory actually holds a used profile; a channel with no used profile is refused instead of launched',
+      wrongProfile: 'launched_wrong_profile - a launch that lands on a different user-data directory than the one this machine uses is reported as a failure and never continued on',
+      focus: 'the window is created with SW_SHOWNOACTIVATE and activated:false is reported from a before/after foreground-window measurement, so a background task cannot pull the screen away from the user',
       disabledBy: 'config autoLaunchBrowser:false or AIB_AUTO_LAUNCH=0',
       profileFlags: 'none - the same profile a human double-clicking the icon gets, so existing cookies and logins apply'
     },
@@ -769,18 +773,34 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // version, rather than trusting the dispatch reply.
   //
   // Disconnected: the extension cannot be asked to do anything, so the only path
-  // left is Windows UI Automation. That one genuinely needs the foreground and
-  // says so, instead of silently degrading.
+  // left is Windows UI Automation - which calls SetForegroundWindow and therefore
+  // pulls the screen away from whatever the human is doing in another window.
+  // That is never done on the caller's behalf: the path is offered as
+  // retryWith.allowFocus:true and left to the caller to choose.
   async function reloadCall(name, args, tool) {
     const startedAt = Date.now();
     if (args.confirmation !== RELOAD_EXTENSION_CONFIRMATION) {
       return recordDesktopAudit(name, args, { status: 'denied', retryable: false, reason: 'explicit_confirmation_required', dispatched: false }, startedAt);
     }
+    const focusEscalation = (escalation, extra = {}) => ({
+      status: 'waiting', retryable: true, dispatched: false,
+      reason: 'focus_required_for_ui_automation', focusRequired: true, foregroundTaken: false,
+      method: 'windows_ui_automation', escalation,
+      retryWith: { tool: 'browser_reload_extension', arguments: { ...args, allowFocus: true } },
+      howToResume: 'The extension is not connected, so the reload needs Windows UI Automation, which brings the Chrome window to the front. Nothing was dispatched and no window was raised. Repeat with allowFocus:true only when the user is not working in another window; otherwise reload 自主浏览器 by hand in chrome://extensions.',
+      recommendedNextAction: 'Do not retry blindly. Decide whether interrupting the user is acceptable; if it is not, ask them to reload the extension, then call this again with confirmation.',
+      ...extra
+    });
+    // allowFocus is a service-level policy switch, not a desktop-adapter
+    // argument: the adapter must keep receiving exactly the fields it validates,
+    // and the decision to raise a window belongs to the caller of this tool.
+    const { allowFocus, ...desktopArgs } = args;
     const native = Boolean(extension) && !stopped;
     if (!native) {
-      const fallback = await desktopCall(name, args);
-      return { ...fallback, method: 'windows_ui_automation', focusRequired: true,
-        note: 'The extension was not connected, so the reload used Windows UI Automation. That path types into a real window and therefore needs the foreground.' };
+      if (args.allowFocus !== true) return recordDesktopAudit(name, args, focusEscalation('extension_disconnected'), startedAt);
+      const fallback = await desktopCall(name, desktopArgs);
+      return { ...fallback, method: 'windows_ui_automation', focusRequired: true, foregroundTaken: true,
+        note: 'The extension was not connected, so the reload used Windows UI Automation. That path types into a real window and therefore needs the foreground, which the caller allowed with allowFocus:true.' };
     }
     // Reloading while a write is in flight would kill the reply mid-action and
     // leave an unknown outcome behind. Wait instead.
@@ -797,14 +817,20 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       // An older extension without the self-reload branch throws here. Degrade to
       // the desktop path instead of reporting a reload that never happened.
       desktopOperation = null;
-      const fallback = await desktopCall(name, args);
-      return { ...fallback, method: 'windows_ui_automation', focusRequired: true,
+      if (args.allowFocus !== true) {
+        return recordDesktopAudit(name, args, focusEscalation('extension_cannot_self_reload', { dispatchError: error.message }), startedAt);
+      }
+      const fallback = await desktopCall(name, desktopArgs);
+      return { ...fallback, method: 'windows_ui_automation', focusRequired: true, foregroundTaken: true,
         fallbackReason: 'extension_cannot_self_reload', dispatchError: error.message };
     }
     if (reply?.method !== 'chrome.runtime.reload') {
       desktopOperation = null;
-      const fallback = await desktopCall(name, args);
-      return { ...fallback, method: 'windows_ui_automation', focusRequired: true,
+      if (args.allowFocus !== true) {
+        return recordDesktopAudit(name, args, focusEscalation('extension_did_not_self_reload'), startedAt);
+      }
+      const fallback = await desktopCall(name, desktopArgs);
+      return { ...fallback, method: 'windows_ui_automation', focusRequired: true, foregroundTaken: true,
         fallbackReason: 'extension_did_not_self_reload' };
     }
     const result = await waitForReload({ previousSession, reply });
@@ -834,12 +860,47 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     });
   }
 
-  // Launching only applies when no browser exists. The adapter refuses when any
-  // chrome process is alive, so this can never create a competing instance or a
-  // second profile - which is what would lose the user's cookies.
+  // Launching only applies when no browser exists. Two guards keep that true:
+  //
+  //   - the window probe below refuses to launch when a browser window is on
+  //     screen, so "the extension is not connected" can never turn into "a second
+  //     browser appeared";
+  //   - the adapter's script refuses when any chrome process is alive and picks
+  //     the binary whose user-data directory holds a used profile.
+  //
+  // The launch is also verified against the profile the user actually uses. A
+  // launch that lands on a different user-data directory (another channel, a
+  // blank profile) is reported as a failure rather than quietly continued,
+  // because continuing there would lose every cookie the task depends on.
   async function launchBrowserOnce(args) {
+    if (typeof desktopAdapter.listChromeWindows === 'function') {
+      const probe = await desktopAdapter.listChromeWindows().catch(() => null);
+      const windows = Array.isArray(probe?.windows) ? probe.windows : [];
+      if (windows.length > 0) {
+        // Already connected is the ordinary case for an explicit browser_launch:
+        // the answer is "use it", not "fix the extension".
+        const attached = Boolean(extension) && !stopped;
+        return { status: 'not_dispatched', retryable: true, reason: 'chrome_window_present', dispatched: false,
+          extensionConnected: attached,
+          windows: windows.slice(0, 8).map(window => ({ processId: window.processId, windowHandle: window.windowHandle, title: window.title ?? null })),
+          message: attached
+            ? 'A Chrome window is already on screen and the bridge extension is connected, so nothing was launched. Open the page with browser_open.'
+            : 'A Chrome window is already on screen but the bridge extension is not connected, so nothing was launched. Reload the 自主浏览器 extension, then repeat the call.' };
+      }
+    }
     const launched = await desktopAdapter.launchChrome({ url: args.url });
     if (launched?.status !== 'success') return launched;
+    // The profile the user actually uses, as the bridge itself computes it. If
+    // the launch opened anything else, the browser is running but it is the
+    // wrong browser, and saying "success" would be the exact mistake this whole
+    // path exists to prevent.
+    const expectedUserDataDir = chromeUserDataDir();
+    if (launched.userDataDir && expectedUserDataDir && !sameDirectory(launched.userDataDir, expectedUserDataDir)) {
+      return { ...launched, status: 'uncertain', verified: false, retryable: false,
+        reason: 'launched_wrong_profile', expectedUserDataDir,
+        extensionConnected: Boolean(extension) && extensionVersion === VERSION,
+        message: `Chrome was started on the "${launched.channel ?? 'unknown'}" channel with user-data directory ${launched.userDataDir}, but the profile this machine actually uses is ${expectedUserDataDir}. That browser has different cookies and logins, so nothing is continued on it. Close it and load the 自主浏览器 extension in the browser you use.` };
+    }
     const deadline = Date.now() + launchConnectTimeoutMs;
     while (Date.now() < deadline && !(extension && extensionVersion === VERSION)) await sleep(400);
     const connected = Boolean(extension) && extensionVersion === VERSION;
@@ -882,6 +943,10 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const launchNote = launched => ({
     status: launched.status, reason: launched.reason ?? null, chromePath: launched.chromePath ?? null,
     processId: launched.processId ?? null, windowHandle: launched.windowHandle ?? null,
+    channel: launched.channel ?? null, userDataDir: launched.userDataDir ?? null,
+    // false means the window was created without taking focus, measured before
+    // and after by the launcher rather than promised.
+    activated: launched.activated === true, launchMode: launched.launchMode ?? null,
     extensionConnected: launched.extensionConnected === true, method: launched.method ?? null
   });
 
@@ -913,12 +978,30 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       const result = await call(name, args, owner, { ...context, revived: true });
       return { ...result, autoLaunched: launchNote(launched) };
     }
-    if (launched?.reason === 'chrome_already_running') {
+    if (launched?.reason === 'chrome_already_running' || launched?.reason === 'chrome_window_present') {
       // The browser exists, so nothing was started. This is a bridge problem, not
       // a browser problem, and the caller has to know which one it is.
       return { ...disconnectedResult(), reason: 'chrome_running_extension_not_connected', autoLaunched: launchNote(launched),
-        howToResume: 'A Chrome process is already running, so starting another one would create a second profile and lose cookies. Reload the 自主浏览器 extension (or press Reconnect) instead.',
+        howToResume: 'A Chrome session is already running, so starting another one would create a second profile and lose cookies. Reload the 自主浏览器 extension (or press Reconnect) instead.',
         recommendedNextAction: 'Do not retry blindly: the browser is up, the bridge is not attached. Reload the extension, then repeat the call.' };
+    }
+    if (launched?.reason === 'launched_wrong_profile') {
+      // Starting a browser on the wrong user-data directory is the one outcome
+      // this path must never paper over: it looks like a wiped session to the
+      // human and it silently loses every cookie the task needs. Polling will
+      // not fix it, so this is not a waiting result.
+      return { status: 'failed', retryable: false, dispatched: true,
+        reason: 'launched_wrong_profile', autoLaunched: launchNote(launched),
+        expectedUserDataDir: launched.expectedUserDataDir ?? null,
+        observedUserDataDir: launched.userDataDir ?? null,
+        howToResume: 'Close the browser that was just started; it is a different install with its own empty profile. Open the browser you normally use and load the 自主浏览器 extension there.',
+        recommendedNextAction: 'Do not continue on that browser. Report which channel was started and wait for the user to bring up their own browser.' };
+    }
+    if (launched?.reason === 'no_used_profile_available') {
+      return { status: 'failed', retryable: false, dispatched: false,
+        reason: 'no_used_profile_available', autoLaunched: launchNote(launched),
+        howToResume: 'Chrome is installed but no installed channel has a profile with history in it. Opening one would give an empty browser, so nothing was launched. Ask the user to open their browser once, then retry.',
+        recommendedNextAction: 'Ask the user to start their browser themselves this one time; afterwards auto start works again.' };
     }
     if (launched?.reason === 'chrome_launched_extension_not_connected') {
       // The launch worked; the browser just has nothing that can talk back. Do

@@ -12,6 +12,11 @@ export const chromeUserDataDir = () => join(process.env.LOCALAPPDATA ?? '', 'Goo
 
 const normalize = value => String(value ?? '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
 
+// Comparing two user-data directories is how "the launcher opened the right
+// browser" is decided, so the comparison itself is shared rather than rewritten
+// at each call site with slightly different rules.
+export const sameDirectory = (left, right) => Boolean(left) && Boolean(right) && normalize(left) === normalize(right);
+
 const readJson = path => {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
 };

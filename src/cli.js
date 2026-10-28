@@ -6,7 +6,8 @@ import { callWithWaitingRecovery } from './auto-recovery.js';
 import { createAgentPolicy } from './policy.js';
 import { regressionSummary } from './regression-summary.js';
 import { computeBuildIdentity } from './build-identity.js';
-import { findBridgeExtension, describeExtensionState } from './chrome-profile.js';
+import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory } from './chrome-profile.js';
+import { createDesktopAdapter } from './desktop-adapter.js';
 import { usageSummary } from './usage-summary.js';
 
 async function rawToolCall(name, args) {
@@ -54,6 +55,35 @@ async function doctor() {
     }
     if (!extensionState.found) {
       report.recommendations.push('The bridge extension is not registered in any Chrome profile. Load it with "Load unpacked" from chrome://extensions with Developer mode on.');
+    }
+    // Which browser auto start would pick, and on which profile. This is the one
+    // decision that can silently lose every cookie, so it is answerable without
+    // launching anything: the launcher runs in dry-run mode and reports the
+    // binary, the channel and the user-data directory it would use.
+    try {
+      const adapter = createDesktopAdapter();
+      const decision = adapter.available ? await adapter.launchChrome({ dryRun: true }) : null;
+      if (decision) {
+        const target = decision.wouldLaunch ?? null;
+        const expected = chromeUserDataDir();
+        const sameProfile = target?.userDataDir ? sameDirectory(target.userDataDir, expected) : null;
+        add('auto-start-target', decision.reason === 'dry_run' && sameProfile !== false, {
+          wouldLaunch: target,
+          expectedUserDataDir: expected,
+          sameProfileAsThisMachine: sameProfile,
+          runningSession: decision.runningSession ?? null,
+          rejectedCandidates: decision.rejectedCandidates ?? [],
+          note: 'Dry run only: nothing was launched. This is the browser and profile a real auto start would use.'
+        });
+        if (decision.reason === 'no_used_profile_available') {
+          report.recommendations.push('Auto start is refusing to launch: no installed Chrome channel has a profile with history in it. Open your own browser once; launching a blank profile would look like a wiped session.');
+        }
+        if (sameProfile === false) {
+          report.recommendations.push(`Auto start would launch ${target.chromePath} (${target.channel} channel), which uses ${target.userDataDir} instead of ${expected}. That browser has different cookies and logins. Fix the install or the App Paths entry before relying on auto start.`);
+        }
+      }
+    } catch (error) {
+      add('auto-start-target', false, { error: error.message });
     }
     add('version-match', !!status.version && !!status.extensionVersion && status.version === status.extensionVersion, { serviceVersion: status.version, extensionVersion: status.extensionVersion ?? null });
     add('queue-idle', !status.active && status.queued === 0, { active: status.active, queued: status.queued });
