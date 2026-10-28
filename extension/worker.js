@@ -6,6 +6,7 @@ import { captureDevtools, createTabSubscription } from './cdp-capture.js';
 import { readStorage, writeStorage } from './cdp-storage.js';
 import { replayRequest } from './cdp-replay.js';
 import { createSessionManager } from './cdp-session.js';
+import { createCdpAdvanced } from './cdp-advanced.js';
 import { runAuthorityTool } from './browser-authority.js';
 import { reuseKey, samePage, visibleTab, isInternalPage, describeTab, createTabOwnership } from './tab-identity.js';
 let socket = null;
@@ -59,6 +60,7 @@ const debuggerSessions = createSessionManager({
   detach: async tabId => { await chrome.debugger.detach({ tabId }); },
   send: async (tabId, method, params = {}) => chrome.debugger.sendCommand({ tabId }, method, params)
 });
+const cdpAdvanced = createCdpAdvanced({ sessions: debuggerSessions });
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (Number.isInteger(source?.tabId)) debuggerSessions.handleEvent(source.tabId, method, params);
 });
@@ -1078,7 +1080,18 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       finalUrl: (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null,
       note: 'Every step was re-resolved by identity, not replayed by position. A step whose match was fuzzy is listed in degradedMatches; check those against the page if the flow mattered.' };
   }
-  if (!['browser_read', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch'].includes(name)) throw new Error('Unknown command');
+  // Device emulation, native dialogs, accessibility snapshots, drag and drop,
+  // print-to-PDF, init scripts and request mocking. These are dispatched here
+  // rather than inside page() because several of them have to keep a long-lived
+  // debugger session open - a CDP override ends when the attachment does - and
+  // page() is built on the attach-per-call path.
+  if (cdpAdvanced.names.has(name)) {
+    if (!(await commandStillActive())) {
+      return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
+    }
+    return await cdpAdvanced.run(name, args, { tab, page, guarded });
+  }
+  if (!['browser_read', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch'].includes(name) && !cdpAdvanced.names.has(name)) throw new Error('Unknown command');
   const pageWriteTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_select', 'browser_choose', 'browser_pick']);
   if (pageWriteTools.has(name) && !(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
   // A login submit is the one moment where a single frame is not enough: the

@@ -1,3 +1,37 @@
+## 0.23.0 — 2026-10-29（**对照开源实现补齐七块 DevTools 能力**：模拟、原生对话框、可访问性树、拖拽、打印 PDF、初始化脚本、请求拦截）
+
+这一轮不是凭感觉加功能，是拿两个成熟实现当尺子量出来的：`chrome-devtools-mcp`（57 个工具）与 `playwright-mcp`。把它们有而我们没有的能力逐条列出来，只剩七块——**设备/环境模拟、原生 JS 对话框、可访问性树快照、HTML5 拖拽、打印 PDF、页面初始化脚本、请求拦截与打桩**。这七块以前不是「没做」，是「根本做不到」：它们全在 CDP 里，而我们的 CDP 通道只走 attach-per-call 的一次性附件，任何 override 都会在调用返回时被撤销。
+
+- **先说清代价，再决定实现**。CDP 的 override 生命周期绑在 debugger 附件上：attach-per-call 会在调用结束的瞬间撤销模拟。所以 `browser_emulation` / `browser_init_script` / `browser_network_rules` 必须跑在 `cdp-session.js` 的长连接上，代价是**那个标签页会一直挂着调试横幅**，期间 DevTools 也接不上去。这个代价写进了每个工具的回复里（`debuggerBanner:true`）和 `prefer` 文案里，而不是让调用方事后惊讶。
+- **7 个新工具**：
+  - `browser_dialog` —— alert/confirm/prompt/beforeunload。对话框冻住渲染进程，**其他所有页面工具都会挂到读超时**，只有这个工具能动作，因为它走 CDP 而不走页面脚本。`action:"handle"` 只对**已经打开**的对话框有效（Chrome 就是这么规定的），所以没有对话框时它失败而不是假装成功；`verified` 恒为 `false`，因为 Chrome 不报告「关掉的是哪个对话框」。`action:"wait"` 是「我刚做的动作会弹出对话框」该用的形状。
+  - `browser_emulation` —— 地理位置、时区、语言、UA、视口与设备像素比（含触摸）、`prefers-color-scheme`、CPU 降频、网络条件（离线/延迟/吞吐）。`action:"clear"` 全部回滚。**每个字段都在开会话之前校验**：纬度 120 或 40px 视口会被拒绝，且不碰标签页（单测钉住了这条：`opened` 必须为空）。
+  - `browser_ax_snapshot` —— 屏幕阅读器看到的那棵树：role / 可访问名 / 值 / 关键状态（disabled、checked、expanded、selected、required、readonly、focused、level）。`ignored:true` 的布局包装节点被**splice 掉、子节点上提**，否则快照比页面还长。`interactiveOnly` 只留可操作角色。`backendNodeId` 只用于诊断，**不是句柄**。
+  - `browser_drag` —— 两端先解析成几何，过期 ref 被拒绝而不是从旧位置拖。`mode:"auto"` 先试原生 HTML5 拖拽（`Input.setInterceptDrags` + `Input.dispatchDragEvent`，`draggable="true"` 需要这个），失败再退回 press-move-release（canvas 和指针库需要这个）；回复里说明**跑的是哪条路**。`verified` 恒为 `false`：没有任何东西能证明页面接受了这次放置。
+  - `browser_pdf_save` —— `Page.printToPDF`，与「打印 > 另存为 PDF」同一条渲染路径，但**不经 socket 传回**：一页打印常常是上兆的 base64，所以走 `downloads.download` 落盘，再用 `browser_downloads` 查位置。`printBackground` 默认 `true`。
+  - `browser_init_script` —— `Page.addScriptToEvaluateOnNewDocument`，在文档自己的脚本之前运行。**Chrome 无法枚举注入脚本**，所以只能记住自己发过的 id；`add` 的回复明确说「从下一次导航开始生效，不是当前这个文档，要 reload」。
+  - `browser_network_rules` —— 阻断（`net::ERR_BLOCKED_BY_CLIENT`）、打桩（自己给状态码/头/体，服务器根本看不到这个请求）、失败（指定错误）、`list`、`unblock`、`clear`。匹配是 glob 不是正则；规则只影响设置之后发出的请求。**只要存在 mock 规则，该标签页的每个请求都会被暂停**，不匹配的立刻 `continueRequest`——不这么做，页面会永久挂起而不是被改变。
+- **一个必须写进代码的推送式陷阱**：`Fetch.requestPaused` 是推送事件，**每个被暂停的请求都必须被 continue/fulfill/fail 答复**，否则请求永远挂着。监听器是全局安装的（`chrome.debugger.onEvent` 只有一个），没有规则的标签页也照样立刻 continue，否则一个已经清空的标签页会把所有请求卡死。
+- **能力指引同步**：新增 7 个意图（`device-or-network-mock`、`native-dialog`、`accessibility-tree`、`drag-and-drop`、`print-to-pdf`、`init-script`），并且**关键词刻意收窄**——`网络`/`请求` 属于已有的 network 意图、`脚本` 属于 debug 意图，松一个词就会把这些目标静默改道。`test/capability-guide.test.js` 新增一条用例，把这 7 条路由和三条「不许被抢走」的反例一起钉住。
+- **真机验证（逐项，Chrome 156.0.8078.49，用户自己的会话）**：
+  - `browser_ax_snapshot`：`example.com` 全树 72 节点 → `interactiveOnly` 8 节点，`Example Domain` / `Learn more` 名称正确回读。
+  - `browser_emulation`：set 之后页面自报 `tz=America/New_York`、`innerWidth=390`、`maxTouchPoints=5`，clear 后 `stillInEffect:["deviceMetrics"]`、`verified:false`。
+  - `browser_dialog`：`status` 读到 `type:"alert"`、`message:"bridge dialog test"`；`handle` 在无对话框时得到 `-32602 No dialog is showing` → 现在报 `no_dialog_showing`。
+  - `browser_pdf_save`：`downloadId:2240`、78541 字节、`state:"complete"`、`exists:true`。
+  - `browser_init_script`：add（`identifier:"1"`）→ 刷新 → `window.__bridgeInit === "1"` → remove → 刷新 → `undefined`。闭环。
+  - `browser_network_rules`：mock 之后 `fetch(location.href)` 返回 `MOCKED-BY-BRIDGE`，clear 之后返回真实 HTML。
+  - `browser_drag`：`mode:"synthetic"` 下页面 `drop` 监听器把计数从 **0 推到 1**，`accepted:true`。
+- **五个只有真机才会暴露的问题，全部已修**：
+  1. **AX 快照的名称一直是 null**。`axText(node)` 被调用时传的是 `node.name`（`{type,value}` 包装）而不是节点本身，于是它去读 `wrapper.name`，永远 undefined。单测原本只断言 role 和 backendNodeId，所以没发现——一棵没有名字的可访问性树等于没用。现在 `axText` 按「解开值包装」实现，单测补了 `name === 'Email'`。
+  2. **`interactiveOnly` 会保留纯文本容器**。旧判断是「有子节点就保留」，而段落有文本子节点，于是它被留下、文本子节点被丢掉，剩一行空段落。改成「子树里有没有可操作角色」的 memo 判定，并顺手修掉另一个方向的问题：`ignored` 包装原来只上提 `promoted[0]`，兄弟节点整棵丢失。
+  3. **`action:"clear"` 的 reset 命令被接受 ≠ override 消失**。实测 `clearDeviceMetricsOverride` 之后视口仍是 390×844（窗口是 2560×1271），而且**扩展重载、服务重启都没能让它消失**，只有一次真正的导航才还原。所以 clear 现在改成「先记下 set 之前的读数（baseline），再回读页面比对」：`verified` 来自页面，`stillInEffect` 点名 Chrome 没还回来的项。顺带一个反例也测到了：把时区模拟成本机已有的 `Asia/Shanghai` 时，只比对模拟值会误报「还在生效」，所以必须有 baseline。
+  4. **`locale` 改的是 Intl，不是 `navigator.language`**。实测 set 之后 `Intl.DateTimeFormat().resolvedOptions().locale === 'en-US'`，而 `navigator.language` 仍是 `zh-CN`。探针因此读 Intl。
+  5. **MV3 service worker 里没有 `URL.createObjectURL`**（`URL.createObjectURL is not a function`）。PDF 只能以 data URL 交给下载管理器；而且 Chrome 会把文件名存成 `download.pdf`，所以 `filename` 改成**回读 `downloads.search` 的真实路径**，另附 `requestedFilename`。
+- **`browser_dialog` 补了 `action:"status"`**，而且它是**只读的**：没有会话时 `dialogOpen` 回 `null` 而不是 `false`（那时答案不可知），并且不会为了回答这个问题去开会话、给标签页挂横幅。同时 `handle` 加了 8 秒上限：实测在后台标签页里弹的 alert，`Page.handleJavaScriptDialog` 可能永远不返回，硬等只会撞上服务超时并留下「结果未知」——现在报 `dialog_answer_not_confirmed` 并明确说「不要再发一次，去看 status，必要时关闭标签页」。另外 `Page.enable` 也加了 1.5 秒上限：页面被对话框冻住时渲染进程不回它，而 `Page.enable` 只是为事件服务的，不该让唯一能救这个页面的工具自己挂住。
+- **`browser_drag` 加了 `mode:"synthetic"`，因为原生路径在这台机器上根本没触发**。实测 `Input.setInterceptDrags` 对一个普通 `draggable="true"` 的 div **没有**产生 `Input.dragIntercepted`，于是 `auto` 静默降级成鼠标拖拽、页面什么都没收到。synthetic 路径用两个坐标取 `elementFromPoint`，在页面里构造 `DataTransfer` 并派发 `dragstart/dragenter/dragover/drop/dragend`——这是测试框架的做法，也是这类元素唯一能落地的路径；`accepted` 直接来自「drop 监听器有没有 preventDefault」。另外实测发现：开着拖拽拦截时，发起拖拽的 `mousePressed` **不会返回**，直接 await 会把整个调用挂到服务超时——所以所有输入派发都改成有上限的 fire-and-observe，并加了单测。
+- 测试：`test/cdp-advanced.test.js` 27 条（假 chrome，钉住「被拒绝的调用没有到达浏览器」「override 只在会话内有效且 clear 要回读」「AX 快照不会把 ignored 包装变成可见节点、也不会留下空段落」「mock 只 fulfil 匹配的 URL、其余必须 continue」「PDF 走 data URL 并回读真实文件名」「输入派发不会把拖拽挂死」），`capability-guide` 9 条。
+- **顺手修掉一个会拖慢 CI 的隐患**：PDF 工具原本用 blob URL + 60 秒后 `revokeObjectURL` 的定时器释放内存，那个定时器会把 Node 测试进程挂住 60 秒（单文件从 2.3 秒变 61 秒）。改成 data URL 之后整段定时器随之消失，单文件回到 2 秒级。
+
 ## 0.22.0 — 2026-10-29（**浏览器本身也在范围内**：13 个权限、21 个工具、每个写操作一把独立的锁）
 
 用户的要求是「让任意 agent 无缝接入操纵能力，完全能够代替人类工程师操作」。0.21.0 之前所有工具都在**页面**里，而人类工程师要干的事有一大半在页面之外：恢复关掉的标签、翻书签、清历史、看下载、启停扩展、改站点权限、读 cookie、调隐私开关、摆窗口。这些 Chrome 都给了扩展 API，我们一个都没开。这一版把它们全部打开，并且**每开一个权限就必须在同一版里有一个工具**——只加权限不加工具，等于安装时多一条警告而没有多一分能力。

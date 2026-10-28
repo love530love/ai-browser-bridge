@@ -24,6 +24,11 @@ export const WRITE_TOOLS = new Set([
   // been told. A second agent writing the same origin or replaying into it is a
   // real conflict, not a harmless parallel read.
   'browser_storage_write', 'browser_replay_request',
+  // DevTools-parity writes: a dialog answer, a drag, a device override, an init
+  // script and a request rule all change what this tab will do next, so a second
+  // agent doing the same thing at the same time is a real conflict.
+  'browser_dialog', 'browser_drag', 'browser_emulation', 'browser_init_script',
+  'browser_network_rules',
   // A recipe run is a sequence of writes on one tab. Treating it as a read
   // because it is one call would let two agents replay into the same page at the
   // same time.

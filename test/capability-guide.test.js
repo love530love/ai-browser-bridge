@@ -149,6 +149,39 @@ test('reload guidance points at the capability itself, not at a manual step', ()
   assert.match(guide.primary.prefer, /confirmation only/);
 });
 
+// The seven DevTools-parity tools are only useful if a caller can find them, so
+// the routing is pinned here rather than left to the tool descriptions. Each of
+// these goals used to fall through to a generic read/network answer, which is
+// exactly the stall the guide exists to prevent.
+test('the DevTools-parity capabilities are routed to by goal, not by name', () => {
+  const cases = [
+    ['把这个页面模拟成手机，并限速到 3G', 'device-or-network-mock', 'browser_emulation'],
+    ['拦截这个接口，返回一个假的 JSON', 'device-or-network-mock', 'browser_network_rules'],
+    ['有个确认对话框挡住了，帮我点掉', 'native-dialog', 'browser_dialog'],
+    ['这个按钮对屏幕阅读器来说叫什么', 'accessibility-tree', 'browser_ax_snapshot'],
+    ['把这张卡片拖到回收站里', 'drag-and-drop', 'browser_drag'],
+    ['把这一页打印成 PDF', 'print-to-pdf', 'browser_pdf_save'],
+    ['在页面加载前注入一段脚本，改掉 navigator.webdriver', 'init-script', 'browser_init_script']
+  ];
+  for (const [goal, intent, tool] of cases) {
+    const guide = capabilityGuide({ goal });
+    assert.equal(guide.primary?.intent, intent, goal);
+    assert.equal(guide.focusRequired, false, goal);
+    assert.ok(guide.primary.tools.includes(tool), `${goal} must name ${tool}`);
+    assert.ok(guide.focusPolicy.backgroundSafeTools.includes(tool), tool);
+  }
+  // The keywords had to stay narrow: 网络, 请求 and 脚本 belong to existing
+  // intents, and a loose match here would re-route those goals silently.
+  assert.equal(capabilityGuide({ goal: '把这个请求重放一次看看返回什么' }).primary.intent, 'network');
+  assert.equal(capabilityGuide({ goal: '给这个页面打个断点，然后改一下脚本' }).primary.intent, 'debug-or-breakpoint');
+  assert.equal(capabilityGuide({ goal: '下载这个 pdf 附件' }).primary.intent, 'upload-or-download');
+  // Each reply has to carry its own uncertainty rather than a bare success.
+  assert.match(capabilityGuide({ goal: '有个确认对话框挡住了，帮我点掉' }).primary.prefer, /verified:false/);
+  assert.match(capabilityGuide({ goal: '把这张卡片拖到回收站里' }).primary.prefer, /verified is always false/);
+  assert.match(capabilityGuide({ goal: '把这张卡片拖到回收站里' }).primary.prefer, /synthetic/);
+  assert.match(capabilityGuide({ goal: '把这个页面模拟成手机，并限速到 3G' }).primary.prefer, /clear/);
+});
+
 test('the guide is answered locally, so it survives a disconnected extension', async t => {
   const bridge = createBridge({ port: 0, agentToken: 'fixture', extensionToken: 'fixture' }, {
     leaseStateFile: null, agentPolicyFile: null, audit: () => {}

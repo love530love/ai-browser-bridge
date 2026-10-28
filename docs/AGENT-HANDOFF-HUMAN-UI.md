@@ -4,6 +4,24 @@
 
 ## 目标
 
+## 2026-10-29 接手增量（0.23.0）：对照开源实现补齐七块 DevTools 能力
+
+- 尺子是 `chrome-devtools-mcp` 与 `playwright-mcp`。逐条比对后只缺七块，而且都属「以前做不到」
+  而不是「没做」：CDP override 的生命周期绑在 debugger 附件上，attach-per-call 会在调用返回时
+  撤销模拟。所以这三类必须跑在 `cdp-session.js` 的长连接上，代价是**标签页挂调试横幅**。
+- 七个工具：`browser_dialog`（alert/confirm/prompt，`verified:false`）、`browser_emulation`
+  （地理/时区/UA/视口/色彩/CPU/网络，**每字段在开会话前校验**）、`browser_ax_snapshot`
+  （`ignored` 包装 splice 掉、子节点上提；`backendNodeId` 只用于诊断）、`browser_drag`
+  （HTML5 需 `setInterceptDrags`+`dispatchDragEvent`，canvas 才用 press-move-release，
+  回复说明跑了哪条路，`verified:false`）、`browser_pdf_save`（`printToPDF` 走下载管理器落盘）、
+  `browser_init_script`（**从下次导航生效**，Chrome 无法枚举，只能记自己发过的 id）、
+  `browser_network_rules`（glob 匹配；mock 存在时该标签页每个请求都被暂停）。
+- **推送式事件必须逐个答复**：`Fetch.requestPaused` 每一条都要 continue/fulfill/fail，否则请求
+  永久挂起。监听器是全局单例，没有规则的标签页也立刻 continue。
+- 能力指引新增 7 个意图，关键词刻意收窄（`网络`/`请求` 属 network、`脚本` 属 debug，松一个词就
+  会静默改道），`test/capability-guide.test.js` 用三条反例钉住。
+- 测试：`test/cdp-advanced.test.js` 15 条、`capability-guide` 9 条。
+
 ## 2026-10-29 接手增量（0.22.0）：范围从「页面」扩到「浏览器本身」
 
 - **13 个权限 / 21 个工具**，规则是「每开一个权限，同一版必须有一个工具」。
