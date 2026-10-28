@@ -14,6 +14,19 @@ AutomationId、enabled 和实际支持的 UIA patterns。遍历有节点和时�
 popup 窗口；runtime refs 是本次观察身份，不是持久定位符或写操作许可。
 UIA 支持某个 pattern 不代表 Bridge 已实现对应动作。
 
+### 2026-10-28：控件状态证据
+
+快照新增 `state`：支持 ExpandCollapse 的控件返回 `expandCollapse`
+（Collapsed/Expanded/PartiallyExpanded/LeafNode），Toggle 返回 `toggle`
+（Off/On/Indeterminate），SelectionItem 返回布尔值 `selected`。
+某个 provider 在读取中失效时，该字段为 `unknown`；不支持的 pattern 不返回对应字段。
+不读取 Value/Text，因此不会为收集状态额外提取输入框内容。
+Node 验证层拒绝状态值非法、状态与 pattern 不匹配以及非约定字段。
+
+验证：原生快照、DevTools adapter、desktop adapter 定向测试 **17/17**；
+PowerShell 脚本解析及 UIA pattern 类型解析通过。尚未做本增量的真实 Chrome 验收，
+也未部署或新增 Expand/Collapse 写动作。
+
 本机只读实测：121 个控件、1 个 document 子树被排除、partial=false。
 找到名称为 Chrome、AutomationId 为 view_1007、支持 ExpandCollapse 的原生按钮；
 它是后续菜单展开路径的候选，不能仅凭名称断言已完成菜单或 DevTools 打开。

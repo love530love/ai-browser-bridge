@@ -13,6 +13,19 @@ export function validateNativeSnapshot(value, target) {
         !Array.isArray(node.patterns) || node.role === 'ControlType.Document' ||
         (node.parent !== null && !ids.has(node.parent))) throw new Error('Invalid native control tree');
     ids.add(node.ref);
+    if (node.state !== undefined) {
+      if (!node.state || typeof node.state !== 'object' || Array.isArray(node.state)) throw new Error('Invalid native state');
+      const states = {
+        expandCollapse: ['ExpandCollapse', ['Collapsed', 'Expanded', 'PartiallyExpanded', 'LeafNode', 'unknown']],
+        toggle: ['Toggle', ['Off', 'On', 'Indeterminate', 'unknown']],
+        selected: ['SelectionItem', [true, false, 'unknown']]
+      };
+      for (const [key, value] of Object.entries(node.state)) {
+        const spec = states[key];
+        if (!Object.hasOwn(states, key) || !spec[1].includes(value) ||
+            !node.patterns.includes(`${spec[0]}PatternIdentifiers.Pattern`)) throw new Error('Invalid native state evidence');
+      }
+    }
   }
   return value;
 }

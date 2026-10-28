@@ -19,6 +19,23 @@ test('native tree rejects page documents, duplicates, and unresolved parents', (
 test('unsupported host does not claim native capability', async () => {
   assert.equal((await nativeUiSnapshot(target, { platform: 'linux' })).status, 'unavailable');
 });
+
+test('native state distinguishes observed state, unknown, and unsupported patterns', () => {
+  const data = evidence();
+  const node = data.controls[1];
+  node.patterns = ['ExpandCollapsePatternIdentifiers.Pattern', 'TogglePatternIdentifiers.Pattern', 'SelectionItemPatternIdentifiers.Pattern'];
+  node.state = { expandCollapse: 'Collapsed', toggle: 'Indeterminate', selected: false };
+  assert.equal(validateNativeSnapshot(data, target).controls[1].state.selected, false);
+  node.state = { expandCollapse: 'unknown', selected: 'unknown' };
+  assert.doesNotThrow(() => validateNativeSnapshot(data, target));
+  for (const state of [{ expandCollapse: 'closed' }, { selected: 'false' }, { value: 'secret' }, [], null,
+    JSON.parse('{"__proto__":"unknown"}')]) {
+    node.state = state;
+    assert.throws(() => validateNativeSnapshot(data, target));
+  }
+  node.state = { toggle: 'On' }; node.patterns = [];
+  assert.throws(() => validateNativeSnapshot(data, target));
+});
 test('native snapshot shares recent-window validation and excludes UI data from audit', async t => {
   const audit = [];
   let calls = 0;

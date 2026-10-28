@@ -30,7 +30,25 @@ try {
     if($state.IsOffscreen){continue}
     $id=($element.GetRuntimeId() -join '.')
     $patterns=@($element.GetSupportedPatterns() | ForEach-Object {$_.ProgrammaticName})
-    $rows.Add(@{ref=$id;parent=$entry.parent;name=([string]$state.Name).Substring(0,[Math]::Min(300,([string]$state.Name).Length));automationId=$state.AutomationId;role=$state.ControlType.ProgrammaticName;enabled=$state.IsEnabled;patterns=$patterns})
+    # A supported pattern is not evidence of its current state. Providers can
+    # disappear during observation: retain the control and report unknown.
+    $controlState=@{}
+    foreach($spec in @(
+      @{key='expandCollapse';type=[System.Windows.Automation.ExpandCollapsePattern];property='ExpandCollapseState'},
+      @{key='toggle';type=[System.Windows.Automation.TogglePattern];property='ToggleState'},
+      @{key='selected';type=[System.Windows.Automation.SelectionItemPattern];property='IsSelected'}
+    )) {
+      $patternId=$spec.type::Pattern
+      if($patterns -contains $patternId.ProgrammaticName){
+        try {
+          $pattern=$element.GetCurrentPattern($patternId)
+          $value=$pattern.Current.($spec.property)
+          if($spec.key -eq 'selected'){$controlState[$spec.key]=[bool]$value}
+          else{$controlState[$spec.key]=[string]$value}
+        } catch {$controlState[$spec.key]='unknown'}
+      }
+    }
+    $rows.Add(@{ref=$id;parent=$entry.parent;name=([string]$state.Name).Substring(0,[Math]::Min(300,([string]$state.Name).Length));automationId=$state.AutomationId;role=$state.ControlType.ProgrammaticName;enabled=$state.IsEnabled;patterns=$patterns;state=$controlState})
     if($entry.depth -ge 32){$partial=$true;continue}
     $child=$walker.GetFirstChild($element)
     while($child){
