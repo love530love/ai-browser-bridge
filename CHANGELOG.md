@@ -1,3 +1,62 @@
+## 0.26.0 — 2026-10-29（**把「更新扩展后清错误」变成会成功的能力**：三条假成功路径全部封死）
+
+0.25.1 把清错误接进了 `browser_reload_extension`，但只做到了「跑起来」，没做到「一定会成功」。用户要求固化成能力，回查发现**三个地方会在什么都没做的情况下报成功**：
+
+1. Chrome 窗口数 ≠ 1 时清错误直接返回 `skipped`，而旁边的 reload 结果仍然写 `success`。两个窗口是普通桌面布局，所以这是**永久静默失效**。
+2. 刷新后固定 `Start-Sleep -Milliseconds 1800` 再抓树。慢一点就是空树，而**空树和「列表本来就是空的」当时返回同一句话** `nothing_to_clear`。
+3. 要读页面就得刷新，而「刷哪个窗口的前台标签」从来没被确认过——刷错就是把用户正在看的页面刷掉。
+
+这一版把这三处换成「能证明才说」。
+
+### 一、目标窗口靠地址栏识别，不靠数窗口
+
+地址栏属于**浏览器外壳**，不是页面内容：它的 `ValuePattern` 在没有 Document、甚至窗口最小化时都读得到——而「没有 Document」正是这个脚本必须工作的状态。于是：
+
+- 枚举所有可见 Chrome 窗口 → 读各自地址栏 → **唯一一个地址含 `errors=<id>` 的窗口**就是目标（`targetResolution:"address_bar_match"`）。
+- 命中多个 → `multiple_errors_pages` + 候选清单，不点。
+- 命中零个且只有一个窗口 → 用那个窗口，但**仍要求地址栏是错误列表**，否则 `errors_page_not_front` 直接失败：**不拿用户的页面换一次读取**。
+- 命中零个且多个窗口 → `target_window_ambiguous` + 每个窗口的 `processId`/`windowHandle`/`title`/`address`，附「先调 `browser_extension_errors`」的下一步。
+
+`skipped` 这个状态从脚本里彻底删除——脚本里不存在「决定什么都不做但还是对的」分支。
+
+### 二、等文档改成轮询，等不到就报错而不是报空
+
+真机这一条不是理论：本轮实测 `waitedMs: 5191`，也就是**文档用了 5.2 秒才可读**。旧的 1800ms 固定等待在这个机器上必然输，输掉的结果就是「列表是干净的」。
+
+现在 `page_not_ready` 是独立的失败原因（`retryable:true`），和 `nothing_to_clear` 分家；`nothing_to_clear` 必须带 `documentVisible:true`，并且文档出现后还要再等 `Clear all` 最多 5 秒（页面渲染是异步的，文档刚出现时按钮还没画出来）。
+
+### 三、最小化窗口还原但不抢焦点
+
+最小化窗口的所有子孙都报 `IsOffscreen`，遍历结果为空——又一个「看起来列表是空的」。现在先 `ShowWindow(hwnd, SW_SHOWNOACTIVATE)` 还原（不激活，不夺前台），再用 `IsIconic` 复查是否真的还原了。**`ShowWindow` 的返回值是「之前是否可见」，不是本次结果**，拿它当成功标志是错的。
+
+### 四、只有「什么都没点」才允许重试
+
+- 重试条件：`status === 'failed'` **且**脚本自己说 `retryable === true`，最多 2 次。
+- `uncertain`（Invoke 可能已经落地）**绝不重放**——重复 Invoke 就是第二次点击落在一个已经变过的列表上。
+- `invoke_raised` 也是 `retryable:false`，理由同上。
+
+### 五、结论分家：`errorListCleared` / `errorList` / `errorListClearStep`
+
+之前清错误结果挂在 `extensionErrors` 里，顶层 `status` 只有 reload 的结论，于是「reload 成功 + 红字还在」读起来是成功。现在：
+
+- `errorListCleared: true` 只由两种状态产生：`cleared`（按钮点掉且从树里消失）和 `nothing_to_clear`（页面被读到且没有按钮）。其余一律 `false`，并带 `errorListClearStep.howToRetry`。
+- 未清干净时顶层加 **`partial: true`**（这个服务本来就用 `partial` 表示「你要的做了，后续没做成」）。
+- 删掉 worker 里的 `errorsClearedBy: 'chrome.runtime.reload'`——**reload 并不清错误列表**，这条声明本身是 0.25.1 留下的假证据。同时修正 `browser_extension_errors` 的注释：它那次刷新是为了让页面上的列表属于当前实例，**不是**为了让后续进程读得到（跨进程读不到，引擎只在客户端在线时开）。
+
+### 真机证据（Chrome 156，扩展 0.26.0）
+
+| 场景 | 结果 |
+|---|---|
+| 列表本来就是空的 | `nothing_to_clear`、`documentVisible:true`、`scanned:113`、`targetResolution:"address_bar_match"`、`waitedMs:5191` |
+| 故意造一条 `Unchecked runtime.lastError`（`chrome.tabs.get(999999999)`，验证后已删除） | `status:"cleared"`、`controlGone:true`、`errorEntriesAfter:0`、`scanned:113` |
+| 移除自检代码后再 reload | `errorListCleared:true`、`documentVisible:true`、无红字 |
+
+`cleared` 这条路径是**真的清掉了一条错误**，不是「本来就没有」——两条路径现在在结果里长得完全不同。
+
+### 测试
+
+549/549（新增 `test/extension-errors.test.js` 9 条）。其中 6 条是对 `scripts/clear-extension-errors.ps1` 的静态断言，因为这段行为只有真 Chrome 窗口才能跑：`nothing_to_clear` 必须在 `documentVisible` 守卫之后、不许出现 `Start-Sleep -Milliseconds 1800`、`errors_page_not_front` 必须在找 Reload 之前、读地址栏的代码里不许出现 `IsOffscreen`、`ShowWindow` 的返回值不许当成功标志。另有 2 条断言服务端「不许按窗口数决定跑不跑」和「`uncertain` 不许重试」，1 条断言 worker 里不许再有 `errorsClearedBy`。
+
 ## 0.25.1 — 2026-10-29（**让扩展的 Errors 面板重新变得可信**：服务没起不再刷红，不可注入的页面给出原因）
 
 用户贴出扩展 Errors 面板的一屏红字：几十条 `ERR_CONNECTION_REFUSED`、一条 `An unknown error occurred when fetching the script.`、一条 `Unchecked runtime.lastError`。核查结果：**最新一条扩展错误记录是当天 10:29**，19:53 之后审计日志里没有任何新条目——红字是历史累积，服务当时是好的（`connected:true`、扩展 0.25.0）。但「历史累积」本身就是缺陷：那个面板是用户判断「桥是不是坏了」的第一个地方，而它被一件与缺陷无关的事填满了。

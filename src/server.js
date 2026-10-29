@@ -18,7 +18,7 @@ import { failureHelp } from './failure-help.js';
 import { capabilityGuide } from './capability-guide.js';
 import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
-import { clearExtensionErrors } from './extension-errors.js';
+import { clearExtensionErrors, describeErrorList } from './extension-errors.js';
 import { setDevToolsState } from './devtools-menu.js';
 import { lookupCredential, credentialOriginHash, CREDENTIAL_LOOKUP_CONFIRMATION } from './credential-store.js';
 import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMATION } from './password-manager.js';
@@ -929,13 +929,21 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       return { ...fallback, method: 'windows_ui_automation', focusRequired: true, foregroundTaken: true,
         fallbackReason: 'extension_did_not_self_reload' };
     }
-    const result = await waitForReload({ previousSession, reply });
+    const result = await waitForReload({ previousSession });
     desktopOperation = null;
     // Clear the list the reload left behind. The page was already brought
     // forward above, and the new worker has reconnected by now, so the error
     // list has been re-rendered against the new session.
     const errors = await clearExtensionErrorsViaUia();
-    return recordDesktopAudit(name, args, { ...result, ...errors, errorsPage }, startedAt);
+    const described = describeErrorList(errors);
+    // A verified reload with a red error list still on screen is not a clean
+    // success: the panel is what the user reads, and it would keep saying the
+    // bridge is broken. partial is how this service already says "the part you
+    // asked for worked, the follow-up did not".
+    return recordDesktopAudit(name, args, {
+      ...result, ...described, errorsPage,
+      ...(described.errorListCleared ? {} : { partial: true })
+    }, startedAt);
   }
 
   // chrome://extensions is the only surface that holds an extension's error list,
@@ -944,44 +952,45 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // (Chrome enables accessibility per document, while a client is attached).
   // Verified on Chrome 156: the invoke returns controlGone and the error entries
   // are gone from the next walk.
+  //
+  // The window is not chosen here. The script identifies it from the address
+  // bar, which is browser chrome and therefore readable even when the page
+  // exposes no document; requiring "exactly one Chrome window" made an ordinary
+  // second window a silent skip that the reload result then reported as success.
   async function clearExtensionErrorsViaUia() {
-    if (typeof desktopAdapter?.listChromeWindows !== 'function') {
-      return { extensionErrors: { status: 'unavailable', reason: 'desktop_adapter_unavailable', cleared: 0 } };
+    const attempts = [];
+    let entry;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      desktopOperation = { tool: 'browser_reload_extension:clear-errors', startedAt: Date.now() };
+      try { entry = await clearExtensionErrors(); }
+      catch (error) {
+        entry = { status: 'failed', retryable: false, reason: 'clear_extension_errors_threw',
+          message: String(error?.message ?? error).slice(0, 200) };
+      } finally { desktopOperation = null; }
+      attempts.push({ attempt, status: entry?.status, ...(entry?.reason ? { reason: entry.reason } : {}) });
+      // Only a step that proved it clicked nothing may be repeated. uncertain
+      // means the Invoke may have landed, and repeating an Invoke is how a
+      // second click lands on a list that already changed.
+      if (entry?.status !== 'failed' || entry.retryable !== true || attempt === 2) break;
+      await new Promise(resolve => setTimeout(resolve, 1200));
     }
-    const listed = await desktopAdapter.listChromeWindows().catch(error => ({ status: 'failed', reason: String(error?.message ?? error).slice(0, 200) }));
-    const windows = Array.isArray(listed?.windows) ? listed.windows : [];
-    // Guessing which window to touch is exactly the mistake that puts a click on
-    // the wrong window. One window or nothing.
-    if (windows.length !== 1) return { extensionErrors: { status: 'skipped', reason: windows.length ? 'multiple_chrome_windows' : 'no_chrome_window', cleared: 0 } };
-    desktopOperation = { tool: 'browser_reload_extension:clear-errors', startedAt: Date.now() };
-    try {
-      return { extensionErrors: await clearExtensionErrors(windows[0]) };
-    } finally {
-      desktopOperation = null;
-    }
+    return { ...entry, attempts };
   }
 
-  function waitForReload({ previousSession, reply }) {
+  function waitForReload({ previousSession }) {
     const deadline = Date.now() + reloadVerifyTimeoutMs;
-    // The error list is dropped by the reload itself (Chrome removes and re-adds
-    // the registry entry), so what travels with the verdict is which mechanism
-    // cleared it - not a count nobody measured. Saying "0 errors cleared" would
-    // read as "there were none", which is a different claim.
-    const cleared = reply && typeof reply.errorsClearedBy === 'string'
-      ? { errorsClearedBy: reply.errorsClearedBy }
-      : {};
     return new Promise(resolve => {
       const check = () => {
         if (extension && extensionVersion === VERSION && extensionSessionId && extensionSessionId !== previousSession) {
           return resolve({ status: 'success', retryable: false, reason: 'extension_reload_verified', dispatched: true,
             verified: true, method: 'chrome.runtime.reload', expectedVersion: VERSION, focusRequired: false,
-            previousSessionId: previousSession, extensionSessionId, ...cleared,
+            previousSessionId: previousSession, extensionSessionId,
             note: 'Reloaded in place by the extension itself. No window was focused, no tab was opened, no keystroke was sent.' });
         }
         if (Date.now() > deadline) {
           return resolve({ status: 'uncertain', retryable: false, reason: 'extension_reload_not_observed', dispatched: true,
             verified: false, method: 'chrome.runtime.reload', expectedVersion: VERSION, focusRequired: false,
-            previousSessionId: previousSession, observedVersion: extensionVersion, observedSessionId: extensionSessionId, ...cleared,
+            previousSessionId: previousSession, observedVersion: extensionVersion, observedSessionId: extensionSessionId,
             message: 'The reload was dispatched but no new extension session with the expected version appeared in time. Inspect before calling again; do not assume the previous worker is still serving.' });
         }
         setTimeout(check, 250);

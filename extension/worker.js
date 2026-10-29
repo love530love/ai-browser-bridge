@@ -658,15 +658,16 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     if (existing) {
       try {
         await chrome.tabs.update(existing.id, { url, active: true });
-        // Chrome turns its accessibility engine on per document, when that
-        // document is created. A tree read on an already-loaded page returns
-        // browser chrome only - measured: 86 controls and zero Document nodes -
-        // so the "Clear all" button simply is not there to click. Navigating to
-        // the same URL does not create a document; reloading does. Without this
-        // the clearing step silently reports nothing_to_clear forever.
+        // Navigating to the URL the tab is already on creates no new document, so
+        // the page could still be showing a list rendered before this reload.
+        // Reloading it guarantees the list on screen belongs to the current
+        // extension instance. It does NOT make the page readable to a later UI
+        // Automation client: Chrome enables its accessibility engine per document
+        // and only while a client is attached, so the clearing step reloads the
+        // page again inside its own process.
         await chrome.tabs.reload(existing.id);
         return { status: 'success', tabId: existing.id, url, reused: true, activated: true, reloaded: true,
-          note: 'Reused the open extensions page, pointed it at this extension\'s error list and reloaded it so the page\'s own controls are exposed to UI Automation.' };
+          note: 'Reused the open extensions page, pointed it at this extension\'s error list and reloaded it so the list on screen belongs to the current extension instance.' };
       } catch {
         // Navigating an existing tab to chrome:// can be refused. Opening a new
         // one is the fallback; reporting a failure here would block the reload
@@ -699,8 +700,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     setTimeout(() => { try { chrome.runtime.reload(); } catch { /* the service reports an unverified reload */ } }, 80);
     return { status: 'success', retryable: false, reason: 'extension_reload_dispatched', dispatched: true,
       verified: false, method: 'chrome.runtime.reload',
-      errorsClearedBy: 'chrome.runtime.reload',
-      nextStep: 'This worker unloads and reloads, then reconnects with a new session id. The service confirms it by observing that new session and version. The previous build\'s error list is dropped by the reload itself; nothing else has to be cleared.' };
+      nextStep: 'This worker unloads and reloads, then reconnects with a new session id. The service confirms it by observing that new session and version, then clears the extension error list through chrome://extensions. The reload itself does not clear it: Chrome keeps those entries per extension id, outside the worker, so they survive the teardown.' };
   }
   // Browser-wide tools (sessions, bookmarks, history, downloads, extension
   // manager, cookies, site settings, windows, tab groups, page capture) are not

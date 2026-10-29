@@ -28,14 +28,21 @@
   `developerPrivate.deleteExtensionErrors` 只在 chrome://extensions 内可用；`chrome.debugger`
   对 chrome:// 直接拒绝（`Cannot access a chrome:// URL`）。因此新增
   `browser_extension_errors`（把 `?errors=<id>` 摆到前台并刷新）+ `scripts/clear-extension-errors.ps1`
-  （同一进程内遍历 → 点 `Clear all` → 复查），由 reload 成功后自动调用，结果在 `extensionErrors`。
+  （同一进程内遍历 → 点 `Clear all` → 复查），由 reload 成功后自动调用。
+- **0.26.0 把这条固化成「会成功」**：结论搬到顶层 `errorListCleared` / `errorList` /
+  `errorListClearStep`（不再是 `extensionErrors` 里的旁注），未清干净时顶层带 `partial:true`。
+  三处假成功已封死：窗口数≠1 不再 `skipped`（改由地址栏识别目标窗口）、固定 1800ms 等待改轮询
+  （真机实测文档 5191ms 才可读）、`nothing_to_clear` 必须带 `documentVisible:true`。
+  只有 `failed && retryable` 才重试，`uncertain` 绝不重放。worker 里的
+  `errorsClearedBy:'chrome.runtime.reload'` 已删除——那是假证据。
 - **推翻旧结论：`chrome://` 页面内容对 UIA 是可见的。** 原结论错在两处自限——
   `native-ui-snapshot.ps1` 跳过 Document 子树、`validateNativeSnapshot` 拒绝 Document 节点。
   两者现在都有 opt-in 开关（`includeDocuments`）。
 - **Chrome 无障碍引擎按文档启用，且只在 UIA 客户端在线时保持。** 已加载页面永远只给
   86 个控件、0 个 Document；刷新后 113～162 个。⇒ 刷新与读取必须**同一进程**，
   分两次调用时第二次连接引擎已关闭。这是 `clear-extension-errors.ps1` 把整套动作写在一个
-  脚本里的唯一原因，不是偷懒。
+  脚本里的唯一原因，不是偷懒。**推论**：`browser_extension_errors` 里那次 `tabs.reload` 是为了让
+  屏幕上的列表属于当前实例，**不是**为了让后续进程读得到。
 
 ## 2026-10-29 接手增量（0.25.0）：一闪而过和悬停才出现的 UI
 
