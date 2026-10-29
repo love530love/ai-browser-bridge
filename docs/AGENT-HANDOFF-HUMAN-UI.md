@@ -4,6 +4,27 @@
 
 ## 目标
 
+## 2026-10-29 接手增量（0.25.1）：扩展 Errors 面板的噪音
+
+- 用户贴出一屏红字（几十条 `ERR_CONNECTION_REFUSED` + `An unknown error occurred when fetching
+  the script.`）。核查：审计日志里最新一条扩展错误是当天 10:29，之后没有任何新条目，服务
+  `connected:true`。**红字是历史累积**，但面板本身被一件与缺陷无关的事填满了，这仍是缺陷。
+- **硬事实：`new WebSocket()` 连接被拒时，Chrome 自己往 console 打一行错误，worker 无法捕获。**
+  所以「重连时少打日志」做不到，只能**不构造注定失败的 socket**：连接前用 `fetch` 探端口，
+  任何应答（含 401/403）都算在监听，探测失败则排下一次重连。
+  - CSP `connect-src` 必须同时允许 `ws://127.0.0.1:*` 和 `http://127.0.0.1:*`。少了后者，
+    探测被 CSP 拦、恒 false、扩展永远连不上，**失败现象会伪装成「配对密钥不对」**。
+  - 探测带 1.5s `AbortController`：端口接受连接但永不应答时不能卡死重连循环。
+  - 真机实测（函数体从源码读出直接跑）：`:19387` → true/27ms，关闭端口 → false/3ms，
+    接受不应答 → false/1509ms。停服务窗口内审计新增 `WEBSOCKET_ERROR` **0 条**。
+- `allFrames` 注入统一走 `injectAllFrames()`：不可脚本化页面返回
+  `status:"blocked"` / `reason:"page_not_scriptable"` + 原始 message + nextAction，
+  不再是 Chrome 那句 `An unknown error occurred when fetching the script.`。
+  真机 `chrome://extensions/` 验证返回 `{"reason":"page_not_scriptable","message":"Cannot access a chrome:// URL","frames":[]}`。
+- 538/538 测试（新增 `test/extension-connection.test.js` 6 条静态断言）、`doctor` 12/12。
+- **排查顺序提醒（已写进 memory）**：扩展报 `ERR_CONNECTION_REFUSED` 先查端口监听，
+  不要先怀疑配对密钥；`Errors` 面板里的历史条目需要手动 Clear all，连上后不会自动消失。
+
 ## 2026-10-29 接手增量（0.25.0）：一闪而过和悬停才出现的 UI
 
 - 用户问的是「tooltip / toast / alert / modal / popconfirm 的识别和操作兜底补齐了吗」。诚实答案

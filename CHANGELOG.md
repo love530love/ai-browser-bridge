@@ -1,3 +1,46 @@
+## 0.25.1 — 2026-10-29（**让扩展的 Errors 面板重新变得可信**：服务没起不再刷红，不可注入的页面给出原因）
+
+用户贴出扩展 Errors 面板的一屏红字：几十条 `ERR_CONNECTION_REFUSED`、一条 `An unknown error occurred when fetching the script.`、一条 `Unchecked runtime.lastError`。核查结果：**最新一条扩展错误记录是当天 10:29**，19:53 之后审计日志里没有任何新条目——红字是历史累积，服务当时是好的（`connected:true`、扩展 0.25.0）。但「历史累积」本身就是缺陷：那个面板是用户判断「桥是不是坏了」的第一个地方，而它被一件与缺陷无关的事填满了。
+
+### 一、失败的 WebSocket 构造会写一条 catch 不到的 console 错误
+
+这是关键事实：`new WebSocket()` 连接被拒时，Chrome 自己往 console 打一行 `WebSocket connection to 'ws://…' failed: … ERR_CONNECTION_REFUSED`，**worker 无法捕获、无法抑制**。服务每重启一次、扩展每重连一次，就多一条。重连退避最长 30 秒，服务停十分钟就是二十条。
+
+修法不是「少打日志」，而是**不问这个注定失败的问题**：连接前先用 `fetch` 探一下端口。任何 HTTP 应答都算「在监听」——`/status` 要 bearer token、服务还直接拒绝带 Origin 的请求，所以预期应答本来就是 401/403，**一个 403 同样证明有人接受了连接**。fetch 失败是**可以 catch 的**，WebSocket 构造失败不是。
+
+- CSP 的 `connect-src` 增加 `http://127.0.0.1:*`（少了这一条，探测会被 CSP 拦、恒返回 false、扩展永远连不上——失败现象会伪装成「配对密钥不对」）。
+- 探测带 1.5 秒 `AbortController` 超时：端口被接受但永不应答时不能把重连循环卡死。
+- 探测失败 → 状态显示「本机服务未运行，等待启动」并排下一次重连，**不构造 WebSocket**。
+
+真机证据（把 `serviceListening` 从 `worker.js` 源码里读出来直接跑，不是复制一份）：
+
+| 目标 | 结果 | 耗时 |
+|---|---|---|
+| 运行中的服务 `:19387` | `true` | 27ms |
+| 关闭的端口 `:19399` | `false` | 3ms |
+| 接受连接但永不应答 | `false` | 1509ms（超时生效） |
+
+停服务再让它恢复的整个窗口内，审计日志新增 **0 条** `WEBSOCKET_ERROR`。
+
+### 二、不可注入的页面过去抛的是 Chrome 的不透明错误
+
+`chrome.scripting.executeScript({allFrames:true})` 在 `chrome://`、扩展页、PDF 阅读器上整体失败，Chrome 给的是 `An unknown error occurred when fetching the script.` —— 这句话既没说清是哪个页面，也没说清是权限还是页面类型，而它同时出现在 Errors 面板和调用方结果里。
+
+现在统一走 `injectAllFrames()`：失败转成 `status:"blocked"` + `reason:"page_not_scriptable"`（或 `frames_not_injectable`）+ 原始 `message` + `recommendedNextAction`。三个调用方（`browser_frames`、`browser_read frame:"all"`、`browser_find_text frame:"all"`）都在 `frames.map(...)` 之前先分支，否则会在 `frames:null` 上抛第二个错。
+
+真机验证（Chrome 156，`chrome://extensions/` 标签）：
+
+```json
+{ "status": "blocked", "retryable": false, "reason": "page_not_scriptable",
+  "message": "Cannot access a chrome:// URL", "frames": [] }
+```
+
+`retryable:false` 是刻意的：不能脚本化的标签页不会因为再问一次就变得能脚本化。
+
+### 三、测试
+
+538/538（新增 `test/extension-connection.test.js` 6 条，全是静态源码断言）。它们存在的理由和 0.25.0 那条一样：这些失败发生在**单测从不加载的 `extension/` 代码**里，而让探测能工作的 CSP 那一行，和依赖它的代码隔着一个文件。其中一条专门断言 `serviceListening` 里**不许出现** `response.ok` / `.status === 200`——因为服务对带 Origin 的请求返回 403，检查 200 会把每一个健康的服务都判成「没在跑」。
+
 ## 0.25.0 — 2026-10-29（**补齐一闪而过和悬停才出现的 UI**：toast / aria-live 事后可查，tooltip 真指针读取，popconfirm 识别与安全确认）
 
 用户这一轮问的是具体一件事：**「对于 tooltip \ toast \ alert \ modal \ popconfirm 等的识别和操作能力也兜底补齐了吗」**。诚实的答案是半个：`modal` 有 `browser_scan_overlays`/`browser_dismiss_overlay`，原生 JS 的 `alert/confirm/prompt` 有 `browser_dialog`（走 CDP，因为弹窗会冻住渲染进程，页面脚本根本进不去）；但 **toast 读不到、tooltip 只有 hover 才存在、popconfirm 看起来就是一个普通按钮**。这三类不是「再扫一次 DOM」能解决的，它们各自需要不同的工具。

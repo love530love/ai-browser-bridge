@@ -336,6 +336,28 @@ function checkedUrl(url, config) {
   if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || (!config.allSites && !config.allowedOrigins.includes(u.origin))) throw new Error('Site not allowed. Enable all sites or add its origin in extension settings.');
   return u.href;
 }
+// Injecting into every frame fails as a whole when the tab cannot be scripted at
+// all: chrome://, the Web Store, an extensions page, a PDF viewer. Chrome answers
+// with the opaque "An unknown error occurred when fetching the script.", which
+// surfaced in the Errors panel as an unhandled API failure and told the caller
+// nothing at all. Naming the reason is the difference between "this page has no
+// script access" and "the bridge is broken".
+async function injectAllFrames(tabId, func, args) {
+  try {
+    return { frames: await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func, args }), blocked: null };
+  } catch (error) {
+    const message = String(error?.message ?? error).slice(0, 300);
+    const noScript = /cannot be scripted|chrome:\/\/|web ?store|extensions gallery|chrome-extension:\/\/|viewer|about:blank/i.test(message);
+    return { frames: null, blocked: {
+      status: 'blocked', retryable: false, dispatched: false,
+      reason: noScript ? 'page_not_scriptable' : 'frames_not_injectable',
+      message,
+      recommendedNextAction: noScript
+        ? 'This tab has no scriptable document, so no frame can be read by injection. Use browser_screenshot or the desktop tools for this surface, or navigate to a normal http(s) page.'
+        : 'Chrome refused injection into at least one frame. Read the main frame only (browser_read without frame:"all") and call browser_frames to see which frames are reachable.'
+    } };
+  }
+}
 async function execute(name, args, commandContext = { socket, epoch: connectionEpoch }) {
   const commandSocket = commandContext.socket;
   const commandEpoch = commandContext.epoch;
@@ -371,10 +393,8 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     const config = await settings();
     const paused = pausedGuard(tab.id);
     if (paused) return paused;
-    const frames = await chrome.scripting.executeScript({
-      target: { tabId: tab.id, allFrames: true },
-      func: () => ({ url: location.href, origin: location.origin, name: name || '', readyState: document.readyState })
-    });
+    const { frames, blocked } = await injectAllFrames(tab.id, () => ({ url: location.href, origin: location.origin, name: name || '', readyState: document.readyState }));
+    if (blocked) return { tabId: tab.id, ...blocked, frames: [], contentTrust: 'untrusted webpage metadata' };
     return { tabId: tab.id, frames: frames.map(item => ({ frameId: item.frameId, ...(item.result || {}), accessible: !item.error })), contentTrust: 'untrusted webpage metadata' };
   }
   const frameRef = typeof args?.ref === 'string' ? args.ref.match(/^(.*)@frame(\d+)$/) : null;
@@ -757,7 +777,9 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     return { ready: true, foreground: { ...foreground, advisories } };
   }
   if (name === 'browser_read' && args.frame === 'all') {
-    const results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
+    const injection = await injectAllFrames(tab.id, pageOperation, [name, args, config.allowedOrigins, config.allSites]);
+    if (injection.blocked) return { status: 'blocked', ...injection.blocked, frameResults: [], frameCount: 0, scope: 'all accessible frames', contentTrust: 'untrusted webpage data' };
+    const results = injection.frames;
     const decorate = (value, frameId) => {
       if (!value || typeof value !== 'object') return value;
       if (Array.isArray(value)) return value.map(item => decorate(item, frameId));
@@ -769,7 +791,11 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   }
   if (name === 'browser_find_text') {
     const allFrames = args.frame === 'all';
-    const results = await chrome.scripting.executeScript({ target: allFrames ? { tabId: tab.id, allFrames: true } : { tabId: tab.id }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] });
+    const injection = allFrames
+      ? await injectAllFrames(tab.id, pageOperation, [name, args, config.allowedOrigins, config.allSites])
+      : { frames: await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOperation, args: [name, args, config.allowedOrigins, config.allSites] }), blocked: null };
+    if (injection.blocked) return { tabId: tab.id, query: args.query, found: false, matchCount: 0, matches: [], nearbyElements: [], ...injection.blocked, scope: allFrames ? 'allFrames injection results returned by Chrome; hidden text excluded' : 'main frame; hidden text excluded', contentTrust: 'untrusted webpage data' };
+    const results = injection.frames;
     const frameResults = results.map(item => {
       const result = item.result || { __aibError: item.error?.message || 'frame unavailable' };
       if (result.__aibError) return { frameId: item.frameId, error: result.__aibError };
@@ -1258,6 +1284,29 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   if (result?.result === undefined) throw new Error('No page result. Page may have navigated; inspect before retrying.');
   return result.result;
 }
+// A WebSocket constructor that fails writes a console error the worker cannot
+// catch: every reconnect attempt against a stopped service left one more
+// "ERR_CONNECTION_REFUSED" in the extension's Errors panel. Restarting the
+// service a few times therefore painted a wall of red that reads as "the
+// extension is broken", when the only fact was that a process was not running.
+// The same question can be asked with fetch, whose failure IS catchable.
+//
+// Any HTTP answer counts as "listening". /status needs a bearer token and the
+// server rejects a request carrying a browser Origin outright, so the expected
+// reply here is 401 or 403 - a rejection still proves a socket accepted the
+// connection, which is the only thing this probe claims to know.
+async function serviceListening(port, timeoutMs = 1500) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    await fetch(`http://127.0.0.1:${port}/status`, { signal: controller.signal, cache: 'no-store', credentials: 'omit' });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function connect({ automatic = false } = {}) {
   if (connectInFlight) return;
   if (automatic && socket?.readyState === WebSocket.OPEN) return;
@@ -1269,6 +1318,18 @@ async function connect({ automatic = false } = {}) {
   if (epoch !== connectionEpoch) { connectInFlight = false; return; }
   if (!config.enabled) { connectionState = '已暂停'; notifyStatus(); connectInFlight = false; return; }
   if (!/^[a-f0-9]{64}$/.test(config.token) || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535) { connectionState = '请先配对'; notifyStatus(); connectInFlight = false; return; }
+  // Deliberately no WebSocket is constructed when nothing is listening. The
+  // state says what is actually true - the service is not up yet, and it is
+  // usually up again by itself because start.ps1 is on login autostart.
+  if (!(await serviceListening(config.port))) {
+    if (epoch !== connectionEpoch) { connectInFlight = false; return; }
+    connectionState = '本机服务未运行，等待启动';
+    notifyStatus();
+    connectInFlight = false;
+    await scheduleReconnect();
+    return;
+  }
+  if (epoch !== connectionEpoch) { connectInFlight = false; return; }
   const ws = new WebSocket(`ws://127.0.0.1:${config.port}/extension`);
   socket = ws;
   connectInFlight = false;
