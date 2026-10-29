@@ -82,6 +82,17 @@ test('an unscriptable page is reported as a reason, not thrown', () => {
     'a tab that cannot be scripted does not become scriptable by asking again');
 });
 
+test('a policy refusal is not reported as an extension error', () => {
+  const guardAt = workerSource.indexOf('const policyRefusal');
+  assert.ok(guardAt > 0, 'the origin refusal must be recognised before it reaches the error journal');
+  assert.match(workerSource.slice(guardAt, guardAt + 200), /Site not allowed/,
+    'the guard must match the message checkedUrl actually throws');
+  const reportAt = workerSource.indexOf('reportExtensionError(`command:', guardAt);
+  assert.ok(reportAt > guardAt, 'the journal call must come after the guard');
+  assert.match(workerSource.slice(guardAt, reportAt).trimEnd(), /if \(!policyRefusal\)$/,
+    'the guard has to be the condition of the report; a neighbouring statement would leave the noise in place');
+});
+
 test('the three frame callers surface the blocked result instead of mapping it', () => {
   // browser_frames, browser_read frame:"all" and browser_find_text all used to
   // call frames.map(...) unconditionally, which would throw on the null frames a

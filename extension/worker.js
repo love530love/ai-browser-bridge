@@ -1386,7 +1386,15 @@ async function connect({ automatic = false } = {}) {
             if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, result }));
             return;
           }
-          reportExtensionError(`command:${message.name}`, e, 'COMMAND_ERROR');
+          // A policy refusal is not a defect. The caller asked to read a tab this
+          // bridge was never allowed to read - an origin the user did not
+          // authorise, or an internal page that has no origin at all - and got a
+          // clear, correct answer. Recording it as an extension error is how the
+          // Errors panel fills with things that are working exactly as designed,
+          // which is the same problem as the reconnect noise above. The service
+          // still audits the call; only the extension-side error journal skips it.
+          const policyRefusal = /^Site not allowed\./.test(String(e?.message ?? ''));
+          if (!policyRefusal) reportExtensionError(`command:${message.name}`, e, 'COMMAND_ERROR');
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, error: e.message }));
         }
       }

@@ -37,9 +37,13 @@
 
 `retryable:false` 是刻意的：不能脚本化的标签页不会因为再问一次就变得能脚本化。
 
-### 三、测试
+### 三、策略拒绝不是缺陷
 
-538/538（新增 `test/extension-connection.test.js` 6 条，全是静态源码断言）。它们存在的理由和 0.25.0 那条一样：这些失败发生在**单测从不加载的 `extension/` 代码**里，而让探测能工作的 CSP 那一行，和依赖它的代码隔着一个文件。其中一条专门断言 `serviceListening` 里**不许出现** `response.ok` / `.status === 200`——因为服务对带 Origin 的请求返回 403，检查 200 会把每一个健康的服务都判成「没在跑」。
+同一次核查还暴露了第三条同类噪音：拿 `chrome://` 标签调 `browser_read` / `browser_find_text`，被 origin 策略正确拒绝，**拒绝本身是对的**（调用方拿到 `Site not allowed. Enable all sites or add its origin in extension settings.`），但它同时被记成一条 `COMMAND_ERROR`。用户没授权的站点、没有 origin 的内部页——这些是**按设计工作**，不是缺陷。现在这类拒绝不再进扩展侧错误日志（服务端审计仍然照记，可追溯性没有损失）。
+
+### 四、测试
+
+539/539（新增 `test/extension-connection.test.js` 7 条，全是静态源码断言）。它们存在的理由和 0.25.0 那条一样：这些失败发生在**单测从不加载的 `extension/` 代码**里，而让探测能工作的 CSP 那一行，和依赖它的代码隔着一个文件。其中一条专门断言 `serviceListening` 里**不许出现** `response.ok` / `.status === 200`——因为服务对带 Origin 的请求返回 403，检查 200 会把每一个健康的服务都判成「没在跑」。
 
 ## 0.25.0 — 2026-10-29（**补齐一闪而过和悬停才出现的 UI**：toast / aria-live 事后可查，tooltip 真指针读取，popconfirm 识别与安全确认）
 
