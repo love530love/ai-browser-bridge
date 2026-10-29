@@ -110,6 +110,15 @@ test('capability gaps are stated instead of being hidden behind a refusal', () =
   assert.match(idb.note, /browser_storage_read/);
   assert.match(idb.note, /evaluate/);
   assert.match(idb.note, /create/i);
+  // Select, Toggle and Value were a stated gap and are no longer one: the native
+  // action layer now drives all three, each proving itself by reading the
+  // control back. A gap entry that outlives the gap teaches callers to work
+  // around a capability they actually have.
+  assert.equal(gaps['drive a chrome:// control that only exists as a Select, Toggle or Value pattern'], undefined);
+  const internal = capabilityGuide({ goal: '把 Chrome 设置里的某个开关拨到开启' });
+  assert.equal(internal.primary.intent, 'chrome-internal');
+  assert.match(internal.primary.prefer, /desiredState/);
+  assert.match(internal.primary.prefer, /browser_native_snapshot/);
   // Storage guidance has to separate the cheap discovery read from the value
   // read, and has to state the two writes that are refused on purpose.
   const storage = capabilityGuide({ goal: '看看这个站点 localStorage 里存了什么，顺便清掉登录 cookie' });

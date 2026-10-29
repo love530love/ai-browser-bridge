@@ -51,13 +51,124 @@ test('a non-success result can never claim verification or a reached state', () 
     dispatched: true, verified: false, reason: 'native_state_not_reached', stateBefore: 'Collapsed', stateAfter: 'Collapsed' }, target));
 });
 
-test('toggle is not an accepted action anywhere', () => {
-  assert.throws(() => validateNativeActionResult({ ...verified(), action: 'toggle' }, target));
+test('toggle is accepted only as a request for a state, never as a bare flip', () => {
   const tool = TOOLS.find(item => item.name === 'browser_native_action');
-  assert.deepEqual(tool.inputSchema.properties.action.enum, ['expand', 'collapse', 'invoke']);
-  // The reason Toggle is absent is not squeamishness: repeating it inverts the
-  // effect, so an uncertain result could not be retried at all.
-  assert.match(tool.description, /Toggle is deliberately not implemented/);
+  assert.deepEqual(tool.inputSchema.properties.action.enum, ['expand', 'collapse', 'invoke', 'toggle', 'select', 'value']);
+  assert.deepEqual(tool.inputSchema.properties.desiredState.enum, ['on', 'off']);
+  // Toggle was excluded in the first version because repeating a flip undoes
+  // the first one. Taking a requested state is what removes that objection:
+  // asking for the state the control is already in dispatches nothing, exactly
+  // like expand and collapse, so an uncertain result can be retried.
+  const base = { processId: 11, windowHandle: 12, ref: '42.1', action: 'toggle', expect: { name: 'Ask where to save' } };
+  assert.throws(() => validateCall('browser_native_action', { ...base }), /requires desiredState/);
+  assert.throws(() => validateCall('browser_native_action', { ...base, desiredState: 'maybe' }), /desiredState/);
+  assert.doesNotThrow(() => validateCall('browser_native_action', { ...base, desiredState: 'on' }));
+  // A desired state attached to an action that has no use for it would be
+  // silently ignored, which is the same as a gate that does nothing.
+  assert.throws(() => validateCall('browser_native_action', { ...base, action: 'expand', desiredState: 'on' }),
+    /only applies to action:"toggle"/);
+  assert.throws(() => validateCall('browser_native_action', { ...base, action: 'select', desiredState: 'on', itemName: 'x' }),
+    /only applies to action:"toggle"/);
+  // And the result must name the state it was asked for, so it can be judged.
+  assert.throws(() => validateNativeActionResult({ ...target, action: 'toggle', status: 'success', dispatched: true,
+    verified: true, alreadyInState: false, toggleStateBefore: 'Off', toggleStateAfter: 'On' }, target), /must name the state/);
+});
+
+const toggled = () => ({ ...target, action: 'toggle', desiredState: 'on', status: 'success', dispatched: true,
+  verified: true, alreadyInState: false, toggleStateBefore: 'Off', toggleStateAfter: 'On' });
+
+test('a toggle result is judged against the state the caller asked for', () => {
+  assert.deepEqual(validateNativeActionResult(toggled(), target), toggled());
+  assert.doesNotThrow(() => validateNativeActionResult({ ...toggled(), desiredState: 'off',
+    toggleStateBefore: 'On', toggleStateAfter: 'Off' }, target));
+  assert.doesNotThrow(() => validateNativeActionResult({ ...toggled(), alreadyInState: true, dispatched: false,
+    toggleStateBefore: 'On', toggleStateAfter: 'On' }, target));
+  for (const patch of [
+    // Asked for on, reached off: the pattern returned, the state did not follow.
+    { toggleStateAfter: 'Off' },
+    { toggleStateAfter: 'Indeterminate' },
+    { toggleStateAfter: 'on' },
+    { verified: false },
+    { alreadyInState: undefined },
+    // "Already there" and "I dispatched it" are mutually exclusive claims.
+    { alreadyInState: true },
+    { dispatched: false },
+    // A refusal cannot borrow the success signal.
+    { status: 'uncertain', dispatched: null, verified: false, reason: 'native_action_dispatch_threw', toggleStateAfter: 'On' },
+    { status: 'not_dispatched', dispatched: true },
+    { status: 'not_dispatched', dispatched: false, stateAfter: 'On' }
+  ]) {
+    assert.throws(() => validateNativeActionResult({ ...toggled(), ...patch }, target), JSON.stringify(patch));
+  }
+  // Indeterminate is a real state and a refusal that reports it is honest.
+  assert.doesNotThrow(() => validateNativeActionResult({ ...target, action: 'toggle', desiredState: 'on',
+    status: 'not_dispatched', dispatched: false, reason: 'native_toggle_indeterminate',
+    toggleStateBefore: 'Indeterminate' }, target));
+});
+
+const selected = () => ({ ...target, action: 'select', itemName: 'Ask where to save',
+  status: 'success', dispatched: true, verified: true, alreadyInState: false,
+  selectionBefore: ['Downloads'], selectionAfter: ['Ask where to save'] });
+
+test('a select result is judged by reading the selection back', () => {
+  assert.deepEqual(validateNativeActionResult(selected(), target), selected());
+  assert.doesNotThrow(() => validateNativeActionResult({ ...selected(), alreadyInState: true, dispatched: false,
+    selectionBefore: ['Ask where to save'], selectionAfter: ['Ask where to save'] }, target));
+  for (const patch of [
+    { selectionAfter: ['Downloads'] },
+    { selectionAfter: [] },
+    { selectionAfter: undefined },
+    { itemName: '' },
+    { itemName: 'x'.repeat(121) },
+    { selectionAfter: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] },
+    { selectionAfter: [7] },
+    { verified: false },
+    { dispatched: false },
+    { alreadyInState: true },
+    // A refusal that already reports the item as selected is a contradiction.
+    { status: 'uncertain', dispatched: true, verified: false, reason: 'native_selection_not_reached' },
+    { status: 'not_dispatched', dispatched: false, selectionAfter: ['Ask where to save'] }
+  ]) {
+    assert.throws(() => validateNativeActionResult({ ...selected(), ...patch }, target), JSON.stringify(patch));
+  }
+});
+
+const valued = () => ({ ...target, action: 'value', status: 'success', dispatched: true, verified: true,
+  alreadyInState: false, valueBefore: 'old', valueAfter: 'new', valueLength: 3, valueMatches: true });
+
+test('a value result is judged by valueMatches, not by the clipped echo', () => {
+  assert.deepEqual(validateNativeActionResult(valued(), target), valued());
+  assert.doesNotThrow(() => validateNativeActionResult({ ...valued(), alreadyInState: true, dispatched: false,
+    valueBefore: 'new', valueAfter: 'new' }, target));
+  for (const patch of [
+    // The echoed text is clipped at 200 characters, so equality of the echo can
+    // never be the success criterion - the adapter compares the full strings.
+    { valueMatches: false },
+    { valueMatches: undefined },
+    { valueLength: undefined },
+    { valueLength: -1 },
+    { valueLength: 1.5 },
+    { valueAfter: 'x'.repeat(201) },
+    { verified: false },
+    { dispatched: false },
+    { alreadyInState: true },
+    { status: 'failed', dispatched: true, verified: false, reason: 'native_value_not_reached' },
+    { status: 'not_dispatched', dispatched: false, valueMatches: true }
+  ]) {
+    assert.throws(() => validateNativeActionResult({ ...valued(), ...patch }, target), JSON.stringify(patch));
+  }
+});
+
+test('the three state actions refuse to run without the state they were asked for', async () => {
+  const base = { processId: 11, windowHandle: 12, ref: '42.1', platform: 'win32', expect: { name: 'Chrome' } };
+  await assert.rejects(() => nativeUiAction(target, { ...base, action: 'toggle' }), /desiredState/);
+  await assert.rejects(() => nativeUiAction(target, { ...base, action: 'select' }), /itemName/);
+  await assert.rejects(() => nativeUiAction(target, { ...base, action: 'select', itemName: 'x'.repeat(121) }), /itemName/);
+  await assert.rejects(() => nativeUiAction(target, { ...base, action: 'value' }), /text/);
+  // The tool schema refuses them even earlier, before any desktop mutex.
+  assert.throws(() => validateCall('browser_native_action', { processId: 11, windowHandle: 12, ref: '1', action: 'value', expect: { name: 'x' } }), /requires text/);
+  assert.throws(() => validateCall('browser_native_action', { processId: 11, windowHandle: 12, ref: '1', action: 'select', expect: { name: 'x' } }), /requires itemName/);
+  assert.throws(() => validateCall('browser_native_action', { processId: 11, windowHandle: 12, ref: '1', action: 'expand', expect: { name: 'x' }, text: 'y' }), /only applies to action:"value"/);
 });
 
 const invoked = () => ({ ...target, action: 'invoke', status: 'success', dispatched: true, verified: true,
@@ -118,7 +229,7 @@ test('a ref alone is not an identity, and the refusal happens before any dispatc
     /must repeat name or automationId/);
   assert.throws(() => validateCall('browser_native_action', { ...base, expect: { label: 'Chrome' } }), /Invalid expect identity: label/);
   assert.throws(() => validateCall('browser_native_action', { ...base, expect: { name: '' } }), /Invalid expect identity: name/);
-  assert.throws(() => validateCall('browser_native_action', { ...base, action: 'toggle', expect: { name: 'Chrome' } }), /Invalid action/);
+  assert.throws(() => validateCall('browser_native_action', { ...base, action: 'toggle', expect: { name: 'Chrome' } }), /requires desiredState/);
   assert.doesNotThrow(() => validateCall('browser_native_action', { ...base, expect: { name: 'Chrome' } }));
   assert.doesNotThrow(() => validateCall('browser_native_action', { ...base, expect: { automationId: 'view_1007' } }));
 });
@@ -132,13 +243,43 @@ test('a native UI write is a write for policy, without borrowing a tab lease', (
 test('unsupported host does not claim the action', async () => {
   assert.equal((await nativeUiAction(target, { ref: '1', action: 'expand', platform: 'linux' })).status, 'unavailable');
   await assert.rejects(() => nativeUiAction(target, { ref: '', action: 'expand', platform: 'win32' }), /snapshot ref/);
-  await assert.rejects(() => nativeUiAction(target, { ref: '1', action: 'toggle', platform: 'win32' }), /snapshot ref/);
+  await assert.rejects(() => nativeUiAction(target, { ref: '1', action: 'toggle', platform: 'win32' }), /desiredState/);
+});
+
+test('every result echoes the request it was judged against', () => {
+  const source = readFileSync(new URL('../scripts/native-ui-action.ps1', import.meta.url), 'utf8');
+  // A refusal that cannot name the state it refused reads as an invalid result
+  // rather than as a refusal. Measured on a real Chrome window: toggle on the
+  // omnibox came back as native_action_invalid_result because that branch never
+  // carried the desired state. The validator requires the echo on every result,
+  // so the adapter has to emit it on every result - including the refusals.
+  // Unit tests build the result object themselves, so they cannot catch this;
+  // only the source can be checked for it.
+  const blocks = {
+    toggle: { start: "if ($Action -eq 'toggle')", end: "if ($Action -eq 'value')", field: 'desiredState' },
+    value: { start: "if ($Action -eq 'value')", end: "if ($Action -eq 'select')", field: 'valueLength' },
+    select: { start: "if ($Action -eq 'select')", end: '# --- expand / collapse', field: 'itemName' }
+  };
+  for (const [action, { start, end, field }] of Object.entries(blocks)) {
+    const from = source.indexOf(start);
+    const to = source.indexOf(end, from + 1);
+    assert.ok(from > 0 && to > from, `could not isolate the ${action} block`);
+    const fragments = source.slice(from, to).split('Emit @{').slice(1);
+    assert.ok(fragments.length >= 3, `the ${action} block should report several outcomes, found ${fragments.length}`);
+    for (const fragment of fragments) {
+      assert.match(fragment, new RegExp(field), `a ${action} result does not echo ${field}`);
+    }
+  }
 });
 
 test('the adapter script drives a pattern, never a global keystroke', () => {
   const source = readFileSync(new URL('../scripts/native-ui-action.ps1', import.meta.url), 'utf8');
   assert.match(source, /ExpandCollapsePattern/);
   assert.match(source, /InvokePattern/);
+  assert.match(source, /TogglePattern/);
+  assert.match(source, /SelectionItemPattern/);
+  assert.match(source, /SelectionPattern/);
+  assert.match(source, /ValuePattern/);
   // The F12 lesson: a global SendKeys races with whatever window gains focus
   // between the check and the keystroke. A pattern call is bound to the element.
   assert.equal(/SendKeys|SetForegroundWindow|WScript\.Shell/.test(source), false);
@@ -150,6 +291,18 @@ test('the adapter script drives a pattern, never a global keystroke', () => {
   // "the ids changed" from being reported as "the item was chosen".
   assert.match(source, /\$absentStreak -ge 2/);
   assert.match(source, /native_invoke_effect_unobserved/);
+  // Each of the three state actions reads before it writes, which is what makes
+  // "already in the requested state" reportable as a non-dispatch.
+  assert.match(source, /native_toggle_indeterminate/);
+  assert.match(source, /native_control_read_only/);
+  assert.match(source, /native_item_not_found/);
+  // The missing-request refusals live in the adapter, before spawn, because a
+  // refusal that cannot echo the request could not be validated.
+  assert.equal(/native_desired_state_required|native_item_name_required/.test(source), false);
+  // A text field can hold a document, so the echo is clipped - and the decision
+  // is taken over the full strings, never over the clipped echo.
+  assert.match(source, /valueMatches = \$true/);
+  assert.match(source, /valueMatches = \$false/);
 });
 
 test('a revalidated desktop target renews the observation window', async t => {

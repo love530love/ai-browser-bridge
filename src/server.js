@@ -21,12 +21,15 @@ import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-a
 import { setDevToolsState } from './devtools-menu.js';
 import { lookupCredential, credentialOriginHash, CREDENTIAL_LOOKUP_CONFIRMATION } from './credential-store.js';
 import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMATION } from './password-manager.js';
+import { runCertificateStore, CERTIFICATE_STORES } from './certificate-store.js';
+import { runNativeHostTool, NATIVE_HOST_NAME } from './native-host.js';
 import {
   STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION, RECIPE_RUN_CONFIRMATION,
   BOOKMARKS_WRITE_CONFIRMATION, HISTORY_DELETE_CONFIRMATION, DOWNLOADS_CONTROL_CONFIRMATION,
   EXTENSION_STATE_CONFIRMATION, COOKIES_WRITE_CONFIRMATION, BROWSING_DATA_CONFIRMATION,
   SITE_SETTINGS_WRITE_CONFIRMATION, PRIVACY_SETTING_WRITE_CONFIRMATION,
-  WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION
+  WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION,
+  CLIPBOARD_WRITE_CONFIRMATION, NATIVE_MESSAGING_CONFIRMATION, NATIVE_HOST_CONFIRMATION
 } from './confirmations.js';
 
 // Browser-wide writes (extension/browser-authority.js) are gated here, before a
@@ -44,7 +47,13 @@ const AUTHORITY_CONFIRMATIONS = {
   browser_site_settings_write: SITE_SETTINGS_WRITE_CONFIRMATION,
   browser_privacy_settings_write: PRIVACY_SETTING_WRITE_CONFIRMATION,
   browser_windows_control: WINDOW_CONTROL_CONFIRMATION,
-  browser_proxy_write: PROXY_CONFIRMATION
+  browser_proxy_write: PROXY_CONFIRMATION,
+  // The clipboard write and the native messaging send are both extension-side,
+  // but the refusal belongs here for the same reason as the rest: a caller
+  // should learn that its attestation is wrong before it costs a queue slot.
+  browser_clipboard_write: CLIPBOARD_WRITE_CONFIRMATION,
+  browser_native_messaging: NATIVE_MESSAGING_CONFIRMATION,
+  browser_native_host_install: NATIVE_HOST_CONFIRMATION
 };
 import { recipeDir, recipeFileName, buildRecipe, saveRecipe, loadRecipe, listRecipes, deleteRecipe, missingVariables, MAX_RECIPE_STEPS } from './recipes.js';
 
@@ -107,6 +116,11 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   let desktopOperation = null;
   const observedDesktopTargets = new Map();
   let extensionVersion = null;
+  // The extension's own id, reported with the browser hint. Nothing else can
+  // supply it: a native messaging host manifest has to name the exact
+  // chrome-extension://<id>/ origin allowed to launch it, and the service is the
+  // only side that can write that manifest.
+  let extensionId = null;
   // Which browser the extension is running in. The extension reports it once
   // after hello because no chrome.* API exposes it and the reduced user agent
   // hides the patch version; a browser update is otherwise invisible to the
@@ -302,6 +316,9 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     version: VERSION,
     buildId: BUILD_ID,
     extensionVersion,
+    extensionId,
+    nativeHostName: NATIVE_HOST_NAME,
+    certificateStores: CERTIFICATE_STORES,
     browserVersion: extensionBrowser?.version ?? null,
     browserMajor: extensionBrowser?.major ?? null,
     browserIdentitySource: extensionBrowser?.source ?? null,
@@ -406,6 +423,9 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     extension = null;
     extensionVersion = null;
     extensionBrowser = null;
+    // Kept on purpose: a native host registration outlives the connection, so
+    // remembering the id lets a later status call explain a stale manifest
+    // instead of reporting "unknown extension".
     extensionSessionId = null;
     if (current) {
       // A disconnected or stopped extension may have accepted a write before its
@@ -647,6 +667,49 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         return { status: 'failed', retryable: false, reason: 'password_manager_reveal_failed',
           message: String(error?.message ?? error).slice(0, 200), dispatched: false };
       });
+  }
+  // Certificates and native host registration are answered on the service side
+  // because neither is reachable from an extension: there is no certificate API
+  // for ordinary extensions, and registering a native host writes a registry key.
+  function certificateCall(args) {
+    const startedAt = Date.now();
+    return runCertificateStore({
+      action: args.action, store: args.store, scope: args.scope, thumbprint: args.thumbprint,
+      path: args.path, password: args.password, filter: args.filter, limit: args.limit,
+      validOnly: args.validOnly, confirmation: args.confirmation
+    })
+      .then(result => {
+        audit({
+          time: new Date().toISOString(), id: randomUUID(), tool: args.action === 'import' || args.action === 'remove' ? 'browser_certificates_write' : 'browser_certificates',
+          tabId: null, agent: args.agent ?? null,
+          outcome: result?.status === 'success' ? 'ok' : result?.status === 'denied' ? 'denied' : result?.status ?? 'error',
+          resultStatus: result?.status ?? null, dispatched: result?.dispatched === true,
+          errorCategory: typeof result?.reason === 'string' ? result.reason.slice(0, 80) : null,
+          durationMs: Date.now() - startedAt
+        });
+        return result;
+      })
+      .catch(error => ({ status: 'failed', retryable: false, reason: 'certificate_store_failed', message: String(error?.message ?? error).slice(0, 200) }));
+  }
+  function nativeHostCall(args) {
+    const startedAt = Date.now();
+    // The id is filled in from the live handshake when the caller does not know
+    // it, because that is the normal case: nothing exposes it to an agent.
+    const extensionIdArg = typeof args.extensionId === 'string' && args.extensionId ? args.extensionId : (extensionId ?? '');
+    return runNativeHostTool({ ...args, extensionId: extensionIdArg })
+      .then(result => {
+        audit({
+          time: new Date().toISOString(), id: randomUUID(),
+          tool: args.action === 'status' ? 'browser_native_host' : 'browser_native_host_install',
+          tabId: null, agent: args.agent ?? null,
+          outcome: result?.status === 'success' ? 'ok' : result?.status === 'denied' ? 'denied' : result?.status ?? 'error',
+          resultStatus: result?.status ?? null, dispatched: null,
+          errorCategory: typeof result?.reason === 'string' ? result.reason.slice(0, 80) : null,
+          durationMs: Date.now() - startedAt
+        });
+        return { ...result, extensionId: extensionIdArg || null };
+      })
+      .catch(error => ({ status: 'failed', retryable: false, reason: 'native_host_failed', message: String(error?.message ?? error).slice(0, 200) }));
   }
   function desktopCall(name, args) {
     const startedAt = Date.now();
@@ -1108,6 +1171,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (name === 'browser_launch') return launchCall(name, args);
     if (name === 'browser_credential_lookup') return credentialCall(args);
     if (name === 'browser_password_manager_reveal') return passwordManagerCall(args);
+    if (name === 'browser_certificates' || name === 'browser_certificates_write') return certificateCall(args);
+    if (name === 'browser_native_host' || name === 'browser_native_host_install') return nativeHostCall(args);
     // Answered from disk: a recipe listing must work even when the browser is
     // disconnected, because that is exactly when a caller wants to know what
     // flows exist.
@@ -1249,6 +1314,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         if (msg.type === 'browser' && ws === extension) {
           // Validated rather than trusted: this arrives over the same socket as
           // results, and a malformed value would end up in every status reply.
+          if (typeof msg.extensionId === 'string' && /^[a-p]{32}$/.test(msg.extensionId)) extensionId = msg.extensionId;
           const version = typeof msg.browser?.version === 'string' && /^\d+(\.\d+){1,3}$/.test(msg.browser.version) ? msg.browser.version : null;
           extensionBrowser = version ? {
             version,

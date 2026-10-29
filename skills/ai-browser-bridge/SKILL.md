@@ -227,6 +227,64 @@ when you are done with it.
   rule that never matches looks like nothing happened, and a page that seems hung
   means clear the rules. "mock" answers without the server ever seeing the
   request; the body size is capped.
+- browser_clipboard reads, browser_clipboard_write replaces (confirmation
+  "modify_clipboard_once"). Use strategy:"native" by default: it goes through
+  this project's own native host to the operating system clipboard, so it needs
+  no visible tab and no focused window, and a write is verified by reading the
+  text back. "offscreen" touches no page but cannot read on this Chrome build and
+  its copy can report true while the clipboard stays empty. "cdp" borrows a real
+  tab and synthesises Ctrl+V, which means that page's paste handlers run and see
+  the content - and it needs a visible document: a fully covered Chrome window
+  reports its active tab as hidden, so it refuses with
+  clipboard_needs_visible_document and retryable:false rather than reporting an
+  empty clipboard. Read results are marked secrets:true; never echo them.
+- browser_navigation answers "where did this tab actually go": status is a
+  read-only check, timeline is the event stream, and chain groups one navigation
+  into startUrl/finalUrl/hops/redirects/historyUpdates. finalUrl is the last
+  document that committed, which is not necessarily where a single-page app left
+  the address bar - historyUpdates counts those rewrites.
+- browser_certificates and browser_certificates_write manage the certificate
+  store Chrome actually uses. Extensions have no certificate API, and on Windows
+  Chrome keeps no store of its own, so this reads the operating system store:
+  stores, list, inspect (with the OS's own chain verdict), and import/remove with
+  confirmation "modify_certificates_once", each proven by reading the store back.
+  Adding to Root or TrustedPublisher makes Windows raise its own consent dialog;
+  that dialog is the security boundary, so the call returns
+  waiting_for_user_auth - ask the user to answer it, then check with list. Do not
+  retry the import.
+- browser_native_messaging is the only channel that leaves the browser sandbox
+  (confirmation "run_native_host_once"); browser_native_host reports whether this
+  project's host is registered and browser_native_host_install registers it
+  (confirmation "modify_native_host_once"). Read the three failure reasons
+  literally, because they call for opposite actions:
+  native_host_not_registered means nothing ran and the fix is an install,
+  native_host_no_reply means the host accepted the message and never answered so
+  the outcome is unknown and the same message must not be resent, and
+  native_host_closed means it exited before replying.
+- browser_identity reads the account signed into this Chrome profile
+  (action:"profile"; an empty email means the build did not request
+  identity.email, not that the user is signed out). action:"token" needs an
+  oauth2 section in the manifest and reports oauth2_not_configured when there is
+  none; action:"launch" takes the caller's own client_id and authorizeUrl.
+- browser_native_action has six actions, grouped by what can be proved.
+  expand, collapse, toggle, select and value are idempotent as requests: each
+  reads the current state first, so asking for the state a control is already in
+  dispatches nothing and returns alreadyInState:true. toggle therefore requires
+  desiredState "on" or "off" - never a bare flip, because repeating a flip undoes
+  it and an uncertain result could not be retried. select takes itemName, the
+  visible name of the item. value takes text and proves itself by reading the
+  value back (valueMatches is computed over the full strings; the echoed
+  before/after are clipped at 200 characters). invoke dispatches a command and is
+  not idempotent, so it requires expect.afterInvoke:"control_gone" and must never
+  be repeated after an uncertain result. All six are UIA patterns bound to the
+  element, not global keystrokes.
+  One measured boundary: the CONTENT of a chrome:// page is not visible to UI
+  Automation. With chrome://extensions active, a native snapshot returned 88
+  controls, zero Document nodes and zero toggle controls - all of it browser
+  chrome (toolbar, menus, tab strip). So this layer drives the browser's shell,
+  not the switches inside a chrome:// page; that would need Chrome's
+  accessibility engine turned on. browser_password_manager_reveal works because
+  it types into the page, not because UIA can see it.
 
 Protected Chrome UI is not a blanket denial, but only advertised actions are executable. On Windows, use browser_protected_ui_plan; browser_desktop_windows may list visible Chrome windows, and browser_reload_extension can reload only this project's fixed extension. It opens chrome://extensions in a new tab in the selected window and preserves the current tab. Select a current windowHandle, obtain direct user approval for exactly one reload, and pass confirmation:"reload_extension_once" only after approval. This fixed value is a caller attestation, not independent human authentication; the service cannot prove who approved. Concurrent calls are blocked, but distinct later calls are not deduplicated, so obtain fresh direct user approval per call. The service pauses competing browser work during the action. If the result is uncertain, inspect connection/version before deciding whether to act again; never blindly retry. Chrome settings writes, extension install/removal, and browser data access are not implemented by this UI Automation route - they are implemented by the extension-side tools above (browser_privacy_settings_write, browser_extension_state, browser_clear_browsing_data), which do not take the foreground. Breakpoint debugging is available through browser_debugger, not through this route, and a single saved password is read with browser_password_manager_reveal as described with the login flow above. Never describe a planner, keyboard dispatch, or UI click as successful without independent state verification.
 

@@ -33,6 +33,13 @@ export const WRITE_TOOLS = new Set([
   // because it is one call would let two agents replay into the same page at the
   // same time.
   'browser_recipe_run'
+  // Deliberately absent: browser_clipboard_write. The clipboard is one global,
+  // not per-tab state, so a per-tab lease is the wrong instrument for it: two
+  // agents writing it do not corrupt anything, the last writer simply wins, and
+  // no tab is left inconsistent. It also cannot require a tabId - the preferred
+  // offscreen route needs no page at all - and a lease guard with no tab has
+  // nothing to look up. test/lease-governance.test.js enforces that every
+  // governed tool requires tabId, which is what keeps this rule honest.
 ]);
 
 const clampTtl = value => {

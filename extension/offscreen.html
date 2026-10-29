@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>AI Browser Bridge clipboard surface</title>
+</head>
+<body>
+  <!--
+    This document is never shown. It exists because an MV3 service worker has no
+    document at all, and both clipboard routes need one:
+      * document.execCommand('copy') needs a selection inside a real DOM;
+      * navigator.clipboard.readText() needs a document that is allowed to read.
+    chrome.offscreen.createDocument with reason CLIPBOARD is the only supported
+    way to get such a document from a worker.
+  -->
+  <textarea id="sink" aria-hidden="true" tabindex="-1"></textarea>
+  <script src="offscreen.js" type="module"></script>
+</body>
+</html>

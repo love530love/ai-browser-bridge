@@ -4,6 +4,48 @@
 
 ## 目标
 
+## 2026-10-29 接手增量（0.24.0）：撤掉「明确不加」清单
+
+- 0.22.0 里那份「明确不加的权限及原因」被用户整条推翻：**能力没有边界、没有禁区，取舍交给接入
+  的 agent**。判断标准随之改变——不再是「这个能力有没有坑」，而是「这个坑有没有写进返回值」。
+- 权限 20 → 27：`offscreen` `clipboardRead` `clipboardWrite` `webNavigation` `nativeMessaging`
+  `identity` `identity.email`。规矩不变：**每开一个权限，同版必须有一个真能用的工具**。
+- 10 个新工具 + 4 个新确认串（`modify_clipboard_once` / `run_native_host_once` /
+  `modify_native_host_once` / `modify_certificates_once`）。
+- **剪贴板四条实测**（决定了最终设计）：offscreen 文档读不了（`Document is not focused`，
+  offscreen 永远没焦点）；offscreen 写返回 `true` 而系统剪贴板是空的（用独立回读证伪，所以
+  「copy 返回 true」不是证据）；**完全被覆盖的 Chrome 窗口，活动标签 `visibilityState` 是
+  `hidden`**；`waiting` 导致服务自动重试 **119 次 / 120 秒**全被同一原因拒绝 ⇒ 改成
+  `retryable:false` + `retryWith:{allowFocus:true}`。最终加第三条通道 `strategy:"native"`：
+  走本项目自己的原生宿主碰操作系统剪贴板，不碰页面、不抬窗口、写入能读回。
+- **`nativeMessaging` 没有已注册的 host 就是空权限**：先写 `native-host/host.js`（4 字节长度 +
+  JSON 帧，支持 ping/system.info/clipboard/shell.run，写审计日志），再做工具。两个真机 bug：
+  MV3 worker 没有 `Buffer`（`Buffer.byteLength` 抛错 → catch 把未知大小当无穷大 → 每条消息都被
+  拒为 `message_too_large`）；`shell.run` 的 promise 在 stdout flush 前就 resolve。
+- **证书没有扩展 API**（`chrome.certificateProvider` 只对厂商/企业组件扩展开放），而 Windows 上
+  Chrome 用的就是操作系统存储 ⇒ 直接读那个存储，不绕 UI。三个真机才暴露的 PowerShell 坑：
+  `[StoreName]::$name` 不是动态查表（传 null 枚举）、`New-Object X509Store(a,b)` 位置参数被当
+  字符串、**`$store` 与 `[string]$Store` 大小写不敏感同名**导致每次赋值被转回字符串。
+- **一条改变上版假设的实测**：把窗口切到 `chrome://extensions` 再抓原生树 → 88 个控件、
+  `ControlType.Document` **0** 个、带 `TogglePattern` 的 **0** 个，全是浏览器外壳。即
+  **chrome:// 页面的内容对 UIA 不可见**（Chrome 只在无障碍引擎启用时才暴露页面内容，且
+  `native-ui-snapshot` 本来就跳过 Document 子树）。⇒ 「用人类工程师的 UIA 去操作 chrome://
+  页面」对**页面内容**不成立，只对浏览器外壳成立；`browser_password_manager_reveal` 能读是因为
+  它走地址栏输入 + 键盘，不是 UIA 元素绑定。证书走操作系统存储不是退路，是唯一可达路径。
+- `browser_native_action` 补 `toggle`（**必须带 `desiredState`**，只接受「请求一个状态」；三态
+  `Indeterminate` 直接拒绝）、`select`（按可见名字，控件是条目或容器都支持，用回读选择集判定）、
+  `value`（设值回读，`valueMatches` 用完整字符串算，回显截断 200 字符）。五种状态动作都是幂等
+  请求，`invoke` 仍必须带 `expect.afterInvoke:"control_gone"` 且不确定绝不重发。
+- **真机暴露、单测结构上抓不到的 bug**：`toggle` 的拒绝分支没回显 `desiredState`，校验器判成
+  `native_action_invalid_result`。单测自己构造结果对象，所以永远不缺字段——只有真跑一次才会。
+  修法是每个结果都回显请求，并加静态测试：三个动作块里**每一个** `Emit @{` 都必须带自己的请求
+  字段。同时删掉两条「适配器在 spawn 前就会拒绝」的死分支（不能回显请求的拒绝无法被校验）。
+- 真机验证：`value` 打在地址栏（`valueBefore`=当前 URL → `valueAfter`=探针 → `valueMatches:true`，
+  第二次同请求 `alreadyInState:true`/`dispatched:false`，随后恢复原 URL）；`select` 打在标签项
+  （`selectionBefore:[]` → `["Example Domain"]`，并用 `browser_tabs` 独立确认该窗口活动标签真的
+  变成 `https://example.com/`，随后切回）；`toggle` 打在地址栏 → `native_pattern_not_supported`。
+- 全量 **518/518**（上一版 513）。新增 6 个测试文件，`native-ui-action` 10 → 17 条。
+
 ## 2026-10-29 接手增量（0.23.0）：对照开源实现补齐七块 DevTools 能力
 
 - 尺子是 `chrome-devtools-mcp` 与 `playwright-mcp`。逐条比对后只缺七块，而且都属「以前做不到」

@@ -1,3 +1,85 @@
+## 0.24.0 — 2026-10-29（**撤掉「明确不加」清单**：7 个权限、10 个新工具、原生宿主、证书、剪贴板、导航审计、UI Automation 补齐 Select/Toggle/Value）
+
+0.22.0 的变更记录里我写过一份「明确不加的权限及原因」：`webNavigation` 只有事件没有操作、`nativeMessaging`/`identity` 本机没有基础设施、`clipboardRead/Write` 粘贴已经能用 CDP 合成 Ctrl+V。用户这一轮把这份清单整条推翻：**「全部要加，能力没有边界，也没有禁区，因为接入的 agent 会取舍，我们不提供强大的项目能力，而不是做出阻滞」**。这句话改变了这一版的判断标准——不再是「这个能力有没有坑」，而是「这个坑有没有说清楚」。坑依然在，只是现在它们是返回值里的字段，而不是不提供工具的理由。
+
+- **权限从 20 个加到 27 个**：`offscreen` `clipboardRead` `clipboardWrite` `webNavigation` `nativeMessaging` `identity` `identity.email`。仍然守着 0.22.0 立的规矩：**每开一个权限，同一版必须有一个能真正用起来的工具**，否则只是安装时多一条警告。
+- **10 个新工具**：`browser_clipboard` / `browser_clipboard_write`、`browser_navigation`、`browser_native_messaging` / `browser_native_ports`、`browser_native_host` / `browser_native_host_install`、`browser_identity`、`browser_certificates` / `browser_certificates_write`。4 个新确认串：`modify_clipboard_once`、`run_native_host_once`、`modify_native_host_once`、`modify_certificates_once`。
+- **`browser_native_action` 补齐三个 UIA pattern**：`toggle`（按请求的状态，不是翻转）、`select`（按可见名字选一项）、`value`（设值并回读）。加上已有的 `expand`/`collapse`/`invoke`，一共六种动作。
+
+### 一、剪贴板：三条通道，其中只有一条在后台真的能用
+
+这一块是整轮最典型的「只有真机才会暴露」的地方，四步实测把设计逼到了正确形态：
+
+1. **`offscreen` 读被浏览器拒绝**。文档说用 `reasons:['CLIPBOARD']` 创建的 offscreen 文档可以调 `navigator.clipboard.readText()`，实测抛 `Document is not focused`——offscreen 文档永远不会有焦点。
+2. **`offscreen` 写返回 `true`，系统剪贴板却是空的**。`document.execCommand('copy')` 返回 `true`，用原生宿主独立回读 `Get-Clipboard` 得到空字符串。**「copy 命令返回 true」不是证据**，这一条直接改掉了 `verified` 的定义。
+3. **完全被覆盖的 Chrome 窗口，活动标签的 `document.visibilityState` 是 `hidden`**——即使窗口是最大化、标签是活动标签。两个剪贴板 API 都以可见性为前提，所以 CDP 路线在这个状态下读不到也写不进。
+4. **`retryable:false` 是量出来的**。第一版把这种情况报成 `status:"waiting"`，服务的自动重试在两分钟里发了 **119 次相同请求，全部被同一个原因拒绝**。一个「调用方必须先改变某个前提」的失败不是等待，所以现在返回 `retryable:false` + `retryWith:{allowFocus:true}`。
+
+结论落成第三条通道：**`strategy:"native"`，走本项目自己的原生宿主去碰操作系统剪贴板**。不碰页面、不抬窗口、不受可见性约束，写入能读回校验（`verified:true` + `observedLength`），读取带 `secrets:true`。真机验证：写入 39 字符 → `verified:true`，独立回读同一文本。`strategy:"auto"` 现在按 native → offscreen → cdp 的顺序试，每条通道的失败原因都进 `attempts`，所以「剪贴板是空的」和「这条通道读不了」永远是两件事。
+
+### 二、原生宿主：`nativeMessaging` 没有已注册的 host 就是空权限
+
+- `native-host/host.js` 是本项目自己的 Node 宿主，走 Chrome 原生的「4 字节长度 + JSON」帧协议，支持 `ping`、`system.info`、`clipboard.read`、`clipboard.write`、`shell.run`，写 `%LOCALAPPDATA%\AIBrowserBridge\native-host.log` 做审计。
+- `browser_native_host` 报告注册状态（host manifest 路径、注册表键、Chrome 是否认得），`browser_native_host_install` 负责装/卸（确认串 `modify_native_host_once`）。**没有 host 时 `connectNative` 立刻抛 `Specified native messaging host not found`**，工具把它翻译成 `native_host_not_registered` 并说明「去装」，而不是让调用方等 120 秒超时。
+- 失败原因分成三种、要求三种相反的动作：`native_host_not_registered`（Chrome 什么都没启动，去装）、`native_host_no_reply`（host 收下了但没答，**结果未知，不要再发同一条**）、`native_host_closed`（host 在答复前退出）。
+- **真机两个 bug**：
+  1. **MV3 service worker 里没有 `Buffer`**。`Buffer.byteLength` 抛异常，catch 把「未知大小」当成无穷大，于是**每一条消息都被拒为 `message_too_large`**——权限有了、host 装了、工具一次都跑不通。改用 `TextEncoder`。
+  2. **`shell.run` 的 stdout 一开始是空的**：promise 在子进程 flush 之前就 resolve 了。修完之后真机 `node -e "process.stdout.write('HOST-OUTPUT-OK')"` 回读正常。
+
+### 三、证书：没有扩展 API，于是走 Chrome 真正用的那个存储
+
+`chrome.certificateProvider` 只对厂商/企业组件扩展开放，普通扩展拿不到——这条路是死的，不是没做。而 **Windows 上的 Chrome 不维护自己的证书库，它用的就是操作系统的证书存储**。所以正确路径不是去驱动 `chrome://settings/certificates`，而是直接读那个存储：
+
+- `browser_certificates`：`stores`（7 个存储 + 每个可读计数）、`list`（单存储列出，含 `expired`/`isCA`/`simpleName`/指纹）、`inspect`（单张证书 + 链 + **操作系统自己的信任裁决**）。
+- `browser_certificates_write`：`import` / `remove`，确认串 `modify_certificates_once`，**用回读证明**——真机把一张一次性自签探针证书导进 `Disallowed`（`verified:true`，回读存在），再删掉（回读消失）。
+- 边界写进返回值：`scope` `CurrentUser` 是这个用户的 Chrome 用的，`LocalMachine` 是整机、通常要提权；把证书加进 `Root`/`TrustedPublisher` 时 **Windows 会弹自己的同意框**，那个框就是安全边界，不绕过——命中时返回 `waiting_for_user_auth`，意思是「请用户去点一下，然后用 `list` 复查」，**不是重试导入**。
+- **三个只有真机才暴露的 PowerShell 坑**（单测一个都抓不到，因为单测测的是参数拼装）：
+  1. `[StoreName]::$name` 这种「静态成员 + 变量名」**不是动态查表**，传给构造函数的是 null 枚举，每个存储都打不开。
+  2. `New-Object X509Store($name, $location)` 的位置参数形式把整串当字符串，`.Open()` 报「没有名为 Open 的方法」。
+  3. `$store` 与 `[string]$Store` 参数**大小写不敏感地同名**，于是每次赋值都被强制转回字符串——前两个修完之后，这个还让所有存储变成字符串。
+  这三条都是「工具诚实地报了错，错误信息指向了真原因」才被找到的。
+
+### 四、`chrome://` 内容对 UI Automation 是不可见的（实测，改变了上一版的假设）
+
+上一版把「驱动 `chrome://settings` 里的控件」列为待做，前提是 UIA 能看见那些控件。真机测完，前提是错的：
+
+- 把窗口切到 `chrome://extensions`（用这一版新加的 `select` 切的），再抓原生树：**88 个控件、`ControlType.Document` 0 个、带 `TogglePattern` 的 0 个**，全是浏览器自己的外壳（按钮 50、Pane 19、TabItem 11、ToolBar 3、Edit 1）。
+- 原因有两层：Chrome 只在无障碍引擎被启用时（屏幕阅读器接入 / `--force-renderer-accessibility`）才把页面内容暴露给 UIA；而 `native-ui-snapshot` 的遍历**本来就把 Document 子树整个跳过**，否则抓一次快照等于把整个网页走一遍。
+- ⇒ 「用人类工程师的 UIA 能力去操作 chrome:// 页面」这条路**对页面内容不成立**，只对浏览器外壳成立。所以证书走操作系统存储不是退而求其次，是唯一可达的路径；而 `chrome://password-manager` 之所以能读，是因为它走的是**地址栏输入 + 键盘**，不是 UIA 元素绑定。这一条已经写进 `docs/AGENT-HANDOFF-HUMAN-UI.md`。
+
+### 五、`browser_native_action` 补齐 Select / Toggle / Value
+
+上一版拒绝 Toggle 的理由是「翻转两次回到原点，不确定的结果没法重试」。这个理由只对**翻转**成立，对**请求一个状态**不成立——所以现在 `toggle` 必须带 `desiredState:"on"|"off"`，先读当前状态，已经在目标状态就 `alreadyInState:true` 且 `dispatched:false`，和 expand/collapse 一样幂等。`Indeterminate` 直接拒绝而不是猜：三态控件上 `Toggle()` 一次可能落到任何一边。
+
+- `select` 支持两种形态：控件本身就是条目（radio、tab），或者控件是容器（list box）。两种都用**回读选择集**来判定成功。容器形态的条目查找沿用同一个 walker、同样的预算，所以「快照能看见的条目，这里就能找到」。
+- `value` 用 `ValuePattern.SetValue` 然后回读。文本框能装一整份文档，所以回显的 before/after 截断到 200 字符；**判定用的是完整字符串**，由适配器算成 `valueMatches` 再返回——截断永远不能把不一致变成一致。
+- **真机验证**：
+  - `value` 打在地址栏上：`valueBefore` 是当前 URL、`valueAfter` 是探针串、`valueMatches:true`、`settleMs:139`；**第二次相同请求返回 `alreadyInState:true` / `dispatched:false`**——幂等性在真机上被证明，而不是被声称。之后把地址栏恢复成原 URL。
+  - `select` 打在标签项上：`selectionBefore:[]` → `selectionAfter:["Example Domain"]` → `verified:true`，并用 `browser_tabs` **独立确认那个窗口的活动标签真的变成了 `https://example.com/`**（UIA 的选择不是内部标记，是真的切了标签）。随后切回原标签。
+  - `toggle` 打在地址栏上（不支持 TogglePattern）：`not_dispatched` + `native_pattern_not_supported` + 真实 pattern 列表。
+- **真机暴露的一个 bug，单测结构上抓不到**：`toggle` 的拒绝分支没有回显 `desiredState`，校验器因此把它判成 `native_action_invalid_result`。单测自己构造结果对象，所以永远不会缺字段——**只有真的跑一次才会**。修法是给每个结果都补上「请求的回显」，并加了一条静态测试：那三个动作块里的**每一个** `Emit @{` 都必须带自己的请求字段。同时删掉两条「适配器在 spawn 之前就会拒绝」的死分支——一条拒绝如果不能回显请求，就没法被校验，留着只会生产无效结果。
+
+### 六、导航审计（`webNavigation` 只有事件，但事件本身就是能力）
+
+`browser_navigation` 回答的是「这个标签页刚才真正去了哪些 URL」，包括被 `beforeunload` 拦下、被 301 链重定向、被 SPA 用 history API 改掉的：
+
+- `action:"status"` 只读（不建会话、不挂横幅）；`action:"timeline"` 按时间序给出事件流；`action:"chain"` 给出一次导航的分组：`startUrl` / `finalUrl` / `hops` / `redirects` / `historyUpdates` / `completed` / `durationMs`。
+- 真机验证：`http://example.com/` 的 301 链被完整记下，`chain` 的 `finalUrl` 与 `hops` 正确。
+- 回复里明说：`finalUrl` 是**最后一个 commit 的文档**，不等于浏览器最后停在哪——SPA 可以在之后改写地址，`historyUpdates` 数的是这些改写。
+
+### 七、identity：能用和不能用的地方都说清楚
+
+- `action:"profile"` 返回登录这个 Chrome 配置文件的账号。**加上 `identity.email` 之前它返回空 email**（`getProfileUserInfo` 需要单独这个权限），加了之后真机返回真实邮箱与 id。空结果现在会被解释成「本版没申请这个权限」，而不是「你没登录」。
+- `action:"token"` 需要 manifest 里有 `oauth2` 段；没有时明确返回 `oauth2_not_configured` + `manifestField:"oauth2"`，而不是假装能用或超时。`action:"launch"` 交给调用方自带 `client_id` 与 `redirect_uri`，并且只接受 https（回环地址除外），超时上限有界。
+
+### 八、能力指引与缺口表
+
+- 新增 4 个意图：`clipboard`、`navigation-audit`、`native-messaging`、`certificates`。关键词收窄，`剪贴板`/`复制` 不会被 storage 抢走。
+- **从缺口表里删掉了一条**：「drive a chrome:// control that only exists as a Select, Toggle or Value pattern」。缺口条目比缺口活得更久，等于教调用方绕过一个他们其实已经有的能力——所以 `test/capability-guide.test.js` 现在断言它 `undefined`。
+- 保留的缺口都带实测依据：autofill 弹窗（浏览器进程画的，扩展看不见）、离线解密码（同一把 key 能解 cookie 12/12、解不开 177 条登录记录）、图像验证码、live 脚本编辑（V8 无条件空壳）、从捕获直接重放、IndexedDB 记录读取。
+
+- 测试：全量 **518 条全绿**（上一版 513）。新增 `test/clipboard.test.js`、`test/navigation-audit.test.js`、`test/native-messaging.test.js`、`test/identity.test.js`、`test/certificate-store.test.js`、`test/native-host.test.js`（真跑宿主进程），`test/native-ui-action.test.js` 从 10 条扩到 17 条。
+
 ## 0.23.0 — 2026-10-29（**对照开源实现补齐七块 DevTools 能力**：模拟、原生对话框、可访问性树、拖拽、打印 PDF、初始化脚本、请求拦截）
 
 这一轮不是凭感觉加功能，是拿两个成熟实现当尺子量出来的：`chrome-devtools-mcp`（57 个工具）与 `playwright-mcp`。把它们有而我们没有的能力逐条列出来，只剩七块——**设备/环境模拟、原生 JS 对话框、可访问性树快照、HTML5 拖拽、打印 PDF、页面初始化脚本、请求拦截与打桩**。这七块以前不是「没做」，是「根本做不到」：它们全在 CDP 里，而我们的 CDP 通道只走 attach-per-call 的一次性附件，任何 override 都会在调用返回时被撤销。

@@ -29,3 +29,28 @@ export const SITE_SETTINGS_WRITE_CONFIRMATION = 'modify_site_setting_once';
 export const PRIVACY_SETTING_WRITE_CONFIRMATION = 'modify_privacy_setting_once';
 export const WINDOW_CONTROL_CONFIRMATION = 'modify_window_once';
 export const PROXY_CONFIRMATION = 'modify_proxy_once';
+
+// The clipboard is the one place where "modify" means "destroy something the
+// user cannot see". Replacing what a person copied loses work that was never on
+// screen, so a write gets its own attestation. Reading is not gated: it changes
+// nothing, and the reply marks the payload as secret instead.
+export const CLIPBOARD_WRITE_CONFIRMATION = 'modify_clipboard_once';
+
+// The native host is the only channel that leaves the browser sandbox. Every
+// message on it is a program invocation, so the whole tool is gated rather than
+// trying to classify individual messages: a generic transport cannot tell a
+// harmless ping from a state-changing command, and pretending otherwise would
+// make the gate decorative.
+export const NATIVE_MESSAGING_CONFIRMATION = 'run_native_host_once';
+
+// Registering a host writes a registry key that Chrome reads at launch, so it is
+// a machine change rather than a browser change. It is separate from the send
+// gate above because registering a host and using one are different decisions:
+// a caller may be allowed to talk to a host an administrator installed without
+// being allowed to install one.
+export const NATIVE_HOST_CONFIRMATION = 'modify_native_host_once';
+
+// Certificates live in the operating system store, outside the browser, and a
+// root that gets added or removed changes what every application on the machine
+// trusts. Reads (stores, list, inspect) are not gated; the two writes are.
+export const CERTIFICATE_WRITE_CONFIRMATION = 'modify_certificates_once';

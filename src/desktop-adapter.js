@@ -225,12 +225,16 @@ export function createDesktopAdapter({
   }
   const implementedActions = available
     ? ['reload_extension', 'launch_chrome', 'observe_devtools', 'select_devtools_panel',
-      'expand_native_control', 'collapse_native_control']
+      'expand_native_control', 'collapse_native_control', 'invoke_native_control',
+      'toggle_native_control', 'select_native_item', 'set_native_value']
     : [];
   return { available, implementedActions, listChromeWindows, reloadExtension, launchChrome, devtools,
     nativeSnapshot: target => nativeUiSnapshot(target, { platform }),
     // The service passes one flat argument object, so the target fields and the
     // action fields arrive together; split them here rather than making every
     // caller reshape the same object.
-    nativeAction: args => nativeUiAction(args, { ref: args.ref, action: args.action, expect: args.expect, platform }) };
+    nativeAction: args => nativeUiAction(args, {
+      ref: args.ref, action: args.action, expect: args.expect,
+      desiredState: args.desiredState, itemName: args.itemName, text: args.text, platform
+    }) };
 }

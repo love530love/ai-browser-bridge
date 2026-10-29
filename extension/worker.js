@@ -7,6 +7,10 @@ import { readStorage, writeStorage } from './cdp-storage.js';
 import { replayRequest } from './cdp-replay.js';
 import { createSessionManager } from './cdp-session.js';
 import { createCdpAdvanced } from './cdp-advanced.js';
+import { createClipboard } from './clipboard.js';
+import { createNavigationAudit } from './navigation-audit.js';
+import { createNativeMessaging } from './native-messaging.js';
+import { createIdentity } from './identity.js';
 import { runAuthorityTool } from './browser-authority.js';
 import { reuseKey, samePage, visibleTab, isInternalPage, describeTab, createTabOwnership } from './tab-identity.js';
 let socket = null;
@@ -61,6 +65,23 @@ const debuggerSessions = createSessionManager({
   send: async (tabId, method, params = {}) => chrome.debugger.sendCommand({ tabId }, method, params)
 });
 const cdpAdvanced = createCdpAdvanced({ sessions: debuggerSessions });
+// These four are not page tools, so they answer before the tab gate and are not
+// blocked by a paused renderer. The navigation audit installs its listeners here,
+// at worker top level, because chrome.webNavigation only delivers events to
+// listeners that were registered while the worker was being evaluated: a
+// listener added later misses every navigation that happened in between.
+const clipboardTools = createClipboard({
+  sessions: debuggerSessions,
+  // The clipboard's native route reuses the native messaging transport for one
+  // fixed PowerShell command. It goes through invoke() rather than the generic
+  // send tool because the clipboard tools carry their own confirmation strings,
+  // and a generic gate cannot classify a message it does not understand.
+  native: (message, timeoutMs) => nativeMessagingTools.invoke('com.aibridge.host', message, timeoutMs)
+});
+const navigationAudit = createNavigationAudit();
+const navigationAuditInstall = navigationAudit.install();
+const nativeMessagingTools = createNativeMessaging();
+const identityTools = createIdentity({ manifest: chrome.runtime.getManifest() });
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (Number.isInteger(source?.tabId)) debuggerSessions.handleEvent(source.tabId, method, params);
 });
@@ -619,6 +640,15 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   // authority comes from the extension being connected, and every write among
   // them was already refused by the service unless the caller echoed the
   // confirmation string for that specific tool.
+  // Clipboard, navigation audit, native messaging and identity are not about one
+  // document either. They answer here, before the tab gate, so a tab that is
+  // mid-navigation or paused cannot make them unavailable. The write paths among
+  // them were already refused by the service unless the caller echoed the
+  // confirmation string for that specific tool.
+  for (const tools of [clipboardTools, navigationAudit, nativeMessagingTools, identityTools]) {
+    const result = await tools.run(name, args);
+    if (result !== null) return result;
+  }
   const authorityResult = await runAuthorityTool(name, args);
   if (authorityResult !== null) return authorityResult;
   if (!Number.isInteger(args.tabId) || args.tabId < 1) throw new Error('Invalid tabId');
@@ -1204,7 +1234,15 @@ async function connect({ automatic = false } = {}) {
     // Sent after hello so authentication is never delayed by a hint lookup: a
     // slow client-hints promise must not look like a wrong pairing key.
     browserIdentity()
-      .then(browser => { if (socket === ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'browser', browser })); })
+      .then(browser => {
+        if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;
+        // The extension id travels with the hint because nothing else can supply
+        // it: a native messaging host manifest has to list the exact
+        // chrome-extension://<id>/ origin that is allowed to launch it, and the
+        // service is the only side that can write that file. Without this the
+        // installer would have to guess the id from the profile on disk.
+        ws.send(JSON.stringify({ type: 'browser', browser, extensionId: chrome.runtime.id }));
+      })
       .catch(() => {});
   };
   ws.onmessage = async event => {

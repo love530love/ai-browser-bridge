@@ -2,11 +2,17 @@ param(
   [Parameter(Mandatory)][int]$ChromeProcessId,
   [Parameter(Mandatory)][long]$ChromeWindowHandle,
   [Parameter(Mandatory)][string]$Ref,
-  [Parameter(Mandatory)][ValidateSet('expand', 'collapse', 'invoke')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('expand', 'collapse', 'invoke', 'toggle', 'select', 'value')][string]$Action,
   [string]$ExpectName = '',
   [string]$ExpectRole = '',
   [string]$ExpectAutomationId = '',
-  [ValidateSet('', 'control_gone')][string]$ExpectAfterInvoke = ''
+  [ValidateSet('', 'control_gone')][string]$ExpectAfterInvoke = '',
+  # The requested state, not a command to flip something. This is what makes
+  # toggle retry-safe: asking for the state a control is already in dispatches
+  # nothing, exactly like expand and collapse.
+  [ValidateSet('', 'on', 'off')][string]$DesiredState = '',
+  [string]$ItemName = '',
+  [string]$ValueText = ''
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -24,6 +30,24 @@ function Emit($payload) {
   foreach ($key in $payload.Keys) { $row[$key] = $payload[$key] }
   $row | ConvertTo-Json -Depth 6 -Compress
   exit 0
+}
+# Evidence is bounded on purpose: a text field can hold a document, and the
+# reply travels over a socket that is read by a model. The caller compares the
+# clipped value against what it asked for, so the clip is reported, never
+# silently applied.
+function Clip([string]$text, [int]$limit = 200) {
+  if ($null -eq $text) { return '' }
+  if ($text.Length -le $limit) { return $text }
+  return $text.Substring(0, $limit)
+}
+function ClipNames($elements) {
+  $names = @()
+  foreach ($item in @($elements)) {
+    if ($null -eq $item) { continue }
+    $names += (Clip ([string]$item.Current.Name) 120)
+    if ($names.Count -ge 8) { break }
+  }
+  return $names
 }
 try {
   $handle = [intptr]$ChromeWindowHandle
@@ -160,6 +184,237 @@ try {
       controlGone = $false; postCondition = $ExpectAfterInvoke; settleMs = $settle.ElapsedMilliseconds
       observed = $observed; scanned = $lastScan.scanned
       message = 'The invoke call returned but the control is still in the tree, so the declared post-condition was not observed. Do not invoke again: running the same command twice is not recoverable by retrying. Inspect the window first.' }
+  }
+
+  # --- toggle: a requested state, never a flip -------------------------------
+  # TogglePattern was left out of the first version because a toggle dispatched
+  # twice returns the control to where it started, so an uncertain result could
+  # not be retried at all. That reasoning applies to a flip, not to a requested
+  # state: reading the current state first makes this as idempotent as expand.
+  # Indeterminate is refused rather than guessed, because one Toggle() from a
+  # tri-state control may legally land on either side.
+  if ($Action -eq 'toggle') {
+    # No empty-DesiredState guard here: the adapter refuses a toggle without a
+    # requested state before spawning anything, and a refusal that cannot echo
+    # the request could not be validated. The check lives where it can be tested.
+    $togglePatternId = [System.Windows.Automation.TogglePattern]::Pattern
+    if ($patterns -notcontains $togglePatternId.ProgrammaticName) {
+      Emit @{ status = 'not_dispatched'; reason = 'native_pattern_not_supported'; dispatched = $false; retryable = $false
+        patterns = $patterns; observed = $observed; desiredState = $DesiredState
+        message = 'This control does not support TogglePattern, so no toggle was attempted. Checkboxes and switches support it; menu items and links do not.' }
+    }
+    if (-not $found.Current.IsEnabled) {
+      Emit @{ status = 'not_dispatched'; reason = 'native_control_disabled'; dispatched = $false; retryable = $true
+        desiredState = $DesiredState; observed = $observed
+        message = 'The control is disabled, so toggling it would change nothing. Nothing was dispatched.' }
+    }
+    $want = if ($DesiredState -eq 'on') { 'On' } else { 'Off' }
+    try {
+      $togglePattern = $found.GetCurrentPattern($togglePatternId)
+      $toggleBefore = [string]$togglePattern.Current.ToggleState
+    } catch {
+      Emit @{ status = 'not_dispatched'; reason = 'native_state_unreadable_before'; dispatched = $false; retryable = $true
+        desiredState = $DesiredState; observed = $observed
+        message = 'The current toggle state could not be read, so nothing was dispatched. An action whose effect cannot be compared against a prior state is not verifiable.' }
+    }
+    if ($toggleBefore -eq 'Indeterminate') {
+      Emit @{ status = 'not_dispatched'; reason = 'native_toggle_indeterminate'; dispatched = $false; retryable = $false
+        desiredState = $DesiredState; toggleStateBefore = $toggleBefore; observed = $observed
+        message = 'The control reports Indeterminate. One Toggle() from a tri-state control may land on either side, so the result would not be predictable and cannot be retried safely. Set the underlying option through its own control instead.' }
+    }
+    if ($toggleBefore -eq $want) {
+      Emit @{ status = 'success'; dispatched = $false; verified = $true; alreadyInState = $true
+        desiredState = $DesiredState; toggleStateBefore = $toggleBefore; toggleStateAfter = $toggleBefore; observed = $observed
+        message = 'The control was already in the requested state, so nothing was dispatched.' }
+    }
+    try {
+      $togglePattern.Toggle()
+    } catch {
+      Emit @{ status = 'uncertain'; dispatched = $null; verified = $false; reason = 'native_action_dispatch_threw'
+        desiredState = $DesiredState; toggleStateBefore = $toggleBefore; observed = $observed
+        error = (Clip ([string]$_.Exception.Message) 200)
+        message = 'The toggle call raised. Read a new snapshot to see the real state before doing anything else; do not repeat blindly.' }
+    }
+    $toggleAfter = $null
+    $toggleSettle = [Diagnostics.Stopwatch]::StartNew()
+    while ($toggleSettle.ElapsedMilliseconds -lt 1500) {
+      Start-Sleep -Milliseconds 120
+      try { $toggleAfter = [string]$found.GetCurrentPattern($togglePatternId).Current.ToggleState } catch { $toggleAfter = $null }
+      if ($toggleAfter -eq $want) { break }
+    }
+    if ($null -eq $toggleAfter) {
+      Emit @{ status = 'uncertain'; dispatched = $true; verified = $false; reason = 'native_state_unreadable_after_dispatch'
+        desiredState = $DesiredState; toggleStateBefore = $toggleBefore; observed = $observed
+        message = 'The toggle was dispatched but the resulting state could not be read back. Take a new snapshot; do not repeat.' }
+    }
+    if ($toggleAfter -eq $want) {
+      Emit @{ status = 'success'; dispatched = $true; verified = $true; alreadyInState = $false
+        desiredState = $DesiredState; toggleStateBefore = $toggleBefore; toggleStateAfter = $toggleAfter
+        observed = $observed; settleMs = $toggleSettle.ElapsedMilliseconds
+        message = 'The toggle state changed to the requested value and was read back from the control itself.' }
+    }
+    Emit @{ status = 'failed'; dispatched = $true; verified = $false; reason = 'native_state_not_reached'
+      desiredState = $DesiredState; toggleStateBefore = $toggleBefore; toggleStateAfter = $toggleAfter
+      observed = $observed; settleMs = $toggleSettle.ElapsedMilliseconds
+      message = 'The toggle call returned without raising, but the state did not become the requested one. Read a new snapshot before doing anything else.' }
+  }
+
+  # --- value: set text, then read it back ------------------------------------
+  if ($Action -eq 'value') {
+    $valuePatternId = [System.Windows.Automation.ValuePattern]::Pattern
+    if ($patterns -notcontains $valuePatternId.ProgrammaticName) {
+      Emit @{ status = 'not_dispatched'; reason = 'native_pattern_not_supported'; dispatched = $false; retryable = $false
+        patterns = $patterns; observed = $observed; valueLength = $ValueText.Length
+        message = 'This control does not support ValuePattern, so no value was set. Text fields, combo boxes and spinners support it; plain labels do not.' }
+    }
+    try {
+      $valuePattern = $found.GetCurrentPattern($valuePatternId)
+      if ($valuePattern.Current.IsReadOnly) {
+        Emit @{ status = 'not_dispatched'; reason = 'native_control_read_only'; dispatched = $false; retryable = $false
+          observed = $observed; valueLength = $ValueText.Length
+          message = 'The control reports itself read-only, so setting a value would either be ignored or raise. Nothing was dispatched.' }
+      }
+      $valueBefore = [string]$valuePattern.Current.Value
+    } catch {
+      Emit @{ status = 'not_dispatched'; reason = 'native_state_unreadable_before'; dispatched = $false; retryable = $true
+        observed = $observed; valueLength = $ValueText.Length
+        message = 'The current value could not be read, so nothing was dispatched.' }
+    }
+    if ($valueBefore -ceq $ValueText) {
+      Emit @{ status = 'success'; dispatched = $false; verified = $true; alreadyInState = $true
+        valueBefore = (Clip $valueBefore); valueAfter = (Clip $valueBefore); valueLength = $ValueText.Length; valueMatches = $true; observed = $observed
+        message = 'The control already held exactly this text, so nothing was dispatched.' }
+    }
+    try {
+      $valuePattern.SetValue($ValueText)
+    } catch {
+      Emit @{ status = 'uncertain'; dispatched = $null; verified = $false; reason = 'native_action_dispatch_threw'
+        valueBefore = (Clip $valueBefore); valueLength = $ValueText.Length; observed = $observed
+        error = (Clip ([string]$_.Exception.Message) 200)
+        message = 'The SetValue call raised. Read a new snapshot to see the real content before doing anything else; do not repeat blindly.' }
+    }
+    $valueAfter = $null
+    $valueSettle = [Diagnostics.Stopwatch]::StartNew()
+    while ($valueSettle.ElapsedMilliseconds -lt 1500) {
+      Start-Sleep -Milliseconds 120
+      try { $valueAfter = [string]$found.GetCurrentPattern($valuePatternId).Current.Value } catch { $valueAfter = $null }
+      if ($valueAfter -ceq $ValueText) { break }
+    }
+    if ($null -eq $valueAfter) {
+      Emit @{ status = 'uncertain'; dispatched = $true; verified = $false; reason = 'native_state_unreadable_after_dispatch'
+        valueBefore = (Clip $valueBefore); valueLength = $ValueText.Length; observed = $observed
+        message = 'The value was set but could not be read back. Take a new snapshot; do not repeat.' }
+    }
+    if ($valueAfter -ceq $ValueText) {
+      Emit @{ status = 'success'; dispatched = $true; verified = $true; alreadyInState = $false
+        valueBefore = (Clip $valueBefore); valueAfter = (Clip $valueAfter); valueLength = $ValueText.Length; valueMatches = $true
+        observed = $observed; settleMs = $valueSettle.ElapsedMilliseconds
+        message = 'The control now holds exactly the requested text, read back from the control itself.' }
+    }
+    Emit @{ status = 'failed'; dispatched = $true; verified = $false; reason = 'native_value_not_reached'
+      valueBefore = (Clip $valueBefore); valueAfter = (Clip $valueAfter); valueLength = $ValueText.Length; valueMatches = $false
+      observed = $observed; settleMs = $valueSettle.ElapsedMilliseconds
+      message = 'The value was set without raising but reads back differently, so the control either normalised it or refused it. Read the returned valueAfter before deciding what to do; do not repeat the same call.' }
+  }
+
+  # --- select: choose one named item -----------------------------------------
+  # Two shapes exist and both are handled, because Chrome uses both: the control
+  # itself is the item (a radio button, a tab), or the control is a list that
+  # contains the item. Success always means the selection was read back and the
+  # requested name is in it.
+  if ($Action -eq 'select') {
+    # itemName is required by the adapter before spawn; see the note on toggle.
+    $siPatternId = [System.Windows.Automation.SelectionItemPattern]::Pattern
+    $selPatternId = [System.Windows.Automation.SelectionPattern]::Pattern
+    $isItem = $patterns -contains $siPatternId.ProgrammaticName
+    $isContainer = $patterns -contains $selPatternId.ProgrammaticName
+    if (-not $isItem -and -not $isContainer) {
+      Emit @{ status = 'not_dispatched'; reason = 'native_pattern_not_supported'; dispatched = $false; retryable = $false
+        patterns = $patterns; observed = $observed; itemName = (Clip $ItemName 120)
+        message = 'This control supports neither SelectionItemPattern nor SelectionPattern, so no selection was attempted. Radio buttons, tabs, list items and list boxes support one of them.' }
+    }
+    $target = $found
+    if (-not $isItem) {
+      # Bounded search inside the container. Same walker as everything else, so
+      # an item that the snapshot could see is an item this can find.
+      $queue = [Collections.Generic.Queue[object]]::new()
+      $queue.Enqueue(@{ element = $found; depth = 0 })
+      $visitTimer = [Diagnostics.Stopwatch]::StartNew()
+      $visited = 0
+      $target = $null
+      while ($queue.Count -gt 0 -and $visited -lt 300 -and $visitTimer.ElapsedMilliseconds -lt 1500) {
+        $entry = $queue.Dequeue()
+        $element = $entry.element
+        $visited++
+        if ([string]$element.Current.Name -eq $ItemName -and $element.GetSupportedPatterns().ProgrammaticName -contains $siPatternId.ProgrammaticName) { $target = $element; break }
+        if ($entry.depth -ge 16) { continue }
+        $child = $walker.GetFirstChild($element)
+        while ($child) {
+          $queue.Enqueue(@{ element = $child; depth = ($entry.depth + 1) })
+          $child = $walker.GetNextSibling($child)
+        }
+      }
+      if ($null -eq $target) {
+        Emit @{ status = 'not_dispatched'; reason = 'native_item_not_found'; dispatched = $false; retryable = $true
+          itemName = (Clip $ItemName 120); observed = $observed; scanned = $visited
+          message = 'No selectable child of this control currently carries that name. Take a new snapshot: the list may be collapsed, filtered or virtualised. Nothing was dispatched.' }
+      }
+    }
+    try {
+      $itemPattern = $target.GetCurrentPattern($siPatternId)
+      $wasSelected = $itemPattern.Current.IsSelected
+    } catch {
+      Emit @{ status = 'not_dispatched'; reason = 'native_state_unreadable_before'; dispatched = $false; retryable = $true
+        itemName = (Clip $ItemName 120); observed = $observed
+        message = 'The current selection state could not be read, so nothing was dispatched.' }
+    }
+    if ($wasSelected) {
+      # Selecting the item again is harmless for a single-select list, but
+      # reporting it as a dispatch would be a lie, and for a multi-select list it
+      # could toggle the item off. So: nothing is dispatched when it already holds.
+      $selectionNow = @()
+      if ($isContainer) {
+        try { $selectionNow = ClipNames ($found.GetCurrentPattern($selPatternId).Current.GetSelection()) } catch { $selectionNow = @() }
+      } else {
+        $selectionNow = @(Clip $ItemName 120)
+      }
+      Emit @{ status = 'success'; dispatched = $false; verified = $true; alreadyInState = $true
+        itemName = (Clip $ItemName 120); selectionBefore = $selectionNow; selectionAfter = $selectionNow; observed = $observed
+        message = 'The item was already selected, so nothing was dispatched.' }
+    }
+    $selectionBefore = @()
+    if ($isContainer) {
+      try { $selectionBefore = ClipNames ($found.GetCurrentPattern($selPatternId).Current.GetSelection()) } catch { $selectionBefore = @() }
+    }
+    try {
+      $itemPattern.Select()
+    } catch {
+      Emit @{ status = 'uncertain'; dispatched = $null; verified = $false; reason = 'native_action_dispatch_threw'
+        itemName = (Clip $ItemName 120); selectionBefore = $selectionBefore; observed = $observed
+        error = (Clip ([string]$_.Exception.Message) 200)
+        message = 'The Select call raised. Read a new snapshot to see the real selection before doing anything else; do not repeat blindly.' }
+    }
+    $selectionAfter = @()
+    $selectSettle = [Diagnostics.Stopwatch]::StartNew()
+    while ($selectSettle.ElapsedMilliseconds -lt 1500) {
+      Start-Sleep -Milliseconds 120
+      if ($isContainer) {
+        try { $selectionAfter = ClipNames ($found.GetCurrentPattern($selPatternId).Current.GetSelection()) } catch { $selectionAfter = @() }
+      } else {
+        try { if ($target.GetCurrentPattern($siPatternId).Current.IsSelected) { $selectionAfter = @(Clip $ItemName 120) } else { $selectionAfter = @() } } catch { $selectionAfter = @() }
+      }
+      if ($selectionAfter -contains (Clip $ItemName 120)) { break }
+    }
+    if ($selectionAfter -contains (Clip $ItemName 120)) {
+      Emit @{ status = 'success'; dispatched = $true; verified = $true; alreadyInState = $false
+        itemName = (Clip $ItemName 120); selectionBefore = $selectionBefore; selectionAfter = $selectionAfter
+        observed = $observed; settleMs = $selectSettle.ElapsedMilliseconds
+        message = 'The requested item is in the control read-back selection, so the selection took effect. This proves the item is selected, not that the page reacted to it.' }
+    }
+    Emit @{ status = 'failed'; dispatched = $true; verified = $false; reason = 'native_selection_not_reached'
+      itemName = (Clip $ItemName 120); selectionBefore = $selectionBefore; selectionAfter = $selectionAfter
+      observed = $observed; settleMs = $selectSettle.ElapsedMilliseconds
+      message = 'The Select call returned without raising but the read-back selection does not contain the requested item. Read selectionAfter before deciding what to do; do not repeat the same call.' }
   }
 
   # --- expand / collapse -----------------------------------------------------
