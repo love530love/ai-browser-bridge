@@ -12,7 +12,14 @@ param(
   # nothing, exactly like expand and collapse.
   [ValidateSet('', 'on', 'off')][string]$DesiredState = '',
   [string]$ItemName = '',
-  [string]$ValueText = ''
+  [string]$ValueText = '',
+  # Page documents are skipped by default, so a ref can only ever resolve to
+  # browser chrome. chrome:// pages are real UI though - their buttons live under
+  # a Document node - and refusing to walk there made every control on
+  # chrome://extensions unreachable while browser_native_snapshot could already
+  # see it. Opting in changes only where a ref may resolve; nothing about the
+  # page is returned unless the action itself reads it back.
+  [switch]$IncludeDocuments
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -81,9 +88,10 @@ try {
       $entry = $queue.Dequeue()
       $element = $entry.element
       $current = $element.Current
-      if ($current.ControlType -eq [System.Windows.Automation.ControlType]::Document) { continue }
+      $isDocument = $current.ControlType -eq [System.Windows.Automation.ControlType]::Document
+      if ($isDocument -and -not $IncludeDocuments) { continue }
       if ($current.IsOffscreen) { continue }
-      $visited++
+      if (-not $isDocument) { $visited++ }
       if ($TargetRef -ne '' -and ($element.GetRuntimeId() -join '.') -eq $TargetRef) { $byRef = $element; break }
       if ($IdentityName -ne '' -and [string]$current.Name -eq $IdentityName -and $current.ControlType.ProgrammaticName -eq $IdentityRole -and [string]$current.AutomationId -eq $IdentityAutomationId) { $identityMatches++ }
       if ($entry.depth -ge 32) { continue }

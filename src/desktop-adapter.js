@@ -229,12 +229,13 @@ export function createDesktopAdapter({
       'toggle_native_control', 'select_native_item', 'set_native_value']
     : [];
   return { available, implementedActions, listChromeWindows, reloadExtension, launchChrome, devtools,
-    nativeSnapshot: target => nativeUiSnapshot(target, { platform }),
+    nativeSnapshot: (target, options) => nativeUiSnapshot(target, { platform, includeDocuments: options?.includeDocuments === true }),
     // The service passes one flat argument object, so the target fields and the
     // action fields arrive together; split them here rather than making every
     // caller reshape the same object.
     nativeAction: args => nativeUiAction(args, {
       ref: args.ref, action: args.action, expect: args.expect,
-      desiredState: args.desiredState, itemName: args.itemName, text: args.text, platform
+      desiredState: args.desiredState, itemName: args.itemName, text: args.text,
+      includeDocuments: args.includeDocuments === true, platform
     }) };
 }

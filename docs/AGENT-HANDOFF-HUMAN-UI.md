@@ -24,6 +24,18 @@
 - 538/538 测试（新增 `test/extension-connection.test.js` 6 条静态断言）、`doctor` 12/12。
 - **排查顺序提醒（已写进 memory）**：扩展报 `ERR_CONNECTION_REFUSED` 先查端口监听，
   不要先怀疑配对密钥；`Errors` 面板里的历史条目需要手动 Clear all，连上后不会自动消失。
+- **更新扩展后自动清错误**（用户明确要求）：`chrome.runtime.reload()` **不清**错误列表；
+  `developerPrivate.deleteExtensionErrors` 只在 chrome://extensions 内可用；`chrome.debugger`
+  对 chrome:// 直接拒绝（`Cannot access a chrome:// URL`）。因此新增
+  `browser_extension_errors`（把 `?errors=<id>` 摆到前台并刷新）+ `scripts/clear-extension-errors.ps1`
+  （同一进程内遍历 → 点 `Clear all` → 复查），由 reload 成功后自动调用，结果在 `extensionErrors`。
+- **推翻旧结论：`chrome://` 页面内容对 UIA 是可见的。** 原结论错在两处自限——
+  `native-ui-snapshot.ps1` 跳过 Document 子树、`validateNativeSnapshot` 拒绝 Document 节点。
+  两者现在都有 opt-in 开关（`includeDocuments`）。
+- **Chrome 无障碍引擎按文档启用，且只在 UIA 客户端在线时保持。** 已加载页面永远只给
+  86 个控件、0 个 Document；刷新后 113～162 个。⇒ 刷新与读取必须**同一进程**，
+  分两次调用时第二次连接引擎已关闭。这是 `clear-extension-errors.ps1` 把整套动作写在一个
+  脚本里的唯一原因，不是偷懒。
 
 ## 2026-10-29 接手增量（0.25.0）：一闪而过和悬停才出现的 UI
 

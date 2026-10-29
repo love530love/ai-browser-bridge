@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][int]$ChromeProcessId, [Parameter(Mandatory)][long]$ChromeWindowHandle)
+param([Parameter(Mandatory)][int]$ChromeProcessId, [Parameter(Mandatory)][long]$ChromeWindowHandle, [switch]$IncludeDocuments)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
@@ -24,9 +24,11 @@ try {
   while($queue.Count -gt 0) {
     if($rows.Count -ge 400 -or $timer.ElapsedMilliseconds -ge 3000){$partial=$true;break}
     $entry=$queue.Dequeue();$element=$entry.element;$state=$element.Current
-    # Do not collect page text, form values, or DevTools output. Browser chrome
-    # and native menu controls are the scope of this particular snapshot.
-    if($state.ControlType -eq [System.Windows.Automation.ControlType]::Document){$omittedDocuments++;continue}
+    # Page text, form values and DevTools output are not collected by default:
+    # a native snapshot of browser chrome must not quietly become a read of
+    # whatever page happens to be in front. IncludeDocuments is opt-in and only
+    # for maintenance surfaces, where the question is whether a control exists.
+    if(-not $IncludeDocuments -and $state.ControlType -eq [System.Windows.Automation.ControlType]::Document){$omittedDocuments++;continue}
     if($state.IsOffscreen){continue}
     $id=($element.GetRuntimeId() -join '.')
     $patterns=@($element.GetSupportedPatterns() | ForEach-Object {$_.ProgrammaticName})
@@ -57,7 +59,7 @@ try {
       $child=$walker.GetNextSibling($child)
     }
   }
-  @{status='success';dispatched=$false;processId=$ChromeProcessId;windowHandle=$ChromeWindowHandle;observedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();scope='native Chrome controls only; document subtrees excluded; detached popup windows not included';partial=$partial;omittedDocuments=$omittedDocuments;controls=@($rows.ToArray())} | ConvertTo-Json -Depth 8 -Compress
+  @{status='success';dispatched=$false;processId=$ChromeProcessId;windowHandle=$ChromeWindowHandle;observedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();scope=($(if($IncludeDocuments){'native Chrome controls plus document subtrees; opt-in maintenance read'}else{'native Chrome controls only; document subtrees excluded; detached popup windows not included'}));partial=$partial;omittedDocuments=$omittedDocuments;controls=@($rows.ToArray())} | ConvertTo-Json -Depth 8 -Compress
 } catch {
   @{status='failed';reason='native_snapshot_unavailable';dispatched=$false;retryable=$true} | ConvertTo-Json -Compress
 }

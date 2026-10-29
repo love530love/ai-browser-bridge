@@ -196,7 +196,7 @@ export function validateNativeActionResult(value, target) {
 }
 
 export async function nativeUiAction(target, {
-  ref, action, expect = {}, desiredState, itemName, text, platform = process.platform, timeoutMs = 12000
+  ref, action, expect = {}, desiredState, itemName, text, includeDocuments = false, platform = process.platform, timeoutMs = 12000
 } = {}) {
   if (platform !== 'win32') return { status: 'unavailable', dispatched: false, reason: 'platform_unsupported' };
   if (![target.processId, target.windowHandle].every(n => Number.isSafeInteger(n) && n > 0)) throw new Error('Exact process and window required');
@@ -237,6 +237,10 @@ export async function nativeUiAction(target, {
   // Passed as one argv entry through spawn with no shell, so a value that looks
   // like a flag or contains quotes is data rather than syntax.
   if (action === 'value') args.push('-ValueText', text);
+  // Only widens where a ref may resolve. Without it a ref taken from a snapshot
+  // that included document subtrees can never be found, because the walker stops
+  // at the Document node - which is exactly what happened on chrome://extensions.
+  if (includeDocuments === true) args.push('-IncludeDocuments');
   return new Promise(resolve => {
     let output = '';
     let settled = false;

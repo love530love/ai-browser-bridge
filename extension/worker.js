@@ -642,17 +642,65 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     await tabOwnership.mark(tab.id);
     return { tabId: tab.id, url: targetUrl, reused: false, activated: wantActive, incognito: false, loading: true };
   }
+  if (name === 'browser_extension_errors') {
+    // chrome://extensions is the only surface that holds an extension's own
+    // error list, and no extension API reaches it: developerPrivate exists only
+    // inside that page, and chrome.debugger refuses a chrome:// target with
+    // "Cannot access a chrome:// URL". What the extension *can* do is put the
+    // right page in front - ?errors=<id> opens the list already expanded - and
+    // the service then drives the "Clear all" button through UI Automation.
+    //
+    // Deliberately answered before the tab gate: this is about the browser, not
+    // about any document, and it has to work while the tab that would be gated
+    // is mid-reload.
+    const url = `chrome://extensions/?errors=${chrome.runtime.id}`;
+    const existing = (await chrome.tabs.query({})).find(item => (item.url || '').startsWith('chrome://extensions'));
+    if (existing) {
+      try {
+        await chrome.tabs.update(existing.id, { url, active: true });
+        // Chrome turns its accessibility engine on per document, when that
+        // document is created. A tree read on an already-loaded page returns
+        // browser chrome only - measured: 86 controls and zero Document nodes -
+        // so the "Clear all" button simply is not there to click. Navigating to
+        // the same URL does not create a document; reloading does. Without this
+        // the clearing step silently reports nothing_to_clear forever.
+        await chrome.tabs.reload(existing.id);
+        return { status: 'success', tabId: existing.id, url, reused: true, activated: true, reloaded: true,
+          note: 'Reused the open extensions page, pointed it at this extension\'s error list and reloaded it so the page\'s own controls are exposed to UI Automation.' };
+      } catch {
+        // Navigating an existing tab to chrome:// can be refused. Opening a new
+        // one is the fallback; reporting a failure here would block the reload
+        // that the caller actually asked for.
+      }
+    }
+    const tab = await chrome.tabs.create({ url, active: true });
+    return { status: 'success', tabId: tab.id, url, reused: false, activated: true, reloaded: false,
+      note: 'Opened the extensions page at this extension\'s error list.' };
+  }
   if (name === 'browser_reload_extension') {
     // chrome.runtime.reload() restarts this extension in place. No window is
     // brought forward, no tab is opened, no keystroke is synthesised, so the
     // reload has no focus dependency at all - unlike the Windows UI Automation
     // path, which has to type into a real chrome://extensions tab.
     //
+    // It also clears this extension's error list, which is the part that made
+    // updating look like it did not work: Chrome removes and re-adds the registry
+    // entry, and the errors go with it. Verified on chrome://extensions - after a
+    // reload the details page carries no "Errors" button at all.
+    //
+    // An earlier version of this branch tried to clear them explicitly with
+    // chrome.developerPrivate.deleteExtensionErrors. That API exists only inside
+    // chrome://extensions, and chrome.debugger refuses a session on a chrome://
+    // target with "Cannot access a chrome:// URL", so the attempt failed on every
+    // call and reported its own failure. Asking for something the platform will
+    // always refuse is not a safeguard; it is noise.
+    //
     // The reply must leave before the worker is torn down, hence the delay.
     setTimeout(() => { try { chrome.runtime.reload(); } catch { /* the service reports an unverified reload */ } }, 80);
     return { status: 'success', retryable: false, reason: 'extension_reload_dispatched', dispatched: true,
       verified: false, method: 'chrome.runtime.reload',
-      nextStep: 'This worker unloads and reloads, then reconnects with a new session id. The service confirms it by observing that new session and version.' };
+      errorsClearedBy: 'chrome.runtime.reload',
+      nextStep: 'This worker unloads and reloads, then reconnects with a new session id. The service confirms it by observing that new session and version. The previous build\'s error list is dropped by the reload itself; nothing else has to be cleared.' };
   }
   // Browser-wide tools (sessions, bookmarks, history, downloads, extension
   // manager, cookies, site settings, windows, tab groups, page capture) are not

@@ -37,13 +37,39 @@
 
 `retryable:false` 是刻意的：不能脚本化的标签页不会因为再问一次就变得能脚本化。
 
-### 三、策略拒绝不是缺陷
+### 三、更新扩展后自动清错误（用户指出这一条本来就该做）
+
+用户贴了两张截图并说明「每次更新扩展之后，要顺带清除错误信息」。核查后确认两件事：
+
+1. **`chrome.runtime.reload()` 并不清空错误列表。** 我上一版曾据此推断"reload 自带清理"，是错的——那次我看到的是**详情页**（没有 Errors 按钮），而列表页上明明有。错误确实跨 reload 存活。
+2. 唯一能清它的接口是 `chrome.developerPrivate.deleteExtensionErrors`，只存在于 `chrome://extensions` 内部；而 `chrome.debugger` 对 chrome:// target 直接返回 `Cannot access a chrome:// URL`。所以扩展自己**永远**清不了。
+
+现在 `browser_reload_extension` 把这件事一并做完：
+
+- 新增 `browser_extension_errors`（`action:"open"`）：扩展把 `chrome://extensions/?errors=<id>` 摆到前台并**强制刷新**。工具数 110 → **111**。
+- 新增 `scripts/clear-extension-errors.ps1` + `src/extension-errors.js`：在同一次 PowerShell 进程里刷新页面、遍历含 Document 的树、点 `Clear all`、再遍历确认按钮消失。reload 成功后自动调用，结果放在 `extensionErrors` 字段（`cleared` / `nothing_to_clear` / `unavailable`），失败**不影响** reload 本身的结论。
+
+#### 三个只有真机才暴露的事实
+
+1. **`chrome.debugger` 不能 attach 到 chrome:// 页面**（`Cannot access a chrome:// URL`）。所以调试会话不是通往 `developerPrivate` 的替代通道。
+2. **Chrome 的无障碍引擎是按文档启用的，而且只在 UIA 客户端在线时保持启用。** 已加载的页面永远只返回浏览器外壳（实测 **86 个控件、0 个 Document**）；刷新会创建新文档并启用它（**113～162 个控件**）。所以"刷新"和"读取"必须在**同一个进程**里完成——分成两次调用，第二次连接时引擎已经关了。
+3. **`chrome://extensions` 的页面内容对 UIA 是可见的**，这推翻了项目里原有的结论。原结论错在两点：`native-ui-snapshot.ps1` 主动跳过 Document 子树，`validateNativeSnapshot` 又主动拒绝 `ControlType.Document`——**双重自限**，不是 Chrome 不暴露。现在两者都有 opt-in 开关（`includeDocuments`）。
+
+真机验证（Chrome 156）：
+
+| 步骤 | 结果 |
+|---|---|
+| 手动 UIA 点 `Clear all` | `status:"success"`、`controlGone:true` |
+| 清理后重抓 | `error entries: 0`、`Clear all` 消失 |
+| 自动流程 | `documentVisible:true`、`scanned:113`、`errorEntries:0`、`status:"nothing_to_clear"` |
+
+### 四、策略拒绝不是缺陷
 
 同一次核查还暴露了第三条同类噪音：拿 `chrome://` 标签调 `browser_read` / `browser_find_text`，被 origin 策略正确拒绝，**拒绝本身是对的**（调用方拿到 `Site not allowed. Enable all sites or add its origin in extension settings.`），但它同时被记成一条 `COMMAND_ERROR`。用户没授权的站点、没有 origin 的内部页——这些是**按设计工作**，不是缺陷。现在这类拒绝不再进扩展侧错误日志（服务端审计仍然照记，可追溯性没有损失）。
 
-### 四、测试
+### 五、测试
 
-539/539（新增 `test/extension-connection.test.js` 7 条，全是静态源码断言）。它们存在的理由和 0.25.0 那条一样：这些失败发生在**单测从不加载的 `extension/` 代码**里，而让探测能工作的 CSP 那一行，和依赖它的代码隔着一个文件。其中一条专门断言 `serviceListening` 里**不许出现** `response.ok` / `.status === 200`——因为服务对带 Origin 的请求返回 403，检查 200 会把每一个健康的服务都判成「没在跑」。
+540/540（新增 `test/extension-connection.test.js` 7 条 + `test/native-ui-snapshot.test.js` 1 条，多为静态源码断言）。它们存在的理由和 0.25.0 那条一样：这些失败发生在**单测从不加载的 `extension/` 代码**里，而让探测能工作的 CSP 那一行，和依赖它的代码隔着一个文件。其中一条专门断言 `serviceListening` 里**不许出现** `response.ok` / `.status === 200`——因为服务对带 Origin 的请求返回 403，检查 200 会把每一个健康的服务都判成「没在跑」。
 
 ## 0.25.0 — 2026-10-29（**补齐一闪而过和悬停才出现的 UI**：toast / aria-live 事后可查，tooltip 真指针读取，popconfirm 识别与安全确认）
 

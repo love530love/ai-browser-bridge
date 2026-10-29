@@ -16,6 +16,19 @@ test('native tree rejects page documents, duplicates, and unresolved parents', (
     assert.throws(() => validateNativeSnapshot(data, target));
   }
 });
+test('a document subtree is accepted only when the caller asked for it', () => {
+  const data = evidence();
+  data.controls[1].role = 'ControlType.Document';
+  data.controls[1].name = 'Extensions';
+  // Default stays closed: a browser-chrome snapshot must not silently become a
+  // read of whatever page is in front.
+  assert.throws(() => validateNativeSnapshot(data, target), /Invalid native control tree/);
+  assert.deepEqual(validateNativeSnapshot(data, target, { allowDocuments: true }), data);
+  // Opting in relaxes the document rule and nothing else.
+  const broken = evidence();
+  Object.assign(broken.controls[1], { role: 'ControlType.Document', parent: 'missing' });
+  assert.throws(() => validateNativeSnapshot(broken, target, { allowDocuments: true }), /Invalid native control tree/);
+});
 test('unsupported host does not claim native capability', async () => {
   assert.equal((await nativeUiSnapshot(target, { platform: 'linux' })).status, 'unavailable');
 });
