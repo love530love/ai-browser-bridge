@@ -32,7 +32,14 @@ export const WRITE_TOOLS = new Set([
   // A recipe run is a sequence of writes on one tab. Treating it as a read
   // because it is one call would let two agents replay into the same page at the
   // same time.
-  'browser_recipe_run'
+  'browser_recipe_run',
+  // browser_popup is governed as a whole even though probe and reveal are
+  // reads, because its open and choose actions click a trigger and then a
+  // button inside the bubble it opens. A popconfirm confirm is usually a
+  // delete: two agents choosing it at once delete twice, which is exactly the
+  // failure the tool exists to prevent. The cost of the coarse rule is that a
+  // leased tab also makes the read actions queue behind the lease holder.
+  'browser_popup'
   // Deliberately absent: browser_clipboard_write. The clipboard is one global,
   // not per-tab state, so a per-tab lease is the wrong instrument for it: two
   // agents writing it do not corrupt anything, the last writer simply wins, and

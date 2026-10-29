@@ -21,9 +21,20 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     for (const item of path) hiddenLayoutCache.set(item, false);
     return false;
   };
-  const visible = el => {
+  const visible = (el, fresh = false) => {
     const style = getComputedStyle(el);
-    return style.visibility !== 'hidden' && style.visibility !== 'collapse' && !hiddenByLayout(el) && el.getClientRects().length > 0;
+    if (style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    if (fresh) {
+      // The memo below is a per-call optimisation for "what is on screen now".
+      // Anything that waits for a change has to ask again without it: a popup
+      // that closes by toggling display:none stays in the DOM, so a cached
+      // "visible" would make every wait report still-present forever.
+      for (let current = el; current; current = current.parentElement) {
+        const own = getComputedStyle(current);
+        if (own.display === 'none' || own.contentVisibility === 'hidden' || Number(own.opacity) === 0 || !!current.hasAttribute?.('inert')) return false;
+      }
+    } else if (hiddenByLayout(el)) return false;
+    return el.getClientRects().length > 0;
   };
   const sensitive = el => el.matches('input[type=password],input[type=hidden]') || el.closest('[data-ai-private]');
   const fileInput = el => el instanceof HTMLInputElement && el.type === 'file';
@@ -191,6 +202,44 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { x, y, left: box.left, top: box.top, width: box.width, height: box.height, covered: !inViewport || box.width <= 0 || box.height <= 0 || !hit || (hit !== el && !el.contains(hit)), hitTag: hit?.tagName?.toLowerCase() || null };
   };
   const shortSelector = el => clean([el.tagName?.toLowerCase(), el.id ? `#${el.id}` : '', el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 3).join('.') : ''].join(''));
+  const elementSummary = (el, extra = {}) => ({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: clean(label(el) || el.textContent), selector: shortSelector(el), ...elementBox(el), ...extra });
+  // Handing out refs is the same three lines in every scan, and getting the
+  // snapshot bookkeeping subtly different between two of them is exactly how a
+  // ref stops resolving. One factory instead.
+  const newRefState = () => {
+    const snapshot = crypto.randomUUID();
+    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
+    const makeRef = el => {
+      for (const [existingRef, entry] of state.refs) if (entry.el === el) return existingRef;
+      const ref = `${snapshot}:${state.refs.size + 1}`;
+      state.refs.set(ref, { el, fingerprint: fingerprint(el) });
+      return ref;
+    };
+    return { snapshot, state, makeRef };
+  };
+  const refElement = ref => {
+    const state = stateForRef(ref);
+    const entry = state?.refs.get(ref);
+    if (!entry || state.url !== location.href || !entry.el.isConnected) return null;
+    return entry.el;
+  };
+  // Declared up here rather than next to its only other caller because
+  // browser_popup needs it and that branch runs before the later definitions
+  // are initialised. A `const` arrow function is in the temporal dead zone
+  // until its own line executes, so moving the caller was not an option.
+  const waitGone = async (ref, timeoutMs = 3000) => {
+    if (!ref) return null;
+    const target = refElement(ref);
+    if (!target) return { status: 'gone' };
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      // fresh: a popup closes by toggling display, so a memoised answer would
+      // make every wait report still-present forever.
+      if (!target.isConnected || !visible(target, true)) return { status: 'gone', elapsedMs: Date.now() - started };
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return { status: (!target.isConnected || !visible(target, true)) ? 'gone' : 'still-present', elapsedMs: Date.now() - started };
+  };
   const overlayHint = el => {
     const s = `${el.id || ''} ${el.className || ''} ${el.getAttribute('role') || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
     if (el.matches('dialog,[role=dialog],[aria-modal=true]')) return 'dialog';
@@ -201,6 +250,500 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   };
   const closeHint = el => /^(×|x)$/i.test(clean(el.textContent)) || /(close|dismiss|skip|got it|later|no thanks|not now|accept|agree|关闭|取消|跳过|我知道|知道了|稍后|不再|同意|接受)/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.textContent || ''}`);
   const actionSelector = 'a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[role=combobox],[contenteditable=true]';
+
+  // --- transient notice capture -------------------------------------------
+  // A toast lives for two or three seconds. An agent that only samples the DOM
+  // when it is asked a question misses it every single time, so "scan again"
+  // can never be the answer: the notice has to be recorded while it is on
+  // screen and read afterwards. One MutationObserver per document is installed
+  // in the extension's isolated world by the first bridge call that touches the
+  // page, and it survives later calls because that world keeps its globals
+  // between chrome.scripting.executeScript injections. It does not survive a
+  // navigation, which is why every record carries the document URL and the
+  // installation time - a caller has to be able to see how far back the record
+  // actually reaches.
+  const TRANSIENT_SELECTOR = '[role=alert],[role=status],[aria-live],[aria-atomic],[class*=toast i],[class*=snackbar i],[class*=notification i],[class*=notify i],[class*=alert i],[class*=notice i],[class*=banner i],[class*=message i]';
+  const TRANSIENT_QUICK = /toast|snackbar|notif|alert|notice|message|banner/i;
+  const transientClass = el => `${el.className && typeof el.className === 'string' ? el.className : ''} ${el.id || ''}`;
+  // A class name alone is not evidence: chat panes are full of "message" and
+  // half the components on a dashboard are called "alert". What makes a notice
+  // transient is that it is taken out of flow, so a bare class only counts when
+  // the node is positioned - otherwise every chat bubble would be recorded.
+  const transientKind = el => {
+    const role = String(el.getAttribute('role') || '').toLowerCase();
+    const live = String(el.getAttribute('aria-live') || '').toLowerCase();
+    if (role === 'alert') return 'alert';
+    if (role === 'status') return 'status';
+    if (live === 'assertive') return 'live-assertive';
+    if (live === 'polite') return 'live-polite';
+    if (!TRANSIENT_QUICK.test(transientClass(el))) return '';
+    const style = getComputedStyle(el);
+    if (style.position === 'fixed' || style.position === 'absolute') return 'notice';
+    return '';
+  };
+  const transientComponent = el => {
+    const cls = transientClass(el);
+    if (/ant-message|ant-notification/.test(cls)) return 'antd';
+    if (/el-message|el-notification/.test(cls)) return 'element-plus';
+    if (/MuiSnackbar|MuiAlert/.test(cls)) return 'mui';
+    if (/Toastify/.test(cls)) return 'react-toastify';
+    if (/go\d{6,}/.test(cls)) return 'react-hot-toast';
+    if (/toast-container|ToastContainer/.test(cls)) return 'generic-toast-container';
+    if (/snackbar/i.test(cls)) return 'snackbar';
+    return null;
+  };
+  const ensureTransientCapture = () => {
+    // Every page tool runs through here, so this must never be the reason a
+    // click fails. A document without documentElement, or a harness that does
+    // not provide MutationObserver, simply gets no capture; the tool that reads
+    // the timeline then says so instead of returning an empty list.
+    try {
+      const previous = globalThis.__aibTransient;
+      if (previous && previous.url === location.href && previous.observer) return previous;
+      try { previous?.observer?.disconnect(); } catch { /* a dead world's observer cannot be disconnected twice */ }
+      if (typeof MutationObserver !== 'function' || !document.documentElement) return null;
+      const store = {
+        url: location.href, installedAt: Date.now(), seq: 0, cap: 300, trackedCap: 120,
+        dropped: 0, truncated: false, tracked: new Map(), log: [], observer: null,
+        mutations: 0, quickSkipped: 0, selectorScans: 0, lastActivityAt: Date.now()
+      };
+      const capture = (node, how) => {
+        const kind = transientKind(node);
+        if (!kind) return null;
+        const before = store.tracked.get(node);
+        const entry = {
+          id: ++store.seq, kind, how,
+          text: clean(node.textContent || '').slice(0, 600),
+          role: node.getAttribute('role') || null,
+          ariaLive: node.getAttribute('aria-live') || null,
+          component: transientComponent(node),
+          selector: shortSelector(node),
+          firstSeenAt: Date.now(), lastSeenAt: Date.now(), goneAt: null,
+          visibleWhenCaptured: visible(node),
+          // A notice already on screen when the observer started is not the
+          // result of anything the caller just did, and must not be read as one.
+          preExisting: how === 'initial-scan'
+        };
+        // The same node can change text ("submitting" -> "submitted"). Recording
+        // a second entry instead of overwriting the first keeps the timeline
+        // readable: the caller can see that a notice was replaced, not that it
+        // always said the last thing.
+        if (before && !before.goneAt) { before.goneAt = entry.firstSeenAt; before.supersededBy = entry.id; }
+        store.tracked.set(node, entry);
+        while (store.tracked.size > store.trackedCap) store.tracked.delete(store.tracked.keys().next().value);
+        store.log.push(entry);
+        while (store.log.length > store.cap) { store.log.shift(); store.dropped++; }
+        return entry;
+      };
+      const nearestTracked = node => {
+        for (const [tracked, entry] of store.tracked) if (tracked === node || tracked.contains(node)) return { node: tracked, entry };
+        return null;
+      };
+      const scanSubtree = (root, how, cap = Infinity) => {
+        store.selectorScans++;
+        let count = 0;
+        const take = el => {
+          if (count >= cap) return false;
+          count++;
+          capture(el, how);
+          return true;
+        };
+        if (root.matches?.(TRANSIENT_SELECTOR)) take(root);
+        for (const el of root.querySelectorAll(TRANSIENT_SELECTOR)) {
+          if (!take(el)) { store.truncated = true; break; }
+        }
+      };
+      // The cost is paid per mutation batch, so a cheap string test runs first.
+      // When it misses, one narrow ARIA query still catches a component library
+      // that hashed its class names away - that query is the only reliable
+      // signal and it is far cheaper than a full subtree scan.
+      const observeNode = (node, how) => {
+        if (node.nodeType !== 1) return;
+        const quick = node.hasAttribute('aria-live') || node.hasAttribute('aria-atomic')
+          || /^(alert|status)$/i.test(String(node.getAttribute('role') || ''))
+          || TRANSIENT_QUICK.test(transientClass(node));
+        if (quick) { scanSubtree(node, how); return; }
+        if (!node.querySelector?.('[role=alert],[role=status],[aria-live]')) { store.quickSkipped++; return; }
+        scanSubtree(node, how);
+      };
+      const observer = new MutationObserver(records => {
+        store.mutations += records.length;
+        store.lastActivityAt = Date.now();
+        for (const record of records) {
+          if (record.type === 'characterData') {
+            const host = record.target.parentElement;
+            const hit = host ? nearestTracked(host) : null;
+            if (hit) capture(hit.node, 'updated');
+            continue;
+          }
+          for (const node of record.addedNodes) {
+            // Assigning textContent replaces the text node instead of editing
+            // it, so a live region that is written that way arrives here as a
+            // brand-new text node and never as a characterData mutation. The
+            // first version only looked at elements and missed exactly that
+            // case on the probe page.
+            if (node.nodeType === 3) {
+              const host = node.parentElement;
+              const hit = host ? nearestTracked(host) : null;
+              if (hit) capture(hit.node, 'updated');
+              continue;
+            }
+            observeNode(node, 'added');
+          }
+          for (const node of record.removedNodes) {
+            if (node.nodeType !== 1) continue;
+            // Removal is the only trustworthy "it disappeared" evidence. A node
+            // hidden by CSS leaves no mutation at all, so goneAt stays null and
+            // the caller can see the difference.
+            for (const [tracked, entry] of [...store.tracked]) {
+              if (node === tracked || node.contains(tracked)) { entry.goneAt ??= Date.now(); store.tracked.delete(tracked); }
+            }
+          }
+        }
+      });
+      observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
+      store.observer = observer;
+      globalThis.__aibTransient = store;
+      scanSubtree(document.documentElement, 'initial-scan', 400);
+      return store;
+    } catch {
+      return null;
+    }
+  };
+  const transientStore = ensureTransientCapture();
+  if (name === 'browser_transient') {
+    const action = args.action || 'read';
+    const store = transientStore || ensureTransientCapture();
+    if (!store) {
+      return {
+        action, url: location.href, status: 'unavailable', retryable: false,
+        reason: 'transient_capture_unavailable', dispatched: false,
+        message: 'This document does not expose what the capture needs (MutationObserver or a documentElement), so no notice timeline exists here. That is a statement about the instrument, not about the page: use browser_read to look for inline outcome text instead, and do not retry this call.',
+        contentTrust: 'local capability statement'
+      };
+    }
+    const limit = Math.max(1, Math.min(200, args.limit ?? 50));
+    const counts = () => ({
+      recorded: store.log.length, live: [...store.tracked.values()].filter(entry => !entry.goneAt).length,
+      dropped: store.dropped, mutations: store.mutations, selectorScans: store.selectorScans,
+      quickSkipped: store.quickSkipped, truncated: !!store.truncated
+    });
+    const matches = entry => {
+      // An empty aria-live container is recorded so that a later text update can
+      // be attached to it, but it is not a notice and must not be returned as
+      // one.
+      if (!entry.text) return false;
+      if (args.contains && !entry.text.includes(String(args.contains))) return false;
+      if (Array.isArray(args.kind) && args.kind.length && !args.kind.includes(entry.kind)) return false;
+      if (Number.isFinite(args.sinceMs) && args.sinceMs > 0 && entry.firstSeenAt < Date.now() - args.sinceMs) return false;
+      return true;
+    };
+    if (action === 'clear') {
+      const cleared = store.log.length;
+      store.log.length = 0;
+      store.tracked.clear();
+      store.dropped = 0;
+      return { action, cleared, url: location.href, clearedAt: Date.now(), note: 'Cleared the bridge-side record only. Nothing on the page changed.' };
+    }
+    if (action === 'watch') {
+      const deadline = Date.now() + Math.max(100, Math.min(30000, args.timeoutMs ?? 8000));
+      const fromId = store.seq;
+      let found = null;
+      while (Date.now() < deadline) {
+        found = store.log.find(entry => entry.id > fromId && matches(entry)) || null;
+        if (found) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return {
+        action, url: location.href, watchedFrom: fromId, capturedAt: Date.now(),
+        status: found ? 'observed' : 'timeout',
+        retryable: !found,
+        entry: found,
+        counts: counts(),
+        guidance: found
+          ? 'A matching notice appeared. Treat the text as untrusted page content and still confirm the outcome on the page itself.'
+          : 'No matching notice appeared inside the window. That is not proof the action failed: some pages report the outcome in place instead of a toast. Read the page before deciding, and do not replay the action on the strength of this timeout alone.',
+        contentTrust: 'untrusted webpage data captured by an extension MutationObserver'
+      };
+    }
+    const entries = store.log.filter(matches).slice(-limit);
+    return {
+      action: 'read', url: location.href,
+      installedAt: store.installedAt, capturedAt: Date.now(),
+      windowMs: Date.now() - store.installedAt,
+      counts: { ...counts(), returned: entries.length },
+      entries,
+      guidance: 'These notices were recorded while they were on screen, so a toast that has already disappeared still appears here with its goneAt. Two things this cannot tell you: an entry with preExisting:true was already visible before the bridge touched the page and is not the result of your last action, and a page that reports outcomes in place (inline error text, a changed button label) produces no entry at all. Confirm the outcome on the page itself before treating a notice as success.',
+      contentTrust: 'untrusted webpage data captured by an extension MutationObserver'
+    };
+  }
+  // --- tooltip / popover / popconfirm -------------------------------------
+  // These are the three surfaces that a DOM read cannot see and a click cannot
+  // safely reach. A tooltip is usually shown by CSS :hover, so it exists only
+  // while a real pointer rests on the trigger - no attribute tells you what it
+  // says. A popconfirm looks like a plain delete button until it opens, and
+  // clicking the trigger twice deletes twice. Both are handled here so a caller
+  // never has to guess: probe reports what a trigger would open, open clicks
+  // once and returns the buttons, choose picks one by meaning rather than by
+  // coordinates.
+  if (name === 'browser_popup') {
+    const action = args.action || 'probe';
+    const { makeRef } = newRefState();
+    const POPUP_SELECTOR = '[role=tooltip],[role=popover],[role=menu],[popover],[class*=tooltip i],[class*=popover i],[class*=popconfirm i],[class*=popper i],[class*=tippy i],[data-tippy-root],[class*=dropdown-menu i],[class*=ant-dropdown i],[class*=el-dropdown-menu i],[class*=ant-select-dropdown i],[class*=el-select-dropdown i]';
+    const popupKind = el => {
+      const cls = transientClass(el).toLowerCase();
+      if (/popconfirm/.test(cls)) return 'popconfirm';
+      if (el.matches('[role=tooltip]') || /tooltip|tippy/.test(cls)) return 'tooltip';
+      if (el.matches('[role=menu]') || /dropdown-menu|ant-dropdown|el-dropdown-menu|select-dropdown/.test(cls)) return 'menu';
+      if (el.matches('[role=popover]') || /popover|popper/.test(cls)) return 'popover';
+      if (el.matches('[role=dialog]')) return 'dialog';
+      return 'popup';
+    };
+    const popupButtons = el => [...el.querySelectorAll('button,a[href],[role=button],input[type=button],input[type=submit],[class*=btn i]')]
+      .filter(node => visible(node) && !sensitive(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true')
+      .slice(0, 12)
+      .map(node => {
+        const text = clean(label(node));
+        return {
+          ref: makeRef(node), text, tag: node.tagName.toLowerCase(),
+          // This is a word match on the label, not a claim about the effect:
+          // the button colour that would carry the real signal is not text.
+          looksDestructive: /delete|remove|destroy|discard|reset|清空|删除|移除|销毁|重置/i.test(text)
+        };
+      });
+    const describePopup = el => {
+      const box = el.getBoundingClientRect();
+      return {
+        ref: makeRef(el), kind: popupKind(el), text: clean(el.textContent).slice(0, 400),
+        selector: shortSelector(el), area: Math.round(box.width * box.height),
+        position: getComputedStyle(el).position, buttons: popupButtons(el)
+      };
+    };
+    const openPopups = () => {
+      const found = [];
+      for (const el of document.querySelectorAll(POPUP_SELECTOR)) {
+        if (found.length >= 20) break;
+        if (!visible(el) || sensitive(el)) continue;
+        const box = el.getBoundingClientRect();
+        if (box.width < 8 || box.height < 8) continue;
+        // A closed tooltip is normally left in the DOM with display:none, and
+        // `visible` already drops those. What survives is on screen now.
+        found.push(describePopup(el));
+      }
+      found.sort((a, b) => a.area - b.area);
+      return found;
+    };
+    const tooltipSources = el => {
+      const sources = [];
+      const title = el.getAttribute('title');
+      if (title) sources.push({ source: 'title', text: clean(title) });
+      for (const attr of ['data-tooltip', 'data-title', 'data-original-title', 'data-bs-original-title', 'data-tip', 'data-content']) {
+        const value = el.getAttribute(attr);
+        if (value) sources.push({ source: attr, text: clean(value) });
+      }
+      for (const attr of ['aria-describedby', 'aria-labelledby']) {
+        for (const id of String(el.getAttribute(attr) || '').split(/\s+/).filter(Boolean)) {
+          const target = el.ownerDocument.getElementById(id);
+          if (!target) continue;
+          sources.push({ source: `${attr}#${id}`, text: clean(target.textContent).slice(0, 400), visibleNow: visible(target) });
+        }
+      }
+      return sources;
+    };
+    const triggerHints = el => {
+      const hints = [];
+      for (const attr of ['aria-haspopup', 'popovertarget', 'data-toggle', 'data-bs-toggle', 'aria-expanded', 'aria-describedby', 'aria-controls']) {
+        if (el.hasAttribute(attr)) hints.push(`${attr}=${el.getAttribute(attr) || 'true'}`);
+      }
+      const cls = transientClass(el).toLowerCase();
+      if (/popconfirm|tooltip|popover|dropdown|trigger/.test(cls)) hints.push('class-suggests-popup-trigger');
+      return hints;
+    };
+    const noTarget = message => ({ status: 'not_found', retryable: false, dispatched: false, reason: 'popup_target_not_found', message });
+    // A tooltip is usually hung on a <span> or an <svg>, not on a button, so
+    // browser_find_element never hands out a ref for it. Resolving a selector
+    // here is what makes those reachable at all.
+    const resolveTarget = () => {
+      if (args.ref) {
+        const element = refElement(args.ref);
+        if (!element) throw new Error('Stale element reference. Read page again.');
+        return { element, how: 'ref' };
+      }
+      if (args.selector) {
+        let candidates;
+        try { candidates = [...document.querySelectorAll(args.selector)]; }
+        catch { throw new Error(`Invalid selector: ${args.selector}`); }
+        const element = candidates.find(node => visible(node) && !sensitive(node)) || null;
+        if (!element) return { element: null, how: 'selector', matched: candidates.length };
+        return { element, how: 'selector', matched: candidates.length };
+      }
+      return { element: null, how: null };
+    };
+    const DECLARED_TOOLTIP = '[title],[data-tooltip],[data-title],[data-original-title],[data-bs-original-title],[data-tip],[aria-describedby]';
+    const tooltipCandidates = () => {
+      const found = [];
+      for (const el of document.querySelectorAll(DECLARED_TOOLTIP)) {
+        if (found.length >= 20) break;
+        if (!visible(el) || sensitive(el)) continue;
+        const sources = tooltipSources(el);
+        if (!sources.length) continue;
+        found.push({ ref: makeRef(el), ...elementSummary(el), tooltipSources: sources });
+      }
+      return found;
+    };
+    if (action === 'probe' || action === 'reveal') {
+      // `reveal` is coordinated in the service worker, which hovers with a real
+      // CDP pointer and then calls this action again as a probe. Reaching this
+      // branch with action:"reveal" means the call was routed straight to the
+      // page, so it answers as a probe and says so instead of pretending a
+      // hover happened.
+      const resolved = resolveTarget();
+      const target = resolved.element ? {
+        ref: args.ref || null,
+        resolvedBy: resolved.how,
+        ...(resolved.how === 'selector' ? { selectorMatches: resolved.matched } : {}),
+        ...elementSummary(resolved.element),
+        tooltipSources: tooltipSources(resolved.element),
+        triggerHints: triggerHints(resolved.element),
+        hasNativeTitle: resolved.element.hasAttribute('title')
+      } : null;
+      return {
+        action, url: location.href,
+        hovered: false,
+        target,
+        targetMissing: !target && resolved.how ? resolved.how : undefined,
+        openPopups: openPopups(),
+        // Only the page-wide answer lists candidates: asking about one element
+        // should not turn into a scan of everything that has a title.
+        tooltipCandidates: target ? undefined : tooltipCandidates(),
+        note: action === 'reveal' ? 'This answer came from the page, so no pointer was moved: openPopups lists what was already open. Use browser_popup through the service worker for a real hover.' : undefined,
+        guidance: 'tooltipSources is what the DOM already declares - it is readable without hovering and it is often empty for CSS-only tooltips. openPopups is what is on screen right now. If a trigger declares nothing and nothing is open, the only way to learn what it says is action:"reveal", which moves a real pointer. Pass ref, or selector when the trigger is a span or an icon that browser_find_element cannot reach.',
+        contentTrust: 'untrusted webpage data plus extension geometry'
+      };
+    }
+    if (action === 'open') {
+      const resolved = resolveTarget();
+      const trigger = resolved.element;
+      if (!trigger) return noTarget('No element matched the ref or selector. Nothing was clicked.');
+      if (sensitive(trigger) || trigger.disabled || trigger.getAttribute('aria-disabled') === 'true' || !visible(trigger)) throw new Error('Element unavailable or protected');
+      // The only unambiguous "my popup is already open" signal is the ARIA one:
+      // aria-expanded=true, or aria-controls pointing at something visible. A
+      // geometry guess was tried first and was wrong on the probe page - a
+      // tooltip left open by a hover sat close enough to the delete button to be
+      // mistaken for its bubble. Popups without ARIA state are handled below by
+      // reporting what the click actually changed.
+      const controlledId = trigger.getAttribute('aria-controls');
+      const controlled = controlledId ? document.getElementById(controlledId) : null;
+      if (trigger.getAttribute('aria-expanded') === 'true' && controlled && visible(controlled, true)) {
+        return {
+          action, url: location.href, dispatched: false, retryable: false,
+          status: 'already_open', reason: 'popup_already_open',
+          openPopups: [describePopup(controlled)],
+          guidance: 'The trigger reports aria-expanded="true" and the element it controls is visible, so nothing was clicked. Choose a button with action:"choose", or close it first if that is not the popup you expected.',
+          contentTrust: 'untrusted webpage data plus extension geometry'
+        };
+      }
+      // Only what was visible counts as "already open": a popconfirm is in the
+      // DOM from the start and merely toggles display, so a node-set comparison
+      // would treat the popup that just opened as one that was always there.
+      // The fresh flag keeps this probe out of the visibility memo, which is
+      // what made the first version answer not_opened from a cached "hidden".
+      const visiblePopups = () => [...document.querySelectorAll(POPUP_SELECTOR)].filter(node => visible(node, true));
+      const before = new Set(visiblePopups());
+      const box = trigger.getBoundingClientRect();
+      const x = Math.min(Math.max(box.left + box.width / 2, 0), innerWidth - 1);
+      const y = Math.min(Math.max(box.top + box.height / 2, 0), innerHeight - 1);
+      const hit = deepHit(x, y);
+      if (!hit || (hit !== trigger && !trigger.contains(hit))) throw new Error('Element is covered. Read page again.');
+      trigger.click();
+      const deadline = Date.now() + Math.max(200, Math.min(10000, args.timeoutMs ?? 3000));
+      let opened = [];
+      while (Date.now() < deadline) {
+        opened = visiblePopups().filter(node => !before.has(node));
+        if (opened.length) break;
+        await new Promise(resolve => setTimeout(resolve, 80));
+      }
+      const after = visiblePopups();
+      const popups = opened.slice(0, 10).map(describePopup);
+      // Three outcomes, reported as facts rather than as a guess about which
+      // popup belongs to which trigger: something new appeared, something that
+      // was open is now gone (the click toggled it shut), or nothing changed.
+      const closedSome = after.length < before.size;
+      const status = popups.length ? 'opened' : closedSome ? 'closed_by_click' : 'unchanged';
+      return {
+        action, url: location.href,
+        dispatched: true,
+        status,
+        // The click already happened. A retry would click the trigger a second
+        // time, which on a delete button is the exact mistake this tool exists
+        // to prevent.
+        retryable: false,
+        clicked: { ref: makeRef(trigger), resolvedBy: resolved.how, ...elementSummary(trigger) },
+        openPopups: popups,
+        guidance: popups.length
+          ? 'The popup is open. Pick a button with action:"choose" - pass choice:"confirm" or "cancel", or an exact text - rather than clicking a coordinate.'
+          : status === 'closed_by_click'
+            ? 'A popup that was open before this click is gone now, which means the trigger toggled it shut. Read the page before acting: the popup you wanted may have been open already and is now closed.'
+            : 'Nothing visible changed. The click was still dispatched, so read the page before doing anything else: the trigger may have acted directly, the popup may be rendered outside this frame, or it was already open and this click did nothing.',
+        contentTrust: 'untrusted webpage data plus extension geometry'
+      };
+    }
+    if (action === 'choose') {
+      const CONFIRM = /^(确定|确认|是|好的|提交|保存|删除|移除|继续|ok|okay|yes|confirm|submit|save|delete|remove|continue)$/i;
+      const CANCEL = /^(取消|否|关闭|算了|返回|cancel|no|close|dismiss|back)$/i;
+      const popupElement = args.popupRef ? refElement(args.popupRef) : null;
+      // Without an explicit popupRef, scope the search to the one popup that is
+      // open. Falling back to the whole document would let a page-level "确定"
+      // win over the button inside the bubble, which is the wrong click on a
+      // delete confirmation.
+      const openOnes = popupElement ? [] : [...document.querySelectorAll(POPUP_SELECTOR)].filter(node => visible(node, true));
+      const scope = popupElement || (openOnes.length === 1 ? openOnes[0] : document);
+      const scopeSelector = popupElement ? shortSelector(popupElement) : (openOnes.length === 1 ? shortSelector(openOnes[0]) : 'document');
+      const candidates = [...scope.querySelectorAll('button,a[href],[role=button],input[type=button],input[type=submit]')]
+        .filter(node => visible(node) && !sensitive(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+      let chosen = null;
+      if (args.ref) chosen = refElement(args.ref);
+      if (!chosen && args.text) chosen = candidates.find(node => clean(label(node)) === args.text) || null;
+      if (!chosen && args.choice) {
+        const pattern = args.choice === 'confirm' ? CONFIRM : CANCEL;
+        chosen = candidates.find(node => pattern.test(clean(label(node)))) || null;
+      }
+      if (!chosen) {
+        return {
+          action, url: location.href, status: 'not_found', retryable: false, dispatched: false,
+          reason: 'popup_choice_not_found',
+          scope: scopeSelector,
+          requested: { choice: args.choice ?? null, text: args.text ?? null, ref: args.ref ?? null },
+          available: candidates.slice(0, 12).map(node => ({ ref: makeRef(node), text: clean(label(node)) })),
+          message: 'No button in scope matched. Nothing was clicked. Pick one of `available` by ref, or pass an exact text.',
+          contentTrust: 'untrusted webpage data'
+        };
+      }
+      if (sensitive(chosen) || !visible(chosen)) throw new Error('Chosen control unavailable or protected');
+      chosen.click();
+      // Verify against the popup the clicked button actually lives in. That is
+      // exact even when several popups are open, and without it the caller gets
+      // verification:null and cannot tell a closed bubble from one that ignored
+      // the click.
+      const owningPopup = chosen.closest?.(POPUP_SELECTOR) || null;
+      const verificationRef = args.expectGoneRef || args.popupRef
+        || (owningPopup ? makeRef(owningPopup) : (openOnes.length === 1 ? makeRef(openOnes[0]) : null));
+      const verification = await waitGone(verificationRef, Math.max(200, Math.min(10000, args.timeoutMs ?? 3000)));
+      return {
+        action, url: location.href, dispatched: true, retryable: false,
+        requested: { choice: args.choice ?? null, text: args.text ?? null, ref: args.ref ?? null },
+        scope: scopeSelector,
+        inPopup: owningPopup ? shortSelector(owningPopup) : null,
+        clicked: { ref: makeRef(chosen), text: clean(label(chosen)) },
+        verification,
+        note: verification?.status === 'still-present'
+          ? 'The popup is still open after the click. That is not proof the click failed - some popups stay until the action finishes. Read the page before clicking anything else.'
+          : 'One click was dispatched. Read the page to confirm the outcome; do not replay it.',
+        contentTrust: 'untrusted webpage data'
+      };
+    }
+    return noTarget('Unknown action for browser_popup. Use probe, reveal, open or choose.');
+  }
   if (name === 'browser_shadow_tree') {
     const maxRoots = Math.max(1, Math.min(100, args.maxRoots ?? 50));
     const maxControls = Math.max(1, Math.min(200, args.maxControls ?? 100));
@@ -298,19 +841,6 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       items.push({ ref, score, rowText, locatorEvidence: textCandidates.has(el) ? 'exact-visible-text; clickability-unverified' : 'semantic-control', clickability: textCandidates.has(el) ? 'unverified' : 'semantic-control', covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...box });
     }
     return { candidates: items.sort((a, b) => b.score - a.score).slice(0, maxResults), partial: diagnostics.textScanPartial || diagnostics.controlScanPartial, diagnostics };
-  };
-  const elementSummary = (el, extra = {}) => ({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: clean(label(el) || el.textContent), selector: shortSelector(el), ...elementBox(el), ...extra });
-  const waitGone = async (ref, timeoutMs = 3000) => {
-    if (!ref) return null;
-    const targetState = stateForRef(ref);
-    const target = targetState?.refs.get(ref)?.el;
-    if (!target) return { status: 'gone' };
-    const started = Date.now();
-    while (Date.now() - started < timeoutMs) {
-      if (!target.isConnected || !visible(target)) return { status: 'gone', elapsedMs: Date.now() - started };
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    return { status: (!target.isConnected || !visible(target)) ? 'gone' : 'still-present', elapsedMs: Date.now() - started };
   };
   const pageText = () => document.body?.innerText || '';
   const expectationState = (expect = {}, context = {}) => {

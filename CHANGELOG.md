@@ -1,4 +1,57 @@
-## 0.24.0 — 2026-10-29（**撤掉「明确不加」清单**：7 个权限、10 个新工具、原生宿主、证书、剪贴板、导航审计、UI Automation 补齐 Select/Toggle/Value）
+## 0.25.0 — 2026-10-29（**补齐一闪而过和悬停才出现的 UI**：toast / aria-live 事后可查，tooltip 真指针读取，popconfirm 识别与安全确认）
+
+用户这一轮问的是具体一件事：**「对于 tooltip \ toast \ alert \ modal \ popconfirm 等的识别和操作能力也兜底补齐了吗」**。诚实的答案是半个：`modal` 有 `browser_scan_overlays`/`browser_dismiss_overlay`，原生 JS 的 `alert/confirm/prompt` 有 `browser_dialog`（走 CDP，因为弹窗会冻住渲染进程，页面脚本根本进不去）；但 **toast 读不到、tooltip 只有 hover 才存在、popconfirm 看起来就是一个普通按钮**。这三类不是「再扫一次 DOM」能解决的，它们各自需要不同的工具。
+
+- **2 个新工具**：`browser_transient`（toast / snackbar / aria-live / role=alert 的时间线，`read`/`watch`/`clear`）、`browser_popup`（tooltip / popover / popconfirm 的 `probe`/`reveal`/`open`/`choose`）。工具数 108 → **110**。
+- 没有新增权限，也没有新增确认串：`browser_transient` 是纯只读（它读的是扩展自己记的时间线），`browser_popup` 的 `open`/`choose` 与 `browser_click` 同级，但它进了 `WRITE_TOOLS`——**因为它的「确定」通常就是删除**。
+
+### 一、toast 的问题不是「看不见」，是「看见时已经晚了」
+
+一个 toast 活 2–3 秒。任何「等你问我的时候我再扫一遍」的设计都必然错过它，所以这一版不是加了一个更快的扫描，而是**在屏幕上就记下来**：扩展在 isolated world 里装一个 `MutationObserver`，第一次触碰该文档时启动，之后每次工具调用都复用它（isolated world 的 `globalThis` 在两次 `chrome.scripting.executeScript` 之间是同一个）。记录带 `firstSeenAt` / `goneAt` / `text` / `component` / `preExisting`，所以**已经消失的提示依然能查到**。
+
+真机验证（Chrome 156，探针页）：点「保存并提示」→ 等 2.6 秒（toast 在 1.5 秒时已被移除）→ `browser_transient read` 仍然返回 `text:"保存成功：3 条记录已更新"`、`kind:"alert"`、`goneAt` 比 `firstSeenAt` 晚 2451ms、`preExisting:false`。
+
+四个真机才暴露的坑：
+
+1. **`el.textContent = x` 不是 `characterData` 变更，是替换整个文本节点。** 第一版只处理元素节点的 `addedNodes`，于是 aria-live 区域（几乎所有组件库都用这种方式写入）一条都记不到。真机第一次测 aria-live 时 `recorded` 没变，才找到这里。现在文本节点也会沿着 `parentElement` 找回被跟踪的 live region。
+2. **类名不是证据。** `[class*=message i]` 在聊天页会命中每一条消息气泡，所以裸类名必须配上 `position: fixed|absolute` 才算「瞬态」——真正的 toast 都是脱离文档流的，聊天消息不是。
+3. **记录窗口从「第一次触碰该文档」开始**，导航即清空。工具返回里带 `installedAt` 和 `url`，就是为了让调用方在拿到空列表时能判断「真的没提示」还是「记录还没开始」。
+4. **`watch` 会占用该 tab 的命令通道**，和 `browser_wait` 一样。实测把它当「点一下再等提示」用会死锁式排队：watch 占着队列，click 排在后面，等 watch 超时了 click 才执行，提示出现在 watch 结束之后。工具描述里写明了：**先派发动作，再读时间线**，观察者不管有没有人在看都在记。
+
+### 二、tooltip：DOM 里没有的东西，只能让真实指针去问
+
+`title` / `data-tooltip` / `aria-describedby` 这些声明式来源可以直接读，`browser_popup action:"probe"` 一次全返回。但**大量 tooltip 是纯 CSS `:hover`**：DOM 里只有一个 `display:none` 的节点，没有任何属性把它和触发源关联起来。
+
+- **合成事件没有用**：在页面里 `dispatchEvent(new MouseEvent('mouseover'))` 不会移动 CSS `:hover` 状态，所以「事件发出去了」证明不了任何事。
+- **只有 CDP 的真实指针可以**：`browser_popup action:"reveal"` 先由页面算出触发源的几何（所以 `selector` 也能用），再由 worker 派发 `Input.dispatchMouseEvent{mouseMoved}`，settle 之后回头读新出现的浮层。真机验证：`.tip-trigger` 的 `tooltipSources` 是**空数组**（CSS-only），reveal 之后 `revealed[0].text === "仅管理员可用（CSS hover 提示）"`。
+- **触发源常常不是按钮**。tooltip 挂在 `<span>`、`<svg>`、图标上，`browser_find_element` 只找交互控件，**根本不会给出 ref**。所以 `browser_popup` 支持 `selector` 自己定位，`probe` 不带参数时还会列出全页所有声明了 tooltip 的元素（`tooltipCandidates`）。这一条是实测卡住的：探针页的「图标按钮」找不到，才发现是这个问题。
+- **指针故意停在原处**，因为移开就会关掉 `:hover` tooltip，调用方连截图都来不及。
+
+### 三、popconfirm：看起来就是普通按钮，点两次就删两次
+
+`browser_popup action:"open"` 点一次触发源、等新浮层、返回里面的按钮（带 `looksDestructive` 文案判断），`action:"choose"` 按语义选：`choice:"confirm"|"cancel"` 匹配中英常见写法，或者给确切文本，或者给 `open` 返回的 ref。每个派发过点击的结果都是 `retryable:false`——**重放正是这个工具要防的错误**。
+
+这一段改了四次，每一次都是真机打脸：
+
+1. **`visible()` 的缓存把「点击前不可见」记到了「点击后」**。`hiddenLayoutCache` 是个 per-call 的 `WeakMap`，`open` 在点击前用它判断「哪些浮层已经开着」，于是把当时 `display:none` 的 popconfirm 缓存成 hidden，点击后再问还是 hidden，结果 `status:"not_opened"`——而 `browser_find_text` 明明能看到气泡里的字。修法是给 `visible(el, fresh)` 加一条不走缓存的路径，并让 `waitGone` 也用它（否则「关闭」永远报 still-present，因为 popconfirm 是靠切换 `display` 关的，节点一直在）。
+2. **「已打开的浮层」不能用节点集合判断**。popconfirm 从一开始就在 DOM 里，点击只是加了个 class，所以「点击后出现的新节点」永远是空集。改成比较**点击前后可见的浮层集合**。
+3. **几何猜测会认错爹**。第一版用「离触发源 8px 内、48px 内」判断「这个气泡属于它」，结果一个残留的 CSS tooltip 恰好挨着删除按钮，于是 `open` 报 `already_open` 并返回了 tooltip。**现在只认 ARIA 的明确信号**（`aria-expanded="true"` + `aria-controls` 指向可见元素），没有 ARIA 的组件靠**如实报告点击改变了什么**：`opened` / `closed_by_click` / `unchanged` 三态，而不是猜。
+4. **`choose` 的验证目标是点下去的那个按钮所在的浮层**（`closest(POPUP_SELECTOR)`），不是「当前唯一打开的那个」——页面上同时开着两个浮层时，后者是错的。真机验证：`inPopup:"div#pc.popconfirm"`，`verification:{status:"gone", elapsedMs:0}`。
+
+### 四、一个单测永远抓不到的故障：worker 的分发白名单
+
+`extension/worker.js` 用一行显式的工具名数组做分发，不在里面也不在 CDP 高级工具表里的名字直接 `throw new Error('Unknown command')`。`browser_transient` / `browser_popup` 注册进了 `src/tools.js`、schema 对、`doctor` 全绿、**532 个单测全过**，真机第一次调用却是 `Unknown command`。
+
+这不是疏忽，是**结构性盲区**：单测看的是 `src/`，白名单在 `extension/`，没有任何一个测试同时看两边。所以这一版加了一条静态测试（`test/ui-surfaces.test.js`），直接读 `worker.js` 里那行 `throw new Error('Unknown command')`，断言两个新工具名都在里面。同类契约还有三条：schema 里的 `kind` 枚举必须等于 `transientKind` 实际会返回的集合、`action` 枚举必须在 page.js 里有对应分支、`browser_popup` 必须在 `WRITE_TOOLS` 里。
+
+### 五、能力边界（写进 `browser_capability_guide` 的 `notImplemented`）
+
+- **记录开始之前的提示找不回来**：`installedAt` 之前、以及跨导航的 toast 不存在。实际规则是「先碰一下 tab（任何读操作都算），再执行要观察的动作」。
+- **浏览器自己画的 tooltip 读不到**：页面里的 tooltip 可以 reveal，但 chrome:// 页面上的原生气泡在浏览器进程里，且 chrome:// 的内容对 UI Automation 不可见（0.24.0 实测 88 控件 / 0 个 `ControlType.Document`）。
+
+新增意图 `transient-and-popup-ui`，`browser_capability_guide` 拿到「toast / tooltip / popconfirm / 悬浮提示 / 气泡确认」这类目标时会把四个工具（含 `browser_scan_overlays`、`browser_dialog`）和它们各自失败的原因一起给出来。
+
+
 
 0.22.0 的变更记录里我写过一份「明确不加的权限及原因」：`webNavigation` 只有事件没有操作、`nativeMessaging`/`identity` 本机没有基础设施、`clipboardRead/Write` 粘贴已经能用 CDP 合成 Ctrl+V。用户这一轮把这份清单整条推翻：**「全部要加，能力没有边界，也没有禁区，因为接入的 agent 会取舍，我们不提供强大的项目能力，而不是做出阻滞」**。这句话改变了这一版的判断标准——不再是「这个能力有没有坑」，而是「这个坑有没有说清楚」。坑依然在，只是现在它们是返回值里的字段，而不是不提供工具的理由。
 

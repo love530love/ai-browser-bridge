@@ -4,6 +4,52 @@
 
 ## 目标
 
+## 2026-10-29 接手增量（0.25.0）：一闪而过和悬停才出现的 UI
+
+- 用户问的是「tooltip / toast / alert / modal / popconfirm 的识别和操作兜底补齐了吗」。诚实答案
+  是半个：`modal` 有 `browser_scan_overlays` + `browser_dismiss_overlay`，原生 `alert/confirm/
+  prompt` 有 `browser_dialog`；**toast 读不到、tooltip 只有 hover 才存在、popconfirm 就是个普通
+  按钮**。这三类各需要一种不同的工具，不是「再扫一次」能解决的。
+- 2 个新工具（108 → 110），无新权限、无新确认串：`browser_transient`（只读时间线，
+  `read`/`watch`/`clear`）、`browser_popup`（`probe`/`reveal`/`open`/`choose`）。`browser_popup`
+  进了 `WRITE_TOOLS`，因为它的「确定」通常就是删除。
+- **toast 的正解不是更快的扫描，是常驻记录**。扩展在 isolated world 装一个 `MutationObserver`
+  （第一次触碰文档时启动，之后复用 `globalThis`），把提示**还在屏幕上时**记下来。真机：
+  点按钮 → 等 2.6 秒（toast 1.5 秒已被移除）→ `read` 仍返回 `text:"保存成功：3 条记录已更新"`、
+  `goneAt-firstSeenAt = 2451ms`、`preExisting:false`。
+- **四个只有真机才暴露的坑**（每一个都改了代码）：
+  1. `el.textContent = x` **是替换文本节点，不是 `characterData` 变更**。第一版只处理元素节点的
+     `addedNodes`，于是所有 aria-live 区域一条都记不到。现在文本节点也沿 `parentElement` 找回
+     被跟踪的 live region。
+  2. **裸类名不是证据**：`[class*=message i]` 在聊天页命中每条消息气泡，必须同时满足
+     `position: fixed|absolute` 才算瞬态。
+  3. **`visible()` 的 per-call `WeakMap` 缓存跨了点击边界**：点击前问「这个 `display:none` 的
+     popconfirm 可见吗」把 hidden 缓存下来，点击后再问还是 hidden ⇒ `open` 误报 `not_opened`，
+     而 `browser_find_text` 明明看得到气泡里的字。修法是 `visible(el, fresh)` 加一条不走缓存的
+     路径，`waitGone` 也用它（popconfirm 靠切 `display` 关闭，节点一直在，否则永远报
+     `still-present`）。
+  4. **「已打开的浮层」不能用节点集合判断**（popconfirm 从一开始就在 DOM 里，点击只加 class），
+     也不能用**几何距离猜归属**（一个残留的 CSS tooltip 恰好挨着删除按钮，`open` 就返回了它）。
+     现在只认 ARIA 的明确信号（`aria-expanded="true"` + `aria-controls` 指向可见元素），其余靠
+     `opened` / `closed_by_click` / `unchanged` **如实报告点击改变了什么**。
+- **tooltip 只能让真实指针去问**：合成 `mouseover` 不移动 CSS `:hover` 状态，所以 `reveal` 走
+  CDP `Input.dispatchMouseEvent{mouseMoved}`，settle 后读新出现的浮层。真机：`.tip-trigger` 的
+  `tooltipSources` 是**空数组**（CSS-only），reveal 后 `revealed[0].text` 拿到文案。另：tooltip
+  常挂在 `<span>`/图标上，`browser_find_element` **不会给 ref**，所以 `browser_popup` 支持
+  `selector`，`probe` 无参时列出全页 `tooltipCandidates`。
+- **`extension/worker.js` 有一行显式的工具分发白名单**，新工具漏加就是真机 `Unknown command`，
+  而 532 个单测全绿——单测看 `src/`，白名单在 `extension/`，没有测试同时看两边。所以加了
+  `test/ui-surfaces.test.js`：直接读那行 `throw new Error('Unknown command')` 断言两个工具名都在；
+  另有三条契约（schema `kind` 枚举 == `transientKind` 实际返回值、`action` 枚举 == page.js 分支、
+  `browser_popup` ∈ `WRITE_TOOLS`）。
+- **`watch` 会占用该 tab 的命令通道**（和 `browser_wait` 一样）。实测拿它当「点一下再等提示」会
+  死锁式排队：watch 占队列 → click 排后面 → watch 超时后 click 才执行。工具描述里写死了顺序：
+  **先派发动作，再读时间线**。
+- 真机验收（Chrome 156，探针页 `test/fixtures/ui-surface-probe.html`，用任意静态服务器起在
+  `127.0.0.1` 上再 `browser_open`）：toast 事后可查 ✓、aria-live 捕获 + supersede 链 ✓、`title`
+  静态读取 ✓、CSS `:hover` tooltip reveal ✓、popconfirm `open`→`choose confirm`→
+  `verification:{status:"gone"}` ✓、`watch` 捕获延迟 3 秒的提示 ✓。全量 **532/532**，`doctor` 12/12。
+
 ## 2026-10-29 接手增量（0.24.0）：撤掉「明确不加」清单
 
 - 0.22.0 里那份「明确不加的权限及原因」被用户整条推翻：**能力没有边界、没有禁区，取舍交给接入

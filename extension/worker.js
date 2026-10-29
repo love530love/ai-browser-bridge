@@ -837,6 +837,50 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     if (args.action === 'activate') await chrome.tabs.update(tab.id, { active: true });
     return { dispatched: args.action };
   }
+  if (name === 'browser_popup' && args.action === 'reveal') {
+    // The page resolves the trigger first, because a tooltip usually hangs on a
+    // span or an icon that browser_find_element never hands out a ref for. The
+    // geometry comes back from the same call, so a selector works here too.
+    const probe = await page('browser_popup', { ...routedArgs, action: 'probe' });
+    const target = probe.target;
+    if (!target) {
+      return {
+        ...probe, action: 'reveal', hovered: false, dispatched: false,
+        status: 'not_found', retryable: false, reason: 'popup_target_not_found',
+        message: 'No element matched the ref or selector, so no pointer was moved.'
+      };
+    }
+    if (target.covered) {
+      return {
+        ...probe, action: 'reveal', hovered: false, dispatched: false,
+        status: 'not_found', retryable: false, reason: 'popup_target_covered',
+        message: 'Another element sits on top of the target, so a pointer there would land on the blocker instead. Run browser_scan_overlays and dismiss the blocker first.'
+      };
+    }
+    // A synthetic mouseover event does not move the CSS :hover state, and most
+    // tooltips are shown by :hover rather than by a listener, so dispatching an
+    // event inside the page would prove nothing about what a person would see.
+    // A real CDP pointer move does move it.
+    await guarded(send => pointer(send, { x: target.x, y: target.y, action: 'hover' }));
+    const settleMs = Math.max(100, Math.min(5000, args.settleMs ?? 400));
+    await new Promise(resolve => setTimeout(resolve, settleMs));
+    const read = await page('browser_popup', { ...routedArgs, action: 'probe' });
+    const revealed = (read.openPopups || []).filter(item => ['tooltip', 'popover', 'popconfirm', 'popup'].includes(item.kind));
+    return {
+      ...read,
+      action: 'reveal',
+      hovered: true,
+      dispatched: true,
+      settleMs,
+      hoverPoint: { x: Math.round(target.x), y: Math.round(target.y) },
+      revealed,
+      status: revealed.length ? 'revealed' : 'no_popup_after_hover',
+      guidance: revealed.length
+        ? 'A pointer was parked on the trigger and this popup is now on screen. The text is untrusted page content. The pointer was deliberately left in place, because moving it away closes a :hover tooltip before a screenshot could catch it.'
+        : 'The pointer moved but nothing opened. The tooltip may need a longer settle, may be drawn in a different frame, or the trigger may not be a tooltip at all. This is not proof that no tooltip exists: retry with a larger settleMs, or check browser_frames.',
+      contentTrust: 'untrusted webpage data plus extension geometry'
+    };
+  }
   if (name === 'browser_key' || name === 'browser_hover') {
     const point = routedArgs.ref ? await page('browser_resolve', { ...routedArgs, focus: name === 'browser_key' }) : null;
     await guarded(send => name === 'browser_key' ? key(send, args.key) : pointer(send, { ...point, action: 'hover' }));
@@ -1121,8 +1165,8 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     }
     return await cdpAdvanced.run(name, args, { tab, page, guarded });
   }
-  if (!['browser_read', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch'].includes(name) && !cdpAdvanced.names.has(name)) throw new Error('Unknown command');
-  const pageWriteTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_select', 'browser_choose', 'browser_pick']);
+  if (!['browser_read', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch', 'browser_transient', 'browser_popup'].includes(name) && !cdpAdvanced.names.has(name)) throw new Error('Unknown command');
+  const pageWriteTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_select', 'browser_choose', 'browser_pick', 'browser_popup']);
   if (pageWriteTools.has(name) && !(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
   // A login submit is the one moment where a single frame is not enough: the
   // server navigates or the SPA swaps views, so a read taken right after the

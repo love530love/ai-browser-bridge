@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Bridge UI surface probe</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; padding: 40px; }
+  .row { margin: 22px 0; }
+  .toast { position: fixed; background: #323232; color: #fff; padding: 10px 16px; border-radius: 6px; top: 20px; left: 50%; transform: translateX(-50%); }
+  .tip-trigger { position: relative; display: inline-block; padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; }
+  .tip { display: none; position: absolute; top: 32px; left: 0; background: #222; color: #fff; padding: 4px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap; }
+  .tip-trigger:hover .tip { display: block; }
+  .popconfirm { display: none; position: absolute; background: #fff; border: 1px solid #ddd; padding: 10px; box-shadow: 0 4px 12px rgba(0,0,0,.15); z-index: 10; }
+  .popconfirm.open { display: block; }
+  #live { margin-top: 10px; color: #0a7; }
+</style>
+</head>
+<body>
+  <h1>UI surface probe</h1>
+
+  <div class="row">
+    <button id="fire-toast">保存并提示</button>
+    <button id="fire-live">aria-live 提示</button>
+  </div>
+
+  <div class="row">
+    <button id="title-btn" title="这个按钮会导出 CSV 文件">导出</button>
+    <span class="tip-trigger" id="css-tip">图标按钮<span class="tip" role="tooltip" id="css-tip-content">仅管理员可用（CSS hover 提示）</span></span>
+  </div>
+
+  <div class="row" style="position: relative;">
+    <button id="delete-btn">删除记录</button>
+    <div class="popconfirm" id="pc">
+      <p style="margin:0 0 8px">确定要删除这条记录吗？</p>
+      <button id="pc-cancel">取消</button>
+      <button id="pc-ok">确定</button>
+    </div>
+  </div>
+
+  <div id="live" aria-live="polite"></div>
+
+<script>
+  window.__log = [];
+  document.getElementById('fire-toast').addEventListener('click', () => {
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.setAttribute('role', 'alert');
+    el.textContent = '保存成功：3 条记录已更新';
+    document.body.appendChild(el);
+    window.__log.push('toast');
+    setTimeout(() => el.remove(), 1500);
+  });
+  document.getElementById('fire-live').addEventListener('click', () => {
+    document.getElementById('live').textContent = '已复制到剪贴板';
+    window.__log.push('live');
+  });
+  const pc = document.getElementById('pc');
+  document.getElementById('delete-btn').addEventListener('click', () => {
+    pc.classList.add('open');
+    pc.style.left = '0px';
+    pc.style.top = '34px';
+    window.__log.push('popconfirm-open');
+  });
+  document.getElementById('pc-cancel').addEventListener('click', () => {
+    pc.classList.remove('open');
+    window.__log.push('cancel');
+  });
+  document.getElementById('pc-ok').addEventListener('click', () => {
+    pc.classList.remove('open');
+    window.__log.push('confirm');
+  });
+</script>
+</body>
+</html>
