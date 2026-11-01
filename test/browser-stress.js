@@ -273,7 +273,13 @@ try {
     const covered = await call('browser_find_element', { tabId, query: 'Export report', rowText: 'Order 0719', action: 'click', includeCovered: true, maxResults: 3 });
     assert.equal(covered.candidates.length, 1);
     assert.equal(covered.candidates[0].covered, true);
-    await assert.rejects(rawCall('browser_click', { tabId, ref: covered.candidates[0].ref }), /Element is covered/);
+    // A covered click now returns a structured refusal instead of throwing: the
+    // covering element is part of the answer, not a sentence in an error.
+    const blocked = await rawCall('browser_click', { tabId, ref: covered.candidates[0].ref });
+    assert.equal(blocked.status, 'covered');
+    assert.equal(blocked.dispatched, false);
+    assert.equal(blocked.coveredBy.found, true);
+    assert.ok(blocked.coveredBy.dismissPath);
     await page.locator('#cover').evaluate(el => { el.hidden = true; });
 
     const fresh = await call('browser_find_element', { tabId, query: 'Export report', rowText: 'Order 0719', action: 'click', maxResults: 3 });

@@ -4,7 +4,7 @@ import { createErrorJournal } from './error-journal.js';
 import { evaluatedValue, resourceSummary } from './cdp-results.js';
 import { captureDevtools, createTabSubscription } from './cdp-capture.js';
 import { readStorage, writeStorage } from './cdp-storage.js';
-import { replayRequest } from './cdp-replay.js';
+import { replayRequest, fetchRequest, readVerifyValue, verifyRequest } from './cdp-replay.js';
 import { createSessionManager } from './cdp-session.js';
 import { createCdpAdvanced } from './cdp-advanced.js';
 import { createClipboard } from './clipboard.js';
@@ -484,15 +484,40 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   // Replay runs in the page, so it inherits the page's cookies and CORS position
   // instead of being a separate request the bridge invents. pageUrl is passed so
   // the module can state whether the body went to a third-party origin.
-  if (name === 'browser_replay_request') {
+  //
+  // browser_fetch shares the transport and refuses everything that makes a
+  // replay dangerous: any method that can change state, and any URL outside the
+  // tab's own origin. That is why it needs no confirmation.
+  //
+  // verify is orchestrated here rather than in the caller because it needs the
+  // same debugger session: the "before" read has to happen before the write, and
+  // opening a second session between them would add a window in which the page
+  // can change under the comparison.
+  if (name === 'browser_replay_request' || name === 'browser_fetch') {
     const tab = await chrome.tabs.get(args.tabId);
     checkedUrl(tab.url, config);
     const paused = pausedGuard(tab.id);
     if (paused) return paused;
-    return { tabId: tab.id, ...await withTabDebugger(tab, async send => replayRequest({
-      send, method: args.method, url: args.url, headers: args.headers, body: args.body,
-      timeoutMs: args.timeoutMs, maxResponseChars: args.maxResponseChars, pageUrl: tab.url
-    })) };
+    const spec = name === 'browser_replay_request' && args.verify ? args.verify : null;
+    return { tabId: tab.id, ...await withTabDebugger(tab, async send => {
+      const before = spec ? await readVerifyValue(send, spec) : null;
+      const primary = name === 'browser_fetch'
+        ? await fetchRequest({
+          send, method: args.method, url: args.url, headers: args.headers,
+          timeoutMs: args.timeoutMs, maxResponseChars: args.maxResponseChars,
+          pageUrl: tab.url, verbosity: args.verbosity
+        })
+        : await replayRequest({
+          send, method: args.method, url: args.url, headers: args.headers, body: args.body,
+          timeoutMs: args.timeoutMs, maxResponseChars: args.maxResponseChars,
+          pageUrl: tab.url, verbosity: args.verbosity
+        });
+      // Only a request that actually went out can be read back. A denied or
+      // unsent request has nothing to verify, and reporting not_matched for it
+      // would blame the server for a request that never existed.
+      if (!spec || primary.dispatched !== true) return primary;
+      return { ...primary, verify: await verifyRequest({ send, spec, before }) };
+    }) };
   }
   if (name === 'browser_failure_help') {
     const err = String(args.error || '');
@@ -847,7 +872,12 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     const frameResults = results.map(item => {
       const result = item.result || { __aibError: item.error?.message || 'frame unavailable' };
       if (result.__aibError) return { frameId: item.frameId, error: result.__aibError };
-      return { frameId: item.frameId, title: result.title, url: result.url, found: result.found, matchCount: result.matchCount, truncated: result.truncated, diagnostics: result.diagnostics };
+      // notRendered has to survive this projection. It is computed in the page,
+      // where the scrollable containers actually are, and a whitelist here
+      // silently dropped it: the diagnostic was produced on every miss and no
+      // caller ever saw one. A field that only exists on a miss is exactly the
+      // field a projection forgets.
+      return { frameId: item.frameId, title: result.title, url: result.url, found: result.found, matchCount: result.matchCount, truncated: result.truncated, ...(result.notRendered ? { notRendered: result.notRendered } : {}), diagnostics: result.diagnostics };
     });
     const available = results.filter(item => item.result && !item.result.__aibError);
     const maxMatches = args.maxMatches ?? 10;
@@ -859,6 +889,13 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     const partial = frameErrorCount > 0 || available.length === 0;
     const maxReached = allMatches.length > matches.length || available.some(item => item.result.truncated) || partial;
     const main = available.find(item => item.frameId === 0)?.result;
+    // A miss is the only case where this matters, so it is only attached on a
+    // miss: an empty result is otherwise indistinguishable from "the row does
+    // not exist", and that difference decides whether the caller scrolls or
+    // gives up.
+    const notRendered = matches.length === 0
+      ? (main?.notRendered ?? available.find(item => item.result.notRendered)?.result.notRendered)
+      : undefined;
     const diagnostics = {
       mode: args.mode === 'cheap' ? 'cheap' : 'normal',
       frameResultCount: results.length,
@@ -881,6 +918,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       truncated: maxReached,
       matches,
       nearbyElements,
+      ...(notRendered ? { notRendered } : {}),
       diagnostics,
       frameResults,
       scope: allFrames ? 'allFrames injection results returned by Chrome; hidden text excluded' : 'main frame; hidden text excluded',

@@ -33,7 +33,15 @@ const tool = (name, description, properties = {}, required, readOnly = false) =>
   annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, openWorldHint: true }
 });
 export const TOOLS = [
-  tool('browser_tabs', 'List tabs in the running browser. Tabs this agent may not read, and internal pages such as chrome://newtab, are listed too but marked restricted:true with restrictedReason "origin_not_allowed" or "non_http": no title, and for a disallowed web origin no URL either, because that URL is the content. They are listed rather than hidden because they exist - choosing a native menu item such as New tab creates one, and a caller that cannot see it cannot clean it up. A restricted tab can be closed with browser_close force:true. Incognito tabs are excluded by default: they have a separate cookie jar, so operating one would look like a logged-out session. bridgeCreated marks tabs this bridge opened.', { includeIncognito: { type: 'boolean' }, agent }, [], true),
+  tool('browser_tabs', 'List tabs in the running browser. Tabs this agent may not read, and internal pages such as chrome://newtab, are listed too but marked restricted:true with restrictedReason "origin_not_allowed" or "non_http": no title, and for a disallowed web origin no URL either, because that URL is the content. They are listed rather than hidden because they exist - choosing a native menu item such as New tab creates one, and a caller that cannot see it cannot clean it up. A restricted tab can be closed with browser_close force:true. Incognito tabs are excluded by default: they have a separate cookie jar, so operating one would look like a logged-out session. bridgeCreated marks tabs this bridge opened. On a desktop with twenty tabs the unfiltered list is twenty full objects to read before every task, so origin, urlContains, titleContains, fields and limit narrow it here instead of in the caller: origin compares the exact scheme+host+port, the two contains filters are case-insensitive substrings, fields is a comma-separated list such as "id,title,url", and the reply always reports total plus returned so a narrowed list is never mistaken for the whole browser. Filtering never widens access: a restricted tab still comes back restricted.', {
+    includeIncognito: { type: 'boolean' },
+    origin: text(500),
+    urlContains: text(500),
+    titleContains: text(500),
+    fields: text(200),
+    limit: { type: 'integer', minimum: 1, maximum: 200 },
+    agent
+  }, [], true),
   tool('browser_agent_guide', 'Read the default unattended multi-agent operating guide. Call once when an agent first connects or after uncertainty.', { agent }, [], true),
   tool('browser_capabilities', 'Read the local capability matrix and protected-page requirements before choosing a browser control path.', { agent }, [], true),
   tool('browser_protected_ui_plan', 'Plan a controlled desktop-adapter path for Chrome internal pages. This is read-only and never performs the action.', {
@@ -175,7 +183,7 @@ export const TOOLS = [
     confirmation: { type: 'string', enum: ['modify_site_storage_once'] },
     agent
   }, ['tabId', 'area', 'action', 'confirmation']),
-  tool('browser_replay_request', 'Re-send one HTTP request from inside the page, which is what right-clicking a request in the DevTools Network panel and choosing Replay does. The request is sent by page-context fetch, not rebuilt by the bridge, so it carries the page\'s current cookies and CORS position; that also means the caller supplies method, url, headers and body rather than the bridge replaying a captured record. Requires confirmation:"replay_request_once". Only http and https are accepted, and Cookie, Host, Content-Length, Connection, Transfer-Encoding and Referer are refused as request headers because the browser ignores or rejects them - cookies ride along automatically with credentials:"include". A timeout is reported as status:"uncertain" with reason:"replay_timeout", not as a failure, because the request may well have reached the server and only the response was lost. It is never retried: a second send cannot tell "it never left" from "it already took effect". sideEffects and destructive state whether a real request went out and whether the method can change server state; crossOrigin states that the body went to a third-party origin. A request carrying a one-time CSRF token or signature will usually come back 4xx, which is the server refusing a stale credential, not a bridge fault.', {
+  tool('browser_replay_request', 'Send one HTTP request from inside the page, the way right-clicking a request in the DevTools Network panel and choosing Replay does. The request is sent by page-context fetch, not rebuilt by the bridge, so it carries the page\'s current cookies and CORS position; that also means the caller supplies method, url, headers and body rather than the bridge replaying a captured record. Requires confirmation:"replay_request_once". This is the write path: for a read-only same-origin call use browser_fetch, which needs no confirmation, so that reading and writing do not sit on the same mental tier. Before anything is sent, the reply carries riskLevel from the same static analysis browser_prepare_request exposes, so the label before a send and the label after it cannot disagree. Only http and https are accepted, and Cookie, Host, Content-Length, Connection, Transfer-Encoding and Referer are refused as request headers because the browser ignores or rejects them - cookies ride along automatically with credentials:"include". A timeout is reported as status:"uncertain" with reason:"replay_timeout", not as a failure, because the request may well have reached the server and only the response was lost. It is never retried: a second send cannot tell "it never left" from "it already took effect". sideEffects and destructive state whether a real request went out and whether the method can change server state; crossOrigin states that the body went to a third-party origin. A request carrying a one-time CSRF token or signature will usually come back 4xx, which is the server refusing a stale credential, not a bridge fault. Pass verify to close the loop instead of leaving the outcome to inference: the service reads the verify URL before the write, sends it once, then polls that URL until the value at jsonPointer equals expect or maxWaitMs runs out, and returns before/after/matched/attempts. verify.matched:false is a real answer - the write was sent and the server does not report the expected state - so it is reported with the last observed value, never as a silent timeout and never as a reason to send again.', {
     tabId,
     method: { type: 'string', enum: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] },
     url: text(4000),
@@ -185,9 +193,46 @@ export const TOOLS = [
     body: { type: 'string', maxLength: 200000 },
     timeoutMs: { type: 'integer', minimum: 100, maximum: 60000 },
     maxResponseChars: { type: 'integer', minimum: 1, maximum: 200000 },
+    verbosity: { type: 'string', enum: ['full', 'terse'], description: 'terse drops the fixed limitations block, the response header list and the echo fields, keeping status, httpStatus, bodyText and the risk label. Use it for polling loops where the same disclaimer would otherwise be paid for on every call.' },
+    verify: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        url: text(4000),
+        method: { type: 'string', enum: ['GET', 'HEAD'], description: 'Read-only on purpose: verification polls, so a mutating method here would re-send the change on every attempt.' },
+        jsonPointer: { type: 'string', minLength: 1, maxLength: 500, description: 'RFC 6901 pointer into the verify response, for example "/0/status". Required and must start with "/": comparing a whole document to one scalar is never what a caller means.' },
+        expect: { type: ['string', 'number', 'boolean'], description: 'The value the pointer must hold for the write to count as effective. Compared as text.' },
+        pollMs: { type: 'integer', minimum: 200, maximum: 10000 },
+        maxWaitMs: { type: 'integer', minimum: 200, maximum: 120000 },
+        headers: { type: 'object', additionalProperties: { type: 'string', maxLength: 4000 }, maxProperties: 20 }
+      },
+      required: ['url', 'jsonPointer', 'expect']
+    },
     confirmation: { type: 'string', enum: ['replay_request_once'] },
     agent
   }, ['tabId', 'method', 'url', 'confirmation']),
+  tool('browser_fetch', 'Read a same-origin URL from inside the page, and get JSON back as JSON. This is the read-only counterpart to browser_replay_request: it accepts only GET, HEAD and OPTIONS, refuses any URL whose origin differs from the tab\'s, and therefore needs no confirmation string. Use it whenever a task needs data the page already has - an instance list, a quota, a status field - instead of navigating a tab to the API URL and reading it back as a document, which destroys whatever that tab was showing. Being a page-context fetch it carries the page\'s cookies and is subject to the page\'s CORS position; credentials:"include" is always set, so an httpOnly session cookie is sent even though no capture could ever show it. json is parsed and returned alongside bodyText when the response is JSON, so a caller does not have to re-parse a string. A timeout is status:"uncertain", never "failed", and nothing here is retried. For a cross-origin URL, or for any method that can change state, use browser_replay_request: this tool refuses rather than widening its own authority.', {
+    tabId,
+    url: text(4000),
+    method: { type: 'string', enum: ['GET', 'HEAD', 'OPTIONS'] },
+    headers: { type: 'object', additionalProperties: { type: 'string', maxLength: 4000 }, maxProperties: 40 },
+    timeoutMs: { type: 'integer', minimum: 100, maximum: 60000 },
+    maxResponseChars: { type: 'integer', minimum: 1, maximum: 200000 },
+    verbosity: { type: 'string', enum: ['full', 'terse'] },
+    agent
+  }, ['tabId', 'url']),
+  tool('browser_prepare_request', 'Analyse an HTTP request before sending it, and dispatch nothing. Answers the question browser_prepare_request exists for: is this call safe, or does it destroy something? The verdict is static - method, path segments, query parameters and body keys - so it needs no network, no CDP and no extension round trip, and it works with the browser closed. riskLevel is safe, mutating or destructive; a DELETE, a path segment such as delete/terminate/purge/shutdown/revoke, a query such as force=true, or a body such as {"force":true} all escalate to destructive. requiresConfirmation states whether browser_replay_request would demand its confirmation string. reversible is false for a destructive request and null otherwise: whether a given server can undo a write is not knowable from the request shape, so it is reported as unknown rather than guessed as true. Pass pageUrl to also learn sameOrigin; without it that field is null, which means unmeasured, not same-origin. This is a warning level, not a proof: a GET that deletes and a POST that changes nothing both exist, so treat a safe verdict as "no pattern matched", never as authorisation.', {
+    method: { type: 'string', enum: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] },
+    url: text(4000),
+    body: { type: 'string', maxLength: 200000 },
+    pageUrl: text(4000),
+    agent
+  }, ['url'], true),
+  tool('browser_tool_index', 'Read a compact intent index instead of the full tool catalogue. Listing every tool with its description costs about 68 KB, and a real session uses a dozen of them; names alone are not enough to choose. This returns eleven groups - read, act, overlay, network, tab, auth, capture, debug, desktop, recipe, maintenance - each with a one-line purpose and its tool names, in a few hundred bytes. Pass goal to narrow by keyword (Chinese or English) and group to get exactly one group; format:"json" returns the same data structured. Read this first, then read the schema of the one tool you picked, then call browser_capability_guide if the goal is unfamiliar.', {
+    goal: text(200),
+    group: { type: 'string', enum: ['read', 'act', 'overlay', 'network', 'tab', 'auth', 'capture', 'debug', 'desktop', 'recipe', 'maintenance'] },
+    format: { type: 'string', enum: ['text', 'json'] },
+    agent
+  }, [], true),
   tool('browser_health', 'Layered health check for service/extension, permissions, Chrome tab.active, Chrome window.focused, document.visibilityState/hasFocus, viewport, page readiness, and tool version. These are separate states; use before coordinate input.', { tabId, agent }, [], true),
   tool('browser_capability_guide', 'Answer locally, without any model: for a stated goal, which primitive to use, whether it needs the foreground, what the fallback is, and which capabilities are genuinely not implemented. Use this instead of stalling when a tool is unfamiliar or refuses unexpectedly. It also states which reported states (tab.active, window.focused, document visibility/focus) are advisory only, because DOM and CDP primitives keep working in a backgrounded tab.', {
     goal: text(2000),
@@ -708,6 +753,62 @@ function argSummary(name, schema) {
   return `${name} accepts ${keys.length} argument(s)${parts.length ? ` — ${parts.join('; ')}` : ''}`;
 }
 
+// A caller's mental model does not come from this file. The same parameter had
+// three different treatments across the tool set - required here, optional
+// there, absent elsewhere - and four rejections in one real session came from
+// guessing right about the meaning and wrong about the name. Renaming at the
+// door costs one table and turns a rejected call into a working one; refusing
+// costs the caller a full round trip to learn a spelling.
+//
+// Applied in place, before validation, because validateCall is the single funnel
+// every entry point goes through (server.call, the MCP server and the local
+// agent runner). Renaming only happens when the target exists and the alias
+// would not overwrite a real argument, so this can never silently change a
+// value the caller did supply.
+//
+// Supplying both names is not a spelling problem, it is a question about which
+// value the caller meant. Dropping the alias would leave the caller believing
+// it sent one value while the page received another, and a plain
+// "Unknown argument: value" hides the fact that value *is* understood here. So
+// an identical duplicate is collapsed and a conflicting one is refused by name.
+const COMMON_ARG_ALIASES = { tab_id: 'tabId', tabid: 'tabId' };
+const TOOL_ARG_ALIASES = {
+  browser_fill: { value: 'text', content: 'text' },
+  browser_fill_verified: { value: 'text', content: 'text' },
+  // Both finders call their search string query, which is the one word nobody
+  // guesses. "text" is the same thing by another name, so it is renamed.
+  // "selector" is deliberately not aliased: query is a text/label match, so a
+  // CSS selector sent here would search for the literal string "#name" and
+  // report not-found - an honest error is better than a confident empty answer.
+  browser_find_text: { text: 'query' },
+  browser_find_element: { text: 'query' }
+};
+// "Give me the text" is what mode:"text" means to a person; the enum says
+// normal. Both are accepted, and the canonical value is what travels onward.
+const MODE_ALIASES = { text: 'normal', full: 'normal', complete: 'normal', fast: 'cheap', minimal: 'cheap' };
+
+function applyArgumentAliases(name, args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  const schema = TOOLS.find(item => item.name === name)?.inputSchema;
+  if (!schema) return args;
+  const known = schema.properties;
+  for (const [from, to] of Object.entries({ ...COMMON_ARG_ALIASES, ...(TOOL_ARG_ALIASES[name] ?? {}) })) {
+    if (!Object.hasOwn(args, from)) continue;
+    if (!Object.hasOwn(known, to) || Object.hasOwn(known, from)) continue;
+    if (Object.hasOwn(args, to)) {
+      if (args[to] === args[from]) { delete args[from]; continue; }
+      throw new Error(`Conflicting arguments: ${from} and ${to} were both supplied, and ${from} is another name for ${to}. Keep one of them; nothing was sent. ${argSummary(name, schema)}`);
+    }
+    args[to] = args[from];
+    delete args[from];
+  }
+  if (Object.hasOwn(known, 'mode') && typeof args.mode === 'string') {
+    const canonical = MODE_ALIASES[args.mode.trim().toLowerCase()];
+    if (canonical && known.mode.enum?.includes(canonical)) args.mode = canonical;
+  }
+  return args;
+}
+
 function constraints(property) {
   const notes = [];
   if (property.enum) notes.push(`allowed: ${property.enum.join(' | ')}`);
@@ -734,6 +835,8 @@ export function validateCall(name, args) {
     throw new Error(`Unknown tool: ${name}.${hint ? ` Did you mean "${hint}"?` : ''} Run browser_agent_guide or node src/cli.js tools to list the ${TOOLS.length} available tools.`);
   }
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('arguments must be an object');
+  // Renames aliases in place, before any check: see applyArgumentAliases.
+  applyArgumentAliases(name, args);
   const s = t.inputSchema;
   const known = Object.keys(s.properties);
   for (const key of Object.keys(args)) if (!Object.hasOwn(s.properties, key)) {

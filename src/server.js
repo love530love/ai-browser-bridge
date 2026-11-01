@@ -19,6 +19,9 @@ import { capabilityGuide } from './capability-guide.js';
 import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
 import { clearExtensionErrors, describeErrorList } from './extension-errors.js';
+import { analyzeRequest, validateVerifySpec } from './request-risk.js';
+import { toolIndex } from './tool-index.js';
+import { filterTabs } from './tab-filter.js';
 import { setDevToolsState } from './devtools-menu.js';
 import { lookupCredential, credentialOriginHash, CREDENTIAL_LOOKUP_CONFIRMATION } from './credential-store.js';
 import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMATION } from './password-manager.js';
@@ -1178,10 +1181,51 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     return { ...disconnectedResult(), launchAttempt: launched ?? null, autoLaunched: launchNote(launched ?? {}) };
   }
 
+  // ---- answered locally: no queue slot, no extension round trip ------------
+  //
+  // Both of these are questions about the request, not about the browser, so
+  // both keep working when the extension is disconnected. A risk planner that
+  // needed a live browser to tell you a DELETE is dangerous would be useless at
+  // exactly the moment you are about to make a mistake.
+  function prepareRequestCall(args) {
+    const analysis = analyzeRequest({ method: args.method, url: args.url, body: args.body, pageUrl: args.pageUrl });
+    if (analysis.riskLevel === 'unknown') {
+      return { status: 'denied', retryable: false, dispatched: false, sent: false, ...analysis,
+        howToProceed: 'Nothing was analysed. Pass an absolute http: or https: URL.' };
+    }
+    return {
+      status: 'success', retryable: false,
+      ...analysis,
+      confirmation: analysis.requiresConfirmation ? REPLAY_REQUEST_CONFIRMATION : null,
+      confirmationTool: analysis.requiresConfirmation ? 'browser_replay_request' : null,
+      howToProceed: analysis.requiresConfirmation
+        ? `Send it with browser_replay_request and confirmation:"${REPLAY_REQUEST_CONFIRMATION}", and pass a verify block so the outcome is read back instead of inferred.`
+        : 'No risk pattern matched. Send it with browser_fetch, which is same-origin and read-only and needs no confirmation.'
+    };
+  }
+
+  // The label attached to a real send, computed by the same function the planner
+  // uses. A caller that prepared first must never see the verdict change between
+  // the plan and the result.
+  function requestRiskLabel(args) {
+    const analysis = analyzeRequest({ method: args.method, url: args.url, body: args.body });
+    return {
+      riskLevel: analysis.riskLevel,
+      method: analysis.method,
+      reversible: analysis.reversible,
+      requiresConfirmation: analysis.requiresConfirmation,
+      reasons: analysis.reasons,
+      destructivePatterns: analysis.destructivePatterns,
+      bodySignals: analysis.bodySignals
+    };
+  }
+
   function call(name, args, owner = null, context = {}) {
     const tool = validateCall(name, args);
     if (name === 'browser_agent_guide') return agentGuide();
     if (name === 'browser_capabilities') return capabilities();
+    if (name === 'browser_tool_index') return toolIndex({ goal: args.goal, group: args.group, format: args.format });
+    if (name === 'browser_prepare_request') return prepareRequestCall(args);
     if (name === 'browser_protected_ui_plan') return protectedUiPlan({
       ...args,
       desktopAdapterAvailable: desktopAdapter.available === true,
@@ -1235,7 +1279,29 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (name === 'browser_storage_write' && args.confirmation !== STORAGE_WRITE_CONFIRMATION) return denyUnconfirmed(name, args, STORAGE_WRITE_CONFIRMATION);
     if (AUTHORITY_CONFIRMATIONS[name] && args.confirmation !== AUTHORITY_CONFIRMATIONS[name]) return denyUnconfirmed(name, args, AUTHORITY_CONFIRMATIONS[name]);
     if (name === 'browser_replay_request' && args.confirmation !== REPLAY_REQUEST_CONFIRMATION) return denyUnconfirmed(name, args, REPLAY_REQUEST_CONFIRMATION);
+    // browser_fetch is the one network tool with no confirmation string, so its
+    // authority is enforced here rather than described in prose: a mutating
+    // method reaching it would be a write that needs no approval at all.
+    if (name === 'browser_fetch' && !['GET', 'HEAD', 'OPTIONS'].includes(String(args.method ?? 'GET').toUpperCase())) {
+      return { status: 'denied', retryable: false, reason: 'fetch_method_not_read_only', dispatched: false,
+        method: String(args.method ?? '').toUpperCase(),
+        message: 'browser_fetch only reads: GET, HEAD, OPTIONS. Nothing was sent.',
+        recommendedNextAction: 'Use browser_replay_request with confirmation:"replay_request_once" for a method that can change server state; that gate is the whole reason the two tools are separate.' };
+    }
     if (name === 'browser_recipe_run' && args.confirmation !== RECIPE_RUN_CONFIRMATION) return denyUnconfirmed(name, args, RECIPE_RUN_CONFIRMATION);
+    // Validated here rather than at the queue, so a malformed verify is refused
+    // before the extension is even consulted. Discovering the problem after the
+    // write would leave the caller holding a completed request and no way to
+    // read it back, which is the exact situation verify exists to prevent.
+    let verifySpec = null;
+    if (name === 'browser_replay_request' && args.verify !== undefined) {
+      const checked = validateVerifySpec(args.verify);
+      if (!checked.ok) {
+        return { status: 'denied', retryable: false, reason: checked.reason, message: checked.message, dispatched: false,
+          recommendedNextAction: 'Nothing was sent. Fix the verify block, or drop it and read the result back yourself afterwards.' };
+      }
+      verifySpec = checked.spec;
+    }
     if (LEASE_TOOLS.has(name)) return leaseCall(name, args, decision);
     if (!WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) leases.heartbeat(args.tabId, args.agent ?? null, name);
     if (lease && lease !== owner) {
@@ -1256,6 +1322,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     }
     if (name === 'browser_recipe_save') return recipeSaveCall(name, tool, args);
     let prepared = name === 'browser_upload' || name === 'browser_upload_verified' ? { ...uploadArgs(args), expect: args.expect ?? {}, timeoutMs: args.timeoutMs } : args;
+    if (verifySpec) prepared = { ...prepared, verify: verifySpec };
     if (name === 'browser_recipe_run') {
       const loaded = loadRecipe(recipesRoot(), args.name);
       if (!loaded.ok) {
@@ -1276,6 +1343,14 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     }
     const promise = enqueueJob(name, tool, prepared);
     let result = promise;
+    if (name === 'browser_tabs') result = result.then(rows => filterTabs(rows, args));
+    // The same static analysis browser_prepare_request exposes, attached to the
+    // real send. A caller that planned first must never see the verdict change
+    // between the plan and the result.
+    if (name === 'browser_replay_request' || name === 'browser_fetch') {
+      const risk = requestRiskLabel(args);
+      result = result.then(value => (value && typeof value === 'object' ? { ...value, requestRisk: risk } : value));
+    }
     // The judge is a normal queued call answered by the extension; the service
     // only remembers its verdict so a later write can be checked against it.
     if (name === 'browser_local_judge') result = result.then(value => { rememberVerdict(args, value); return value; });

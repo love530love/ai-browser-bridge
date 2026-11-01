@@ -4,6 +4,51 @@
 
 ## 目标
 
+## 2026-11-02 接手增量（0.27.0）：把实战反馈的 11 项缺口补上
+
+输入文档：`docs/CAPABILITY-GAP-ANALYSIS-2026-11-01.md`（一次真实会话的复盘，111 个工具、读侧全通）。
+结论是「卡点集中在写和省的」，这一版逐条落地。**新增 3 个工具（111 → 114）**。
+
+- **写闭环（§1）**：`browser_prepare_request`（服务本地，纯静态分析，`dispatched:false`）+ `browser_replay_request.verify`。
+  `verify` 只允许 GET/HEAD（验证是轮询的，写方法会在每次重试时重发变更），指针**在页面内**解析（响应常超过预览上限），
+  `matched:false` 是判决不是超时且 `retryable:false`。`reversible` 只出 `false` 或 `null`——能否撤销是服务器属性。
+  路径用**段匹配**而非子串：`/reset-tokens-report` 不该被判成 reset 端点，否则警告泛滥 → agent 脱敏 → 真危险操作失去警戒。
+- **读请求不再装成写（§2/§3）**：拆出 `browser_fetch`（只 GET/HEAD/OPTIONS + 只同源 ⇒ 免确认）。免确认靠**结构窄化**，
+  不靠文案；服务侧另有 `fetch_method_not_read_only` 门，不依赖 schema。跨源 → `fetch_cross_origin_denied` + 两个 origin。
+- **省（§4/§5）**：`verbosity:"terse"` 真机 2179 → 604 字节（-72%），规则是「只删不带判决的字段」，且**拒绝分支也适用**；
+  `browser_tool_index` 3117 字节 / 11 分组覆盖 114 个工具（对照 68.6 KB 全量）。
+- **§6 fill 持久化**：dispatch 后 settle 再读，返回 `persisted`/`refStillValid`/`settleMs`/`settleMode`。secret 分支同样带
+  `persistence` 但 `observedLength:null`。
+- **§7 未渲染**：零命中时 `notRendered`（可滚动容器 + `screensBelow` + 指向 `browser_scan_overlays`）；没有容器就**不返回**。
+- **§8 遮挡**：`status:"covered"` + `coveredBy`（含 `dismissPath`，标为启发式）+ **必须一起说 ref 一次性**。
+- **§9 参数**：别名在 `validateCall`（三个入口的唯一漏斗）归一；冲突显式拒绝 `Conflicting arguments`。
+  `selector`→`query` **故意不做**（会搜字面量然后报「没找到」，诚实的报错好过自信的空答案）。
+- **§10/§11**：`browser_tabs` 加 `origin`/`urlContains`/`titleContains`/`fields`/`limit`，无过滤时**原样返回数组**（不改契约），
+  有过滤时带 `browserTotal`；`browser_read` 增加空挂载诊断。
+
+### 真机验证发现的 4 个缺陷（单测 590 条全绿时都还在）
+
+共同点：**单测自己构造的输入永远是对的**。
+
+1. **`verify` 的指针没进表达式**：`buildVerifyExpression` 解构 `pointer`，spec 里叫 `jsonPointer` → 页面 `req.pointer` 为 undefined
+   → `Cannot read properties of undefined (reading 'split')`，且被当成网络失败**轮询 30 次共 29.5 秒**。修法：参数名对齐 +
+   指针在请求前解析（坏指针报 `pointerError`）+ `errorKind:'expression'` 的失败**一次就停**。已加「指针真的出现在生成源码里」的断言。
+2. **`browser_fill` 在后台标签卡到 20s 超时**：等待用「两个 rAF + 一个 task」，而**隐藏文档不绘制、rAF 永不触发**。
+   字段其实已填好，调用方却收到「outcome may be unknown」。现在按 `visibilityState` 跳过帧等待并与 250ms 定时器竞速，
+   `settleMode` 报出是哪一种。真机：`persisted:true` / `settleMode:"timer_hidden_document"` / `settleMs:545`。
+3. **`notRendered` 被 worker 的帧投影丢掉**：page 侧每次零命中都算出来了，`frameResults` 白名单重建对象时丢了它，
+   于是 `find_element` 有、`find_text` 没有。**只在失败时出现的字段，正是投影最容易忘记的字段。**
+4. **`browser_fetch` 的 `terse` 没生效**：`verbosity` 传进去了但 `fetchRequest` 从没用过，两个响应都是 2179 字节。
+
+### 复查方法
+
+- 夹具 `.local/verify-fixture.mjs`（gitignored，`node .local/verify-fixture.mjs` 起在 `127.0.0.1:19555`）：
+  含 40 行虚拟列表（只渲染视口附近）、全屏 `aria-modal` 遮罩、计数器 API。它是「写」和「未渲染」的可测对象，不碰外部服务。
+- 活浏览器回归 `test/browser-stress.js` 里 covered 的断言已改为读结构化结果（不再是 `assert.rejects(/Element is covered/)`）。
+- 服务重启走看门狗：杀掉 `.local/server.pid` 里的 node，`watch-service.ps1` 10 秒内用新代码拉起（**不要**用 `stop.ps1`，
+  它会写 `.local/service-paused` 让看门狗停手）。改扩展代码后必须 `browser_reload_extension`，否则 `doctor` 的
+  `version-match` 会红。
+
 ## 2026-10-29 接手增量（0.25.1）：扩展 Errors 面板的噪音
 
 - 用户贴出一屏红字（几十条 `ERR_CONNECTION_REFUSED` + `An unknown error occurred when fetching

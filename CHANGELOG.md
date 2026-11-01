@@ -1,3 +1,100 @@
+## 0.27.0 — 2026-11-02（**补上实战反馈的 11 项缺口**：读侧已通，这一版修「写」和「省」）
+
+`docs/CAPABILITY-GAP-ANALYSIS-2026-11-01.md` 是一份真实会话的事后复盘：111 个工具、读侧全通，卡点集中在两处——**写操作没有「执行→回读→判定」闭环**，以及**每次调用的固定开销比实际内容还大**。这一版逐条落地，并在真机验证时发现并修掉了 4 个只有真跑一次才会暴露的缺陷。
+
+### 一、写操作有了闭环：`browser_prepare_request` + `verify`
+
+以前写操作的结果是 `dispatched:true` 加一句 "Whether the server changed anything cannot be known from here"。这句话是诚实的，但它把判断整个推回给了调用方，而调用方只能靠「再读一个别的东西，用眼睛比」——于是「发出去了但没生效」和「生效了但没验」从外面看起来一模一样。
+
+- **`browser_prepare_request`**（新，服务本地回答，浏览器关着也能用）：纯静态分析 method + 路径段 + query + body key，给出 `riskLevel`（safe/mutating/destructive）、命中的 `destructivePatterns`、`requiresConfirmation`、`confirmationTool`。**`dispatched:false`**——一个会发请求的「事前判定」不是事前判定。
+- **`reversible` 只会是 `false` 或 `null`**：能否撤销是服务器属性，请求形状推不出来。把 `true` 写进去就是把「大概可恢复」当事实，所以 safe/mutating 一律 `null` 并带 `reversibleNote`。
+- **路径段匹配而不是子串匹配**：`/reset-tokens-report` 不该被判成 reset 端点。否则警告泛滥 → agent 学会脱敏 → 真实危险操作失去警戒。这是安全设计的反向激励，不是误报问题。
+- **`browser_replay_request` 新增 `verify`**：`{url, jsonPointer, expect, method(只 GET/HEAD), pollMs, maxWaitMs}`。写之前先读一次（`before`），写完轮询读到预期值才 `status:"verified"`。三条硬规则：
+  1. **verify 方法必须只读**，因为验证是轮询的，mutating 方法会在每次重试时重发变更。
+  2. **指针在页面内解析**，不在服务侧：状态文档常超过预览上限，遍历截断的 body 会对一个完好的响应报 JSON 错误。
+  3. **`matched:false` 是判决不是超时**，带最后一次观测值，`retryable:false`，且明确写「不要凭这个结果再发一次」。
+- **`browser_prepare_request` 与真实发送共用同一个判定函数**（`src/request-risk.js`），所以事前 verdict 与事后 `requestRisk` 不会互相矛盾。
+
+### 二、读请求不用再装成写：`browser_fetch`
+
+§3 的抱怨是「GET 也要确认串」。直接给 `browser_replay_request` 按 method 放宽是最省事的做法，但那会让「有没有确认门」变成运行时条件——同一条代码路径既能写又免检。所以拆成两个工具：
+
+- **`browser_fetch`**：只 GET/HEAD/OPTIONS，只同源，**不需要确认串**。免确认的授权靠**结构窄化**，不靠文案：它在 schema 层就写不了，服务侧还有一道 `fetch_method_not_read_only`（不依赖 schema，老客户端或裸 job 也撞同一堵墙）。
+- 跨源返回 `fetch_cross_origin_denied` + `pageOrigin`/`targetOrigin`，并指向 `browser_replay_request`——那里会把第三方暴露写进结果。
+
+### 三、`verbosity:"terse"`：删掉不带判决的字段
+
+真机实测同一次调用 **2179 → 604 字节（-72%）**。规则是「只删不带判决的字段」：`limitations`、`headers`、为 null 的 `bodyReadError`、与 `url` 相同的 `requestUrl` 可删；`status`/`httpStatus`/`bodyText`/`dispatched`/`destructive` 一个不能少。
+
+`browser_fetch` 的 `terse` 由外层包装应用，**包括拒绝分支**——拒绝时 `limitations` 占比最大，只缩短成功路径等于在最需要省的地方不省。
+
+### 四、工具发现成本：`browser_tool_index`
+
+68.6 KB / 111 个工具，实际只用 11 个。新增 `browser_tool_index`（服务本地回答）：11 个分组 + 中英关键词别名，**3117 字节覆盖全部 114 个工具**（-95%），带 `goal` 可只回相关组。
+
+### 五、`browser_fill` 的持久化校验（普通文本也做，不只 secret）
+
+受控组件（React/Vue）在 input/change 后异步 setState，可能用旧值覆盖节点或直接换节点——「写进 DOM」不等于「页面接受」。现在 dispatch 后等一个 settle 再读，返回 `persisted`/`refStillValid`/`settleMs`/`settleMode`，失败时 `reason`（`value_reverted_after_render` / `element_replaced_after_render`）+ `suggestedAction:'retry_fill'`。secret 分支同样带 `persistence`，但 `observedLength:null`（不回声凭据）。
+
+### 六、找不到的两种含义：未渲染 vs 不存在
+
+- `browser_find_element` / `browser_find_text` 在**零命中**时返回 `notRendered`：可滚动容器的 `selector`/`scrollTop`/`scrollHeight`/`clientHeight`/`screensBelow`，`reason:"not_rendered_possible"`，并指向 `browser_scan_overlays` 的 `scrollContainers`。
+- 没有可滚动容器时**不返回**这个字段——没有证据就不要暗示「也许滚一下就有了」。
+
+### 七、点击被遮挡时给出可操作摘要
+
+以前抛 `Element is covered`。现在返回 `status:"covered"` + `coveredBy`（`selector`/`role`/`ariaModal`/`position`/`zIndex`/`portalLike`/`coversWholeViewport`/`dismissible`/`dismissPath`/`containsTarget`/`heuristic`）+ `suggestedAction`。`dismissPath` 明确标为启发式（`escape`/`click_outside`/`dismiss_button`/`click_covered_element`），并且**必须一起说 ref 一次性**：任何 dismiss 都会让调用方手上的全部 ref 失效。
+
+### 八、参数别名 + 冲突显式拒绝
+
+`validateCall` 是三个入口（`server.call` / MCP / agent）的唯一漏斗，别名在那里归一：`tab_id`/`tabid`→`tabId`；`browser_fill` 的 `value`/`content`→`text`；`browser_read` 的 `mode:"text"`→`normal`；`browser_find_text`/`browser_find_element` 的 `text`→`query`。
+
+`selector`→`query` **故意不做**：`query` 是文本/标签匹配，把 CSS 选择器改个名塞进去只会搜字面量 `#name` 然后报「没找到」——诚实的报错好过自信的空答案。
+
+同时给和 `text` 一起传 `value` 这种**冲突**加了显式拒绝：`Conflicting arguments: value and text ... Keep one of them`。静默丢弃 `value` 会让调用方以为自己发了一个值、页面收到另一个值；而原来那句 `Unknown argument: value` 也在撒谎——`value` 在这里是听得懂的。
+
+### 九、`browser_tabs` 过滤
+
+`origin` / `urlContains` / `titleContains` / `fields` / `limit`。无过滤时**原样返回数组**（不改既有契约）；有过滤时返回 `{status, tabs, total, returned, browserTotal, filtered, note}`。`browserTotal` 是关键：短列表不能被读成「整个浏览器就这些」。restricted tab 没有 URL，会被 origin 过滤排除——诚实，不猜。
+
+### 十、空路由 / 空挂载诊断
+
+`browser_read` 的 `diagnostics` 增加挂载检查（`#root`/`#app`/`#__next`/`#__nuxt`/`[data-reactroot]`/`main` 是否空挂载），`browser_replay_request` 的 `requestRisk` 挂在真实发送结果上。
+
+### 真机验证发现的 4 个缺陷（只有真跑一次才会暴露）
+
+单测 590 条全绿时这四个都还在，因为它们的共同点是**单测自己构造的输入永远是对的**：
+
+1. **`verify` 的指针根本没进表达式**。`buildVerifyExpression` 解构的是 `pointer`，而 spec 里叫 `jsonPointer`，于是页面侧 `req.pointer === undefined` → `Cannot read properties of undefined (reading 'split')`。更糟的是这个 TypeError 被当成网络失败，**轮询了 30 次共 29.5 秒**才报 `verify_read_failed`。修法三件：参数名对齐 `jsonPointer`；指针在请求前解析，坏指针报 `pointerError` 而不是网络错；`errorKind:'expression'` 的失败**一次就停**（确定性失败不能用等待修复）。已加一条测试断言「指针真的出现在生成的源码里」——fake sender 从不执行表达式，这是唯一能在单测里发现它的地方。
+2. **`browser_fill` 在后台标签上卡到 20 秒超时**。等待用的是「两个 rAF + 一个 task」，而**隐藏文档根本不绘制，rAF 永远不触发**。字段其实已经填好了，调用方收到的却是「outcome may be unknown」——正是这一版要消灭的模糊。现在按 `visibilityState` 跳过帧等待、并与 250ms 定时器竞速，`settleMode` 报出是哪一种（`animation_frame` / `timer_hidden_document` / `timer_animation_frame_starved`）。真机：`persisted:true`、`settleMode:"timer_hidden_document"`、`settleMs:545`。
+3. **`notRendered` 被 worker 的帧投影丢掉**。page 侧每次零命中都算出了诊断，但 `frameResults` 用白名单重建对象，字段没了——于是 `browser_find_element` 有、`browser_find_text` 没有。**只在失败时出现的字段，正是投影最容易忘记的字段**。
+4. **`browser_fetch` 的 `terse` 没生效**。`verbosity` 传进去了但 `fetchRequest` 从没用过它，两个响应一模一样都是 2179 字节。
+
+### 真机证据（Chrome 156，扩展 0.27.0，夹具 `127.0.0.1:19555`）
+
+| 场景 | 结果 |
+|---|---|
+| `browser_prepare_request` GET | `riskLevel:"safe"`、`reversible:null`、`requiresConfirmation:false`、`dispatched:false` |
+| `browser_prepare_request` DELETE `?force=true` | `riskLevel:"destructive"`、`reversible:false`、`destructivePatterns:["force"]`、`confirmation:"replay_request_once"` |
+| `browser_fetch` 同源 GET | `httpStatus:200`、`json` 已解析、`tool:"browser_fetch"`、`readOnly:true` |
+| `browser_fetch` 跨源 | `fetch_cross_origin_denied`、`pageOrigin`/`targetOrigin` 齐全、`dispatched:false` |
+| `browser_replay_request` POST + `verify` | `before:"1"` → `after:"2"`、`matched:true`、`attempts:1`、`elapsedMs:4` |
+| 同上但 `expect:999` | `verify_expect_not_observed`、`after:"2"`、`attempts:3`、`elapsedMs:935`、`retryable:false` |
+| `verbosity:"terse"` | 2179 → 604 字节（-72%），`status`/`httpStatus`/`bodyText` 全在 |
+| `browser_tabs` `origin=…19555` | `total:1` / `browserTotal:21`、`fields` 投影生效 |
+| `browser_fill` 后台标签 | `persisted:true`、`refStillValid:true`、`settleMode:"timer_hidden_document"` |
+| `browser_click` 被全屏 `aria-modal` 遮罩 | `status:"covered"`、`dispatched:false`、`coveredBy.dismissPath:"escape"`、`coversWholeViewport:true` |
+| `browser_find_text` 虚拟列表 `row-39` | `notRendered.containers[0] = div#vlist`、`screensBelow:3`、`reason:"not_rendered_possible"` |
+| `browser_tool_index` | 3117 字节 / 11 分组 / 覆盖 114 个工具 |
+
+夹具 `?` 说明：`.local/verify-fixture.mjs`（gitignored）是一个 40 行虚拟列表 + 全屏遮罩 + 计数器 API 的本地页面，用来让「写」和「未渲染」有真实对象可测，不碰任何外部服务。
+
+### 测试
+
+590/590（新增 5 个文件：`request-risk` 10 条、`replay-verify` 15 条、`tool-index` 6 条、`write-loop` 13 条、`browser-diagnostics` 3 条）。其中 `browser-diagnostics` 三条是**静态断言**，因为它们守的正是「单测看不见的地方」：`settle` 必须检查 `visibilityState` 且与定时器竞速、两个 finder 都必须算未渲染诊断、worker 的帧投影必须转发 `notRendered`。
+
+`test/browser-stress.js`（活浏览器回归）里 covered 的断言从「抛异常」改成读结构化结果：`status:"covered"` / `dispatched:false` / `coveredBy.dismissPath` 非空。
+
 ## 0.26.0 — 2026-10-29（**把「更新扩展后清错误」变成会成功的能力**：三条假成功路径全部封死）
 
 0.25.1 把清错误接进了 `browser_reload_extension`，但只做到了「跑起来」，没做到「一定会成功」。用户要求固化成能力，回查发现**三个地方会在什么都没做的情况下报成功**：

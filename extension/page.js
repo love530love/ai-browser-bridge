@@ -203,6 +203,113 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   };
   const shortSelector = el => clean([el.tagName?.toLowerCase(), el.id ? `#${el.id}` : '', el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 3).join('.') : ''].join(''));
   const elementSummary = (el, extra = {}) => ({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: clean(label(el) || el.textContent), selector: shortSelector(el), ...elementBox(el), ...extra });
+  // An SPA route that does not exist renders nothing and reports nothing: the
+  // document loads, the mount container stays empty, and the read comes back with
+  // no text and no elements. That is indistinguishable from "I have not found the
+  // right element yet", and it cost two calls to tell apart in a real session.
+  // Naming the empty mount turns that into one answer.
+  const MOUNT_SELECTORS = ['#root', '#app', '#__next', '#__nuxt', '[data-reactroot]', 'main'];
+  const mountDiagnostics = () => {
+    const empty = [];
+    let found = false;
+    for (const sel of MOUNT_SELECTORS) {
+      const node = document.querySelector(sel);
+      if (!node) continue;
+      found = true;
+      if (node.childElementCount === 0 && !(node.textContent ?? '').trim()) empty.push({ selector: sel, childElementCount: 0 });
+    }
+    if (!found) return { emptyMount: null, mountChecked: false, note: 'No known SPA mount container (#root, #app, #__next, #__nuxt, [data-reactroot], main) is present, so an empty mount cannot be detected here.' };
+    if (!empty.length) return { emptyMount: false, mountChecked: true };
+    return { emptyMount: true, mountChecked: true, emptyContainers: empty,
+      hint: 'A client-rendered mount container is empty. The route may not exist, or the page may still be hydrating. An empty mount is not evidence that the element you want is missing - check the URL against the app\'s routes before searching again.' };
+  };
+  // A virtualised list does not render a row until it is near the viewport, so a
+  // search for that row fails with "not found" while the row exists. That is a
+  // different failure from "not in the DOM", and the two used to be reported
+  // identically - the caller then re-searched, re-scoped and eventually scrolled
+  // by hand. Listing the overflowing scroll containers gives the caller the
+  // place to look instead of a dead end.
+  //
+  // No refs are minted here on purpose: handing out refs from a second snapshot
+  // would invalidate the ones the caller already holds. browser_scan_overlays
+  // already returns the same containers with refs, so this points there.
+  const overflowingContainers = (limit = 5) => {
+    const found = [];
+    for (const el of document.querySelectorAll('div,ul,ol,section,table,[role=listbox],[role=grid],[role=tree],[role=menu]')) {
+      if (found.length >= limit) break;
+      if (sensitive(el)) continue;
+      let style;
+      try { style = getComputedStyle(el); } catch { continue; }
+      if (!/(auto|scroll|overlay)/.test(style.overflowY)) continue;
+      if (el.scrollHeight <= el.clientHeight + 4) continue;
+      const box = el.getBoundingClientRect();
+      if (box.width < 40 || box.height < 40) continue;
+      found.push({
+        selector: shortSelector(el),
+        role: el.getAttribute('role'),
+        scrollTop: Math.round(el.scrollTop),
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+        screensBelow: Math.max(0, Math.ceil((el.scrollHeight - el.scrollTop - el.clientHeight) / Math.max(1, el.clientHeight))),
+        childElementCount: el.childElementCount
+      });
+    }
+    return found;
+  };
+  const notRenderedDiagnostic = () => {
+    const containers = overflowingContainers();
+    if (!containers.length) return undefined;
+    return {
+      reason: 'not_rendered_possible',
+      containers,
+      suggestedAction: 'browser_scan_overlays returns these containers with refs (scrollContainers). Scroll one with browser_scroll_element, then search again. A virtualised list does not render a row until it is near the viewport, so "not found" can mean "not rendered yet" - it is not evidence that the target does not exist.'
+    };
+  };
+  // When a click is refused because something else owns the point, the caller's
+  // next four steps - scan overlays, decide it is a portal, press Escape, re-read
+  // for fresh refs - were pure experience, and the chain matters because a ref is
+  // one-shot: dismissing the cover invalidates every ref the caller is holding.
+  // Everything needed to say that is in the DOM at the moment of refusal, so it
+  // is returned instead of being left to be rediscovered.
+  //
+  // The dismissPath is a suggestion, not a fact: nothing here knows whether the
+  // cover is an overlay at all, so it is labelled as a heuristic and the caller
+  // is told to re-read afterwards either way.
+  const OVERLAY_MARKERS = /(radix-popper|popper|portal|overlay|backdrop|modal|dialog|drawer|sheet|popover|tooltip|dropdown|mask|scrim)/i;
+  const describeCover = (cover, target, x, y) => {
+    if (!cover) {
+      return { found: false, reason: 'nothing_at_point',
+        note: 'No element was returned for that point. The target is probably outside the viewport or inside a container that clips it.' };
+    }
+    const style = typeof getComputedStyle === 'function' ? getComputedStyle(cover) : null;
+    const selector = shortSelector(cover);
+    const role = cover.getAttribute?.('role') ?? null;
+    const ariaModal = cover.getAttribute?.('aria-modal') ?? null;
+    const marker = `${selector} ${role ?? ''} ${cover.hasAttribute?.('data-radix-popper-content-wrapper') ? 'radix-popper' : ''} ${cover.hasAttribute?.('popover') ? 'popover' : ''}`;
+    const portalLike = OVERLAY_MARKERS.test(marker) || ariaModal === 'true';
+    const box = cover.getBoundingClientRect();
+    const coversWholeViewport = box.width >= innerWidth - 2 && box.height >= innerHeight - 2;
+    const dismissPath = cover.matches?.('button,[role=button],a[href]') ? 'click_covered_element'
+      : portalLike ? 'escape'
+        : coversWholeViewport ? 'dismiss_button' : 'click_outside';
+    return {
+      found: true,
+      tag: cover.tagName?.toLowerCase() ?? null,
+      selector,
+      role,
+      ariaModal,
+      zIndex: style?.zIndex ?? null,
+      position: style?.position ?? null,
+      portalLike,
+      coversWholeViewport,
+      dismissible: true,
+      dismissPath,
+      rect: { x: Math.round(box.left), y: Math.round(box.top), w: Math.round(box.width), h: Math.round(box.height) },
+      point: { x: Math.round(x), y: Math.round(y) },
+      containsTarget: Boolean(target && cover.contains?.(target)),
+      heuristic: 'dismissPath is inferred from the covering element only. Nothing here proves it is an overlay.'
+    };
+  };
   // Handing out refs is the same three lines in every scan, and getting the
   // snapshot bookkeeping subtly different between two of them is exactly how a
   // ref stops resolving. One factory instead.
@@ -1047,6 +1154,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const selector = 'a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[contenteditable=true]';
     const max = args.maxChars ?? 16000;
     const maxTextNodes = args.maxTextNodes ?? 4000;
+    const mount = mountDiagnostics();
     const cheapRead = (reason = 'requested') => {
       const cheapStarted = performance.now();
       const cheapElements = [];
@@ -1063,7 +1171,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const collected = collectReadableText({ max, maxTextNodes, deadline: cheapDeadline });
       timings.cheapMs = Math.round(performance.now() - cheapStarted);
       timings.totalMs = Math.round(performance.now() - started);
-      return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial: true, elements: cheapElements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM; cheap', diagnostics: { mode: 'cheap', cheapReason: reason, budgetMs: args.budgetMs ?? 6000, timings, elementCandidates: cheapCandidates.length, elementsReturned: cheapElements.length, maxElements, elementsBudgetHit: cheapElements.length >= maxElements || performance.now() >= cheapDeadline, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit }, contentTrust: 'untrusted webpage data' };
+      return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial: true, elements: cheapElements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM; cheap', diagnostics: { mode: 'cheap', cheapReason: reason, budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates: cheapCandidates.length, elementsReturned: cheapElements.length, maxElements, elementsBudgetHit: cheapElements.length >= maxElements || performance.now() >= cheapDeadline, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit }, contentTrust: 'untrusted webpage data' };
     };
     if (args.mode === 'cheap') return cheapRead('requested');
     const candidates = document.querySelectorAll(selector);
@@ -1088,7 +1196,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const collected = collectReadableText({ max, maxTextNodes, deadline });
     timings.totalMs = Math.round(performance.now() - started);
     const partial = elementsBudgetHit || collected.textBudgetHit || overBudget();
-    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM', diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, elementCandidates, elementsReturned: elements.length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit }, contentTrust: 'untrusted webpage data' };
+    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM', diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates, elementsReturned: elements.length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit }, contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_find_text') {
     const started = performance.now();
@@ -1116,7 +1224,8 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       }
     }
     const textLengthBudgetHit = direct.textLengthBudgetHit;
-    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || !!direct?.textBudgetHit || textLengthBudgetHit || elementBudgetHit, matches, nearbyElements, diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: collected.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, directTextNodesVisited: direct?.textNodesVisited ?? 0, maxTextNodes: 50000, textBudgetHit: collected.textBudgetHit || !!direct?.textBudgetHit, textLengthBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
+    const textNotRendered = matches.length === 0 && !elementBudgetHit ? notRenderedDiagnostic() : undefined;
+    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || !!direct?.textBudgetHit || textLengthBudgetHit || elementBudgetHit, matches, nearbyElements, ...(textNotRendered ? { notRendered: textNotRendered } : {}), diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: collected.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, directTextNodesVisited: direct?.textNodesVisited ?? 0, maxTextNodes: 50000, textBudgetHit: collected.textBudgetHit || !!direct?.textBudgetHit, textLengthBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_observe') {
     const read = await pageOperation('browser_read', { ...args, maxChars: args.maxChars ?? 16000 }, allowedOrigins, allSites);
@@ -1596,7 +1705,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   }
   if (name === 'browser_find_element') {
     const { candidates, partial, diagnostics } = findElementCandidates(args);
-    return { title: document.title, url: location.href, query: args.query, action: args.action || 'any', partial, diagnostics, searchStatus: partial ? 'partial' : 'complete', candidates, found: candidates.length > 0, guidance: partial ? 'Search is incomplete. Do not infer that the target is absent or unique; inspect a screenshot and refine the scope.' : 'Verify the intended target and row before using an uncovered enabled candidate. If covered, inspect overlays before writing.', contentTrust: 'untrusted webpage data plus extension hit testing' };
+    // Only when the search completed and found nothing: a partial scan already
+    // says the search was incomplete, and adding "it might be unrendered" on top
+    // of that would offer two explanations for one unknown.
+    const notRendered = candidates.length === 0 && !partial ? notRenderedDiagnostic() : undefined;
+    return { title: document.title, url: location.href, query: args.query, action: args.action || 'any', partial, diagnostics, searchStatus: partial ? 'partial' : 'complete', candidates, found: candidates.length > 0, ...(notRendered ? { notRendered } : {}), guidance: partial ? 'Search is incomplete. Do not infer that the target is absent or unique; inspect a screenshot and refine the scope.' : notRendered ? 'Nothing matched, and this page has scrollable containers that may hide unrendered rows. Scroll one and search again before concluding the target is absent.' : 'Verify the intended target and row before using an uncovered enabled candidate. If covered, inspect overlays before writing.', contentTrust: 'untrusted webpage data plus extension hit testing' };
   }
   if (name === 'browser_prepare_action') {
     const { candidates, partial, diagnostics } = findElementCandidates({ query: args.query, rowText: args.rowText, role: args.role, action: args.action || 'any', maxResults: 8, includeCovered: true });
@@ -1769,10 +1882,26 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     el.scrollIntoView({ block: 'center', inline: 'nearest' });
     const box = el.getBoundingClientRect();
-    const hit = deepHit(box.left + box.width / 2, box.top + box.height / 2);
-    if (!hit || (hit !== el && !el.contains(hit))) throw new Error('Element is covered. Read page again.');
+    const x = box.left + box.width / 2, y = box.top + box.height / 2;
+    const hit = deepHit(x, y);
+    if (!hit || (hit !== el && !el.contains(hit))) {
+      // Structured, not thrown: the caller needs the covering element, not a
+      // sentence, and it needs to be told that dismissing it invalidates refs.
+      const coveredBy = describeCover(hit, el, x, y);
+      return {
+        status: 'covered', clicked: false, dispatched: false, retryable: false,
+        reason: 'element_covered',
+        coveredBy,
+        suggestedAction: coveredBy.dismissPath === 'escape'
+          ? 'browser_key with Escape, then browser_read for fresh refs, then click again.'
+          : coveredBy.dismissPath === 'click_outside'
+            ? 'Click a point outside the covering element, then browser_read for fresh refs, then click again.'
+            : 'browser_scan_overlays then browser_dismiss_overlay, then browser_read for fresh refs, then click again.',
+        message: 'Nothing was clicked: another element owns the click point. Refs are one-shot, so dismissing the cover invalidates every ref you are holding - re-read before clicking again, and do not simply repeat this call.'
+      };
+    }
     el.click();
-    return { clicked: true, note: 'Click dispatched; read page to verify outcome.' };
+    return { clicked: true, dispatched: true, note: 'Click dispatched; read page to verify outcome.' };
   }
   if (name === 'browser_click_verified') {
     const baseline = expectationState(args.expect || {});
@@ -1783,6 +1912,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     const clicked = await pageOperation('browser_click', args, allowedOrigins, allSites);
     if (clicked?.__aibError) throw new Error(clicked.__aibError);
+    // A covered click dispatches nothing, so there is no outcome to verify. It
+    // used to throw, which reached this branch as an error; now it is a result,
+    // and passing it through the verification path would report "the expected
+    // outcome was not observed" for a click that never happened.
+    if (clicked?.dispatched === false) return { ...clicked, status: 'not_dispatched' };
     let result;
     try {
       result = await verify(args.expect || {}, args.timeoutMs ?? 3000);
@@ -1810,14 +1944,60 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     else throw new Error('Element is not a text field');
     el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: args.text }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
+    // A controlled component (React, Vue) applies the new value on a later tick
+    // and can either write its own state back over the node or replace the node
+    // outright. Reading straight after dispatch therefore measures the DOM
+    // write, not the page's acceptance: a fill that was about to be reverted
+    // reported success, and the caller only found out by looking at the screen.
+    // The secret path already had to wait long enough to compare without
+    // echoing; this makes that the default for every fill.
+    //
+    // Two frames plus a task is the shortest wait that is not a guess: it covers
+    // a microtask commit, a paint-scheduled render, and a scheduler task. The
+    // measured cost is reported as settleMs so the wait is visible, not implied.
+    //
+    // A hidden document never paints, so requestAnimationFrame never fires in a
+    // background tab - measured here as browser_fill hanging until the 20s tool
+    // timeout, with the field filled but no reply. The frame wait is therefore
+    // raced against a timer and skipped outright when the document reports
+    // itself hidden, and settleMode says which of the three ended the wait: a
+    // paint-based wait and a timer-based one are different amounts of evidence,
+    // and the caller is the one who has to weigh that.
+    const settleStarted = Date.now();
+    const settleMode = await new Promise(resolve => {
+      if (typeof requestAnimationFrame !== 'function') { setTimeout(() => resolve('timer_no_raf'), 32); return; }
+      if (document.visibilityState === 'hidden') { setTimeout(() => resolve('timer_hidden_document'), 32); return; }
+      let done = false;
+      const finish = mode => { if (!done) { done = true; resolve(mode); } };
+      requestAnimationFrame(() => requestAnimationFrame(() => finish('animation_frame')));
+      setTimeout(() => finish('timer_animation_frame_starved'), 250);
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const settleMs = Date.now() - settleStarted;
+    const refStillValid = el.isConnected;
     const observed = el.isContentEditable ? el.textContent : el.value;
+    const persisted = refStillValid && observed === args.text;
+    const persistence = {
+      persisted,
+      refStillValid,
+      settleMs,
+      settleMode,
+      observedLength: typeof observed === 'string' ? observed.length : null,
+      ...(persisted ? {} : {
+        reason: refStillValid ? 'value_reverted_after_render' : 'element_replaced_after_render',
+        suggestedAction: 'retry_fill',
+        suggestedNextStep: refStillValid
+          ? 'The field holds a different value now than the one that was written. The page re-rendered over it. Re-read the field for a fresh ref, fill once more, then verify; do not assume the first fill was accepted.'
+          : 'The element itself was replaced by a re-render, so this ref is stale. Re-read the page for a fresh ref and fill once more.'
+      })
+    };
     // A secret fill must not become the one channel that echoes a credential.
     // Every other read path (read/observe/find/click/debug) drops sensitive()
     // elements, so returning the observed value here would reopen exactly the
     // leak those filters exist to close. Length and a boolean are safe: the
     // DevTools UI shows the same two facts for a password input.
-    if (args.secret === true) return { filled: true, secret: true, characters: args.text.length, valueMatches: observed === args.text, valueEchoSuppressed: true, dispatchedEvents: ['input', 'change'], applicationStateVerified: false, note: 'Secret fill: the value was written but deliberately not echoed back. Only its length and a boolean match are reported, because the other read paths in this bridge filter sensitive elements and an echoing fill would bypass that. Application acceptance still requires observation.' };
-    return { filled: true, characters: args.text.length, valueMatches: observed === args.text, dispatchedEvents: ['input', 'change'], applicationStateVerified: false, note: 'DOM value checked immediately; application acceptance still requires observation. Clearing a search field does not necessarily exit search mode; inspect the clear control or use browser_key with Escape if supported by the site.' };
+    if (args.secret === true) return { filled: true, secret: true, characters: args.text.length, valueMatches: observed === args.text, ...persistence, observedLength: null, valueEchoSuppressed: true, dispatchedEvents: ['input', 'change'], applicationStateVerified: false, note: 'Secret fill: the value was written but deliberately not echoed back. Only its length and a boolean match are reported, because the other read paths in this bridge filter sensitive elements and an echoing fill would bypass that. persisted is measured after a render settle, not immediately, so a framework that reverted the value is reported as persisted:false. Application acceptance still requires observation.' };
+    return { filled: true, characters: args.text.length, valueMatches: observed === args.text, ...persistence, dispatchedEvents: ['input', 'change'], applicationStateVerified: false, note: 'persisted is measured after the page had a chance to re-render, so persisted:false means the value did not survive a framework render. Application acceptance still requires observation. Clearing a search field does not necessarily exit search mode; inspect the clear control or use browser_key with Escape if supported by the site.' };
   }
   if (name === 'browser_fill_verified') {
     const filled = await pageOperation('browser_fill', args, allowedOrigins, allSites);
