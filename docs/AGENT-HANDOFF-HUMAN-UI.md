@@ -49,6 +49,54 @@
   它会写 `.local/service-paused` 让看门狗停手）。改扩展代码后必须 `browser_reload_extension`，否则 `doctor` 的
   `version-match` 会红。
 
+## 2026-11-02 接手增量（0.28.0）：让弱 agent 被引导
+
+0.27.0 解决「工具能不能做成」，这一版解决**一个不强的调用方能不能被引导着做成**。它失败的方式不是「工具不存在」，
+而是「工具说不行，我不知道还能试什么」，然后重复同一个调用或自己发明一个。**新增 1 个工具（114 → 115）**。
+
+- **`nextStep`（`src/next-step.js`）**：每个失败结果带一个可执行的下一步，或什么都不带。`kind` 是
+  `wait`/`diagnose`/`retry_with_changes`/`escalate`/`stop` 的枚举，调用方不必解析英文。
+  **`validStep()` 用 `TOOLS` 的 `inputSchema` 当裁判**——发不出的建议一律不发（这条不是洁癖：一条会被拒的建议，
+  比没有建议更伤，因为它先教调用方「指南不可信」，再让他自己猜）。它**绝不能授予权限**：需要确认串的步骤
+  携带的是门已经要求的那一个（`denyUnconfirmed` 现在回显 `confirmation`），绝不伪造。顺序即优先级。
+- **抛错也要有下一步**：真机发现扩展抛 `Stale element reference` 时返回的是 400 + 一句裸文本，
+  `stale_reference` 规则永远命中不了。现在 `call()` 同时挂 `.then` 和 `.catch`，`nextStepForError` 把消息映射回
+  原因码（stale / timeout / disconnected / covered；**映射不到就沉默**），400 body 带 `nextStep`，
+  `client.js` 不丢弃，MCP 的 `isError` 文本里带上（仍是 `isError:true`，只是 payload 变成可解析的）。
+- **回执（`extension/receipt.js`）**：17 个动作类工具在动作前后各取一次页面指纹，回 `receipt.changed` 等字段。
+  指纹**便宜且浅**（计数 + FNV-1a，无布局），且**绝不读输入值**（`hasValue` 而不是 `value`）。
+  `changed:false` 的 note 明写「异步更新可能还没渲染，这不是失败证据」。
+- **重复抑制**：去重键 = 工具 + tab + **动作前指纹** + 参数哈希。所以合法重复永不被拦；只有 `dispatched` 的动作
+  进表；`allowRepeat:true` 在 schema 里（逃逸阀不能是隐藏字段）；`duplicate_suppressed` 是**拒绝**不是错误，
+  审计记 `denied`，`nextStep.kind="stop"`。
+  **真机缺陷**：ref 是 `<snapshot uuid>:<index>`，每次读都换 uuid，而「读完再点」正是我们教给 agent 的流程 ⇒
+  原始 ref 让抑制在实际使用中永不触发（三次相同点击 = 三次派发）。现在 `duplicateKey` 剥掉快照 id 只留 index。
+- **`browser_at`（`extension/state-digest.js`）**：同一 `browser_read` 通道的投影，**不是第二个读取器**
+  （所以「摘要与读一致」是构造性成立）。真机重页面 **28582 → 1799 字节（-94%）**，动作 ≤8、文本 ≤420 字、
+  `counts` 说清省了多少、`truncated` 明说这是样本。
+
+### 真机验证发现的 4 个缺陷（624 条单测全绿时都还在）
+
+1. **`browser_at` 撞 worker 白名单** → `Unknown command`：注册在 `src/tools.js`，却不在 `extension/worker.js` 的
+   分发表里。`test/state-digest.test.js` 已加针对那一行的静态断言（`browser_transient`/`browser_popup` 曾同样栽过）。
+   ⇒ **新增工具必须同时改三处：`src/tools.js`、`extension/worker.js` 分发表、`src/tool-index.js` 分组。**
+2. **去重键含快照 uuid**（见上），单测自己构造 ref，永远看不到。
+3. **抛错路径没有 `nextStep`**（见上）。
+4. **`package-lock.json` 是第四处版本号**：`test/version.test.js` 抓到 `0.27.0 !== 0.28.0`。
+   ⇒ 升版要改 **4 处**：`package.json`、`extension/manifest.json`、`package-lock.json`（顶层 + `packages[""]`）。
+
+### 复查方法（0.28.0）
+
+- `npm test` → 624 条；`node src/cli.js doctor` → 12/12、0 建议。
+- `browser_at` 与 `browser_read` 的体积对比：`node src/cli.js call browser_at '{"tabId":<id>}'` 看 `counts`/`truncated`。
+- 重复抑制：对**无副作用**元素连续点三次（每次前用 `browser_at` 重新取 ref），第二次起应为
+  `duplicate_suppressed` + `dispatched:false`；加 `allowRepeat:true` 应恢复派发。
+  ⚠ 必须用无副作用目标：这是真浏览器。
+- 抛错路径：用一个伪造 ref（`11111111-2222-3333-4444-555555555555:9`）调 `browser_click`，
+  400 body 应带 `nextStep.rule = "stale_reference"`。
+- 本机已有夹具 `node .local/verify-fixture.mjs`（`127.0.0.1:19555`，gitignored）可当无副作用点击目标；
+  不要为验证另起一个占用同一端口的服务。
+
 ## 2026-10-29 接手增量（0.25.1）：扩展 Errors 面板的噪音
 
 - 用户贴出一屏红字（几十条 `ERR_CONNECTION_REFUSED` + `An unknown error occurred when fetching

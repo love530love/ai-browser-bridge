@@ -109,6 +109,16 @@ export const TOOLS = [
     waitFor: { type: 'string', enum: ['idle', 'timeout-then-partial', 'force'] },
     agent,
   }, ['tabId'], true),
+  tool('browser_at', 'Answer "where am I and what can I touch" in a fixed, small shape. This is the read to use when you do not already know what you are looking for: it runs the same page read as browser_read and projects it down to a short text head (420 characters by default), at most 8 actionable elements, and counts that say how much was left out. The element list carries ref/tag/role/label/type plus hasValue - never the value itself, so the digest cannot become the one path that echoes what the user typed. A shape that does not grow with page size is the point: a full read of a large page is more text than a small model can hold, so it keeps the first few lines and acts on those, which is how a correct tool produces an incorrect click. Refs here are the same one-shot refs browser_read returns and are invalidated by any change to the page - read again after acting. truncated:true means the digest is a sample, not the whole page; browser_read or browser_find_text is the tool for a targeted look. Read-only: it never clicks, never focuses a window, never navigates.', {
+    tabId,
+    maxActions: { type: 'integer', minimum: 1, maximum: 40 },
+    maxTextChars: { type: 'integer', minimum: 80, maximum: 4000 },
+    maxChars: { type: 'integer', minimum: 100, maximum: 50000 },
+    maxElements: { type: 'integer', minimum: 10, maximum: 1000 },
+    mode: { type: 'string', enum: ['normal', 'cheap'] },
+    frame: { type: 'integer', minimum: 0 },
+    agent,
+  }, ['tabId'], true),
   tool('browser_shadow_tree', 'Read-only inventory of open Shadow DOM and custom-element controls with snapshot refs usable by browser_click/browser_fill. Use for chat assistants, floating widgets, ad/tool panels, and web components that are absent from light-DOM reads. Never executes actions.', { tabId, maxRoots: { type: 'integer', minimum: 1, maximum: 100 }, maxControls: { type: 'integer', minimum: 1, maximum: 200 }, agent }, ['tabId'], true),
   tool('browser_frames', 'List accessible frames in a tab, including frameId, URL, origin, name, and same-document status. Use before reading or operating iframe-hosted forms.', { tabId, agent }, ['tabId'], true),
   tool('browser_find_text', 'Find layout-visible, non-private light-DOM text by exact substring. Defaults to the main frame; set frame="all" to request allFrames injection. Matches include frameId; hidden, inert, computed opacity-zero, or non-rendered text is excluded. Results are bounded, include per-frame errors returned by Chrome, and mark known frame failures as partial/truncated; omitted-frame coverage is not inferred. Use this before full-page reads on large SPA pages.', {
@@ -718,6 +728,25 @@ export const TOOLS = [
     agent
   }, ['action', 'confirmation'])
 ];
+
+// The worker suppresses a repeat of these actions when the page has not changed
+// since the first one, because two identical clicks on an unchanged page are
+// almost always one intention and one lost acknowledgement. The escape hatch is
+// part of the schema rather than an undocumented field: a caller that genuinely
+// means to repeat the action has to be able to say so, or the suppression
+// becomes a wall it cannot argue with.
+const REPEATABLE_TOOLS = new Set([
+  'browser_click', 'browser_click_verified', 'browser_action', 'browser_fill_verified',
+  'browser_key', 'browser_select', 'browser_choose', 'browser_pick',
+  'browser_upload', 'browser_upload_verified'
+]);
+for (const entry of TOOLS) {
+  if (!REPEATABLE_TOOLS.has(entry.name)) continue;
+  entry.inputSchema.properties.allowRepeat = {
+    type: 'boolean',
+    description: 'Set true to dispatch the same action again even though the page has not changed since it last ran. Without it, an identical repeat within a few seconds is refused as duplicate_suppressed, because that pattern is far more often a lost acknowledgement than a second intention.'
+  };
+}
 
 function editDistance(a, b) {
   if (a === b) return 0;

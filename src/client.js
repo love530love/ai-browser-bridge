@@ -26,6 +26,14 @@ export async function request(path, data) {
     const text = await res.text().catch(() => '');
     throw new Error(`Bridge returned a non-JSON response (HTTP ${res.status}) from ${path}: ${text.slice(0, 200) || error.message}`);
   }
-  if (!res.ok) throw new Error(result.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const error = new Error(result.error || `HTTP ${res.status}`);
+    // A thrown failure is still a failure, and the caller still needs one next
+    // move. Without this the guidance existed only for results that came back,
+    // so the most common real failure - a stale ref thrown by the extension -
+    // arrived as a bare sentence and the caller guessed.
+    if (result.nextStep) error.nextStep = result.nextStep;
+    throw error;
+  }
   return result;
 }

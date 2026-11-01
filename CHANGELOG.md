@@ -1,3 +1,51 @@
+## 0.28.0 — 2026-11-02（**让弱 agent 被引导**：失败只给一个下一步、动作给回执、读给固定形状）
+
+0.27.0 修的是「工具能不能做成」。这一版修的是另一件事：**一个不强的调用方能不能被引导着做成**。它失败的方式从来不是「工具不存在」，而是「工具说了不行，我不知道还能试什么」——于是要么重复同一个调用，要么自己发明一个。三件事逐条收口，**新增 1 个工具（114 → 115）**。
+
+### 一、`nextStep`：失败只有一个下一步，否则沉默
+
+每个失败结果带一个**可执行**的下一条命令（`tool` / `arguments` / `why` / `kind`），或者什么都不带。
+
+- **`kind` 是可分支的枚举**：`wait` / `diagnose` / `retry_with_changes` / `escalate` / `stop`。调用方不需要解析英文。
+- **用工具自己的 schema 当裁判**：`validStep()` 拿 `TOOLS` 的 `inputSchema` 校验参数（required、类型、`minLength`）。**发不出的建议一律不发出**——「下一条调用会被拒绝的建议比没有建议更糟」。
+- **绝不能授予权限**：它只由结果推导。需要确认串的步骤必须携带**门要求的那一个**确认串（`denyUnconfirmed` 现在把 `confirmation` 回显进结果），绝不伪造。
+- **不确定的写永远导向读**：`dispatched:true` + `uncertain` 的通用规则是 `browser_read`，不是重试。
+- **顺序即优先级**：`duplicate_suppressed`（`stop`）→ `uncertain_write`（读）→ `explicit_confirmation_required` → `element_covered` / `not_rendered`（`browser_scan_overlays`）→ `ambiguous_target` → `stale_reference` → `verify_failed` → `fetch_cross_origin` → `not_scriptable` / `desktop_target` → `disconnected`（等待）→ `focus_required`（`escalate`，`tool:null`）→ `timeout` → `not_found`。两条看起来都合理的建议，等于没有建议。
+- **抛错也走同一条路**（真机发现）：扩展抛 `Stale element reference` 时，服务返回的是 400 + 一句裸文本，`stale_reference` 规则**永远不可能命中**——因为抛出的异常不会变成结果。现在 `call` 包装器同时处理 `.then` 和 `.catch`，`nextStepForError` 把消息映射回原因码，400 body 带 `nextStep`，`client.js` 不丢弃，MCP 的 `isError` 文本里也带上（保持 `isError:true`，只把 payload 变成可解析的）。
+
+### 二、回执：回答「我点的那一下到底有没有用」
+
+17 个动作类工具现在在**执行前后各取一次页面指纹**（`browser_receipt`），回 `receipt`：`changed` / `urlChanged` / `textDelta` / `interactiveDelta` / `focus{from,to}` / `dialogOpened` / `dialogClosed` / `scrolled` / `digestBefore` / `digestAfter`。
+
+- **指纹必须便宜且浅**：几个计数 + 一个 FNV-1a 哈希，无布局、无文本拷贝（每个动作两次注入，贵的东西要付两遍）。
+- **指纹绝不读输入值**：`hasValue` 而不是 `value`——回执不能成为泄露「用户输入了什么」的唯一通道。
+- **「没观察到变化」不是「没生效」**：`note` 明写「异步更新可能还没渲染，这不是失败证据」。
+
+### 三、重复动作抑制：一次意图 + 一次丢失的确认，不该变成两次真实效果
+
+- **去重键含「动作前的指纹」**：点两次「下一页」中间页面变了，digest 变了，第二次就是**不同动作**——合法重复永不被拦。
+- **只有 `dispatched` 的动作才记入去重表**：被拒绝的点击不能让下一次正确点击看起来像重复。
+- **`duplicate_suppressed` 是拒绝不是错误**：`dispatched:false`、`retryable:false`、带 `duplicateOf{at,ageMs,status}`，审计记为 `denied`，`nextStep.kind = "stop"`。
+- **逃逸阀进 schema**：`allowRepeat:true` 是 `inputSchema` 的属性，不是隐藏字段——否则抑制就是一堵无法申辩的墙。
+- **真机发现的缺陷**：ref 是 `<snapshot uuid>:<index>`，**每次读都换 uuid**，而「读一次再点」正是我们教给 agent 的流程 ⇒ 原始 ref 让抑制在实际使用中**永远不触发**（真机实测：三次相同点击，三次都派发）。现在 `duplicateKey` 剥掉快照 id，只留 index；指纹相同是前提，所以 index 就是「同一个元素」。这个改动只会让「指纹相同的同一动作」被抑制，且 `allowRepeat` 可覆盖——失败方向是「一次可见的拒绝」，不是「一次静默的双提交」。
+
+### 四、`browser_at`：固定形状的读
+
+`browser_read` 返回全部，这对**知道自己要找什么**的调用方是对的，对弱调用方是错的：真机重页面实测 **28582 字节 / 173 个元素 / 6272 字文本**，小模型装不下，于是只看前几行然后照那几行动手——「正确的工具产出错误的点击」就是这么来的。
+
+- 同一个 `browser_read` 通道投影，**不是第二个读取器**（所以「摘要和读一致」是构造性成立，不靠维护）：文本头 ≤420 字、动作 ≤8 条、`counts{elements,actionable,shown}` 说清省掉了多少。
+- **真机同页对比：28582 → 1799 字节（-94%）**。
+- 动作条目只有 `ref/tag/role/label/type/hasValue/readOnly`，**永不带值**；`truncated:true` 明说这是样本；空读是 `status:"failed"` + `nextStep`，不是「这页没有控件」。
+
+### 五、真机验证（4 条只有真跑才会暴露）
+
+1. **`browser_at` 撞上 worker 的白名单**：`Unknown command`——`browser_at` 注册在 `src/tools.js` 却不在 `extension/worker.js:1287` 的分发表里，而**全部 624 条单测仍然通过**。已在 `test/state-digest.test.js` 里加了针对那一行的静态断言（`browser_transient` / `browser_popup` 曾经同样栽过）。
+2. **去重键含快照 uuid**（见§三），单测自己构造 ref，永远看不到这个问题。
+3. **抛错路径没有 `nextStep`**（见§一）。
+4. **`package-lock.json` 是第四处版本号**：`test/version.test.js` 抓到了 `0.27.0 !== 0.28.0`，其余三处都已改对。
+
+`npm test` **624 条全通过**；`node src/cli.js doctor` **12/12、0 条建议**；服务与扩展均为 0.28.0。
+
 ## 0.27.0 — 2026-11-02（**补上实战反馈的 11 项缺口**：读侧已通，这一版修「写」和「省」）
 
 `docs/CAPABILITY-GAP-ANALYSIS-2026-11-01.md` 是一份真实会话的事后复盘：111 个工具、读侧全通，卡点集中在两处——**写操作没有「执行→回读→判定」闭环**，以及**每次调用的固定开销比实际内容还大**。这一版逐条落地，并在真机验证时发现并修掉了 4 个只有真跑一次才会暴露的缺陷。

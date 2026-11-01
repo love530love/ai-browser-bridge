@@ -20,6 +20,7 @@ import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
 import { clearExtensionErrors, describeErrorList } from './extension-errors.js';
 import { analyzeRequest, validateVerifySpec } from './request-risk.js';
+import { withNextStep, nextStepForError } from './next-step.js';
 import { toolIndex } from './tool-index.js';
 import { filterTabs } from './tab-filter.js';
 import { setDevToolsState } from './devtools-menu.js';
@@ -153,6 +154,10 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     },
     firstSteps: [
       'Call browser_queue_status to inspect connected/active/queued state.',
+      'Start with browser_at on any page you do not already know: it answers "where am I and what can I touch" in a fixed shape (short text head, at most 8 actionable elements, counts of what was left out) instead of a page dump you would have to truncate yourself. Use browser_read only when you need the full element set, and browser_find_text/browser_find_element for a targeted look.',
+      'A failed result carries nextStep with one executable call (tool, arguments, why, and a kind of wait/diagnose/retry_with_changes/escalate/stop). Follow it instead of inventing a call. When nextStep is absent the failure has no safe single next call, so re-read rather than guess. nextStep never grants permission: a step that needs a confirmation string carries the one the gate already requires, and no other.',
+      'A write result carries receipt: before/after page fingerprints (url, title, text length, interactive count, focus, dialog, scroll) plus a changed flag. changed:false is not evidence the action failed - an async update may not have rendered yet. Read before concluding either way.',
+      'A repeated write against an unchanged page returns status=duplicate_suppressed with dispatched:false and duplicateOf. That is a refusal, not a failure: read what the first call did, and only repeat with allowRepeat:true when a second real-world effect is what you actually want.',
       'On large or ad-heavy pages, call browser_prepare_action or browser_scan_overlays before writes; call browser_find_text/browser_find_element before full reads.',
       'For shared-tab multi-step writes, call browser_claim_tab with a stable agent name.',
       'Pass the same agent on write tools until browser_release_tab.',
@@ -420,7 +425,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   function finish(job, error, result) {
     clearTimeout(job.timer);
     const status = ['success', 'uncertain', 'failed', 'waiting', 'ready', 'denied', 'not_dispatched'].includes(result?.status) ? result.status : null;
-    audit({ time: new Date().toISOString(), id: job.id, tool: job.name, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : status === 'uncertain' ? 'uncertain' : 'ok', resultStatus: status, dispatched: typeof result?.dispatched === 'boolean' ? result.dispatched : null, errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
+    audit({ time: new Date().toISOString(), id: job.id, tool: job.name, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : status === 'uncertain' ? 'uncertain' : status === 'duplicate_suppressed' ? 'denied' : 'ok', resultStatus: status, dispatched: typeof result?.dispatched === 'boolean' ? result.dispatched : null, errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
     if (error) job.reject(new Error(error)); else job.resolve(result);
   }
   function drop(reason, { keepQueued = false } = {}) {
@@ -498,7 +503,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     const status = result?.status ?? 'failed';
     audit({
       time: new Date().toISOString(), id: randomUUID(), tool: name, tabId: null, agent: args.agent ?? null,
-      outcome: status === 'uncertain' ? 'uncertain' : status === 'denied' ? 'denied' : status === 'success' ? 'ok' : status === 'waiting' ? 'waiting' : 'error',
+      outcome: status === 'uncertain' ? 'uncertain' : status === 'denied' ? 'denied' : status === 'duplicate_suppressed' ? 'denied' : status === 'success' ? 'ok' : status === 'waiting' ? 'waiting' : 'error',
       resultStatus: status, dispatched: typeof result?.dispatched === 'boolean' ? result.dispatched : null,
       errorCategory: typeof result?.reason === 'string' ? result.reason.slice(0, 80) : null,
       ...(name === 'browser_desktop_windows' && Array.isArray(result?.windows) ? { windowCount: result.windows.length } : {}),
@@ -589,6 +594,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       errorCategory: 'explicit_confirmation_required', durationMs: 0
     });
     return { status: 'denied', retryable: false, reason: 'explicit_confirmation_required', dispatched: false,
+      confirmation: expected,
       message: `${toolName} needs confirmation:"${expected}". Nothing was sent to the browser.` };
   }
   // Reading a saved password is answered by the service, never by the browser:
@@ -1220,7 +1226,27 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     };
   }
 
+  // Every tool result leaves through this wrapper, including the ones answered
+  // locally and the ones refused before a queue slot is taken. A caller that is
+  // told "no" and nothing else will either repeat the same call or invent a
+  // different one; both turn a correct tool set into an incorrect task. The step
+  // is derived from the result alone and can never grant authority it does not
+  // already have, so it is attached here rather than in each of the 114 tools.
+  //
+  // Thrown failures take the same route. They are the majority of real ones -
+  // the extension throws for a stale ref, a blocked origin or a navigation in
+  // progress - and leaving them out meant the guidance covered the rarer half.
   function call(name, args, owner = null, context = {}) {
+    const out = callInner(name, args, owner, context);
+    return Promise.resolve(out)
+      .then(value => withNextStep(name, args ?? {}, value))
+      .catch(error => {
+        const step = nextStepForError(name, args ?? {}, error?.message ?? '');
+        if (step) error.nextStep = step;
+        throw error;
+      });
+  }
+  function callInner(name, args, owner = null, context = {}) {
     const tool = validateCall(name, args);
     if (name === 'browser_agent_guide') return agentGuide();
     if (name === 'browser_capabilities') return capabilities();
@@ -1405,7 +1431,12 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         return json(res, 200, { result: await call(data.name, data.arguments ?? {}) });
       }
       return json(res, 404, { error: 'Not found' });
-    } catch (e) { if (!res.destroyed) json(res, 400, { error: e.message }); }
+    } catch (e) {
+      // The next step for a thrown failure travels with it. Without this the
+      // caller gets a 400 with a sentence and no machine-readable move, which is
+      // exactly the state the guidance exists to end.
+      if (!res.destroyed) json(res, 400, { error: e.message, ...(e.nextStep ? { nextStep: e.nextStep } : {}) });
+    }
   });
   server.requestTimeout = 10000;
   server.headersTimeout = 5000;

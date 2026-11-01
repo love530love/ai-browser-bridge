@@ -6,7 +6,7 @@
 // primitive, does it need the foreground, and what is the fallback" without any
 // model, so it keeps working when every optional service is offline.
 
-const READ = ['browser_read', 'browser_find_text', 'browser_find_element'];
+const READ = ['browser_at', 'browser_read', 'browser_find_text', 'browser_find_element'];
 const WRITE = ['browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified'];
 const PICK = ['browser_select', 'browser_choose', 'browser_pick'];
 const COORDINATE = ['browser_prepare_coordinate', 'browser_action'];
@@ -172,7 +172,7 @@ const INTENTS = [
   { id: 'read-or-locate', match: /读取|读页|内容|文本|查找|定位|read|content|text|find|locate/i,
     tools: READ, focusRequired: false,
     why: 'Reads the live DOM; no foreground requirement.',
-    backgroundSafe: true, prefer: 'browser_find_text before a full read on large pages.', fallback: READ },
+    backgroundSafe: true, prefer: 'browser_at first when you do not know the page: it returns a bounded text head, at most 8 actionable elements and the counts of what it left out, so the answer does not shrink your context. Use browser_find_text for a targeted look on large pages, and browser_read only when you need the full element set.', fallback: READ },
   { id: 'chrome-internal', match: /chrome:\/\/|设置|扩展|证书|代理|settings|extensions|certificate|proxy/i,
     tools: ['browser_certificates', 'browser_protected_ui_plan', 'browser_desktop_windows', 'browser_native_snapshot', 'browser_native_action'], focusRequired: true,
     why: 'Chrome internal pages are not ordinary DOM targets; they are driven through Windows UI Automation, which operates the real window and therefore needs it in front. Certificates are the exception and no longer need that path at all.',

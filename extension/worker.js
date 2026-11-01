@@ -13,6 +13,13 @@ import { createNativeMessaging } from './native-messaging.js';
 import { createIdentity } from './identity.js';
 import { runAuthorityTool } from './browser-authority.js';
 import { reuseKey, samePage, visibleTab, isInternalPage, describeTab, createTabOwnership } from './tab-identity.js';
+import { RECEIPT_TOOLS, DEDUPE_TOOLS, DUPLICATE_WINDOW_MS, duplicateKey, describeChange, suppressionResult } from './receipt.js';
+import { digestState } from './state-digest.js';
+
+// Recent dispatched actions, keyed by tool + tab + page state + arguments. Lives
+// for the worker lifetime on purpose: an extension reload clears it, and a
+// suppression that survives a reload would be a wall nobody could see.
+const recentActions = new Map();
 let socket = null;
 let keepalive = null;
 let connectDeadline = null;
@@ -1277,7 +1284,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     }
     return await cdpAdvanced.run(name, args, { tab, page, guarded });
   }
-  if (!['browser_read', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch', 'browser_transient', 'browser_popup'].includes(name) && !cdpAdvanced.names.has(name)) throw new Error('Unknown command');
+  if (!['browser_read', 'browser_at', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch', 'browser_transient', 'browser_popup'].includes(name) && !cdpAdvanced.names.has(name)) throw new Error('Unknown command');
   const pageWriteTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_select', 'browser_choose', 'browser_pick', 'browser_popup']);
   if (pageWriteTools.has(name) && !(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
   // A login submit is the one moment where a single frame is not enough: the
@@ -1363,12 +1370,60 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       }
     };
   }
+  // browser_at is browser_read with a bounded projection, not a second reader:
+  // it runs the same page operation with the same arguments, so the summary can
+  // never describe a different page than browser_read would have. Keeping the
+  // reader single is what makes "the digest agrees with the read" true by
+  // construction instead of by maintenance.
+  if (name === 'browser_at') {
+    const readArgs = {
+      mode: args.mode === 'cheap' ? 'cheap' : 'normal',
+      ...(Number.isInteger(args.maxChars) ? { maxChars: args.maxChars } : {}),
+      ...(Number.isInteger(args.maxElements) ? { maxElements: args.maxElements } : {})
+    };
+    const readTarget = Number.isInteger(args.frame) ? { tabId: tab.id, frameIds: [args.frame] } : { tabId: tab.id };
+    const [readOut] = await chrome.scripting.executeScript({ target: readTarget, func: pageOperation, args: ['browser_read', readArgs, config.allowedOrigins, config.allSites] });
+    if (readOut?.error) throw new Error(readOut.error.message || 'Page read failed');
+    if (readOut?.result?.__aibError) throw new Error(readOut.result.__aibError);
+    return digestState(readOut?.result ?? null, { tabId: tab.id, maxActions: args.maxActions, maxTextChars: args.maxTextChars });
+  }
   const target = Number.isInteger(routedArgs.frame) ? { tabId: tab.id, frameIds: [routedArgs.frame] } : { tabId: tab.id };
+  // Taking a fingerprint is one extra injection; two per action is the price of
+  // every caller being able to tell "it worked" from "I sent something".
+  const readFingerprint = async () => {
+    try {
+      const [out] = await chrome.scripting.executeScript({ target, func: pageOperation, args: ['browser_receipt', {}, config.allowedOrigins, config.allSites] });
+      if (out?.result?.__aibError) return null;
+      return out?.result ?? null;
+    } catch {
+      return null;
+    }
+  };
+  const wantsReceipt = RECEIPT_TOOLS.has(name);
+  const before = wantsReceipt ? await readFingerprint() : null;
+  if (wantsReceipt && DEDUPE_TOOLS.has(name) && before && routedArgs.allowRepeat !== true) {
+    const key = duplicateKey(name, tab.id, routedArgs, before.digest);
+    const prior = recentActions.get(key);
+    if (prior && Date.now() - prior.at < DUPLICATE_WINDOW_MS) {
+      return suppressionResult({ name, before, prior, now: Date.now() });
+    }
+  }
   const [result] = await chrome.scripting.executeScript({ target, func: pageOperation, args: [name, routedArgs, config.allowedOrigins, config.allSites] });
   if (result?.error) throw new Error(result.error.message || 'Page operation failed');
   if (result?.result?.__aibError) throw new Error(result.result.__aibError);
   if (result?.result === undefined) throw new Error('No page result. Page may have navigated; inspect before retrying.');
-  return result.result;
+  const value = result.result;
+  if (!wantsReceipt) return value;
+  const after = await readFingerprint();
+  const receipt = describeChange(before, after);
+  // Only a dispatched action is worth remembering: a refused click must not
+  // make the next, correct click look like a duplicate.
+  const dispatched = value?.dispatched === true || value?.clicked === true || value?.filled === true || value?.status === 'success';
+  if (before && dispatched) {
+    recentActions.set(duplicateKey(name, tab.id, routedArgs, before.digest), { at: Date.now(), status: value?.status ?? 'success' });
+    while (recentActions.size > 64) recentActions.delete(recentActions.keys().next().value);
+  }
+  return { ...value, receipt };
 }
 // A WebSocket constructor that fails writes a console error the worker cannot
 // catch: every reconnect attempt against a stopped service left one more

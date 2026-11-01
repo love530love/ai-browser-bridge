@@ -518,6 +518,61 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
   };
   const transientStore = ensureTransientCapture();
+  // ---------------------------------------------------------------------------
+  // Action receipts.
+  //
+  // "I clicked it" and "it did something" are different facts, and only the
+  // second one is what a caller needs. Without this, the only way to learn
+  // whether a click landed was to read the whole page again and compare it by
+  // eye - which a small model cannot do reliably, so it re-clicks instead.
+  //
+  // The fingerprint is deliberately cheap and deliberately shallow: a handful of
+  // counts plus a hash, no layout, no text copy. It is taken twice per action by
+  // the worker (before and after), so anything expensive here is paid twice on
+  // every write.
+  //
+  // It never reads input values or text content: a receipt must not become the
+  // one path that leaks what was typed.
+  // ---------------------------------------------------------------------------
+  const receiptDescriptor = el => {
+    if (!el || el === document.body || el === document.documentElement) return null;
+    const tag = el.tagName ? el.tagName.toLowerCase() : 'node';
+    const id = el.id ? `#${el.id}` : '';
+    const name = !id && el.getAttribute?.('name') ? `[name="${el.getAttribute('name')}"]` : '';
+    const role = el.getAttribute?.('role') ? `[role=${el.getAttribute('role')}]` : '';
+    return `${tag}${id}${name}${role}`.slice(0, 120);
+  };
+  const pageFingerprint = () => {
+    const body = document.body;
+    const textLength = body ? (body.textContent || '').length : 0;
+    let interactive = 0;
+    try {
+      interactive = document.querySelectorAll('a[href],button,input,select,textarea,[role="button"],[role="link"],[contenteditable="true"]').length;
+    } catch { interactive = 0; }
+    let dialog = null;
+    try {
+      const found = document.querySelector('[aria-modal="true"],[role="dialog"],[role="alertdialog"]');
+      dialog = found ? receiptDescriptor(found) : null;
+    } catch { dialog = null; }
+    let hash = 2166136261;
+    const feed = value => {
+      const text = String(value);
+      for (let i = 0; i < text.length; i += 1) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+    };
+    feed(location.href); feed(document.title); feed(textLength); feed(interactive); feed(dialog ?? '');
+    return {
+      url: location.href,
+      title: document.title,
+      readyState: document.readyState,
+      textLength,
+      interactive,
+      focus: receiptDescriptor(document.activeElement),
+      dialog,
+      scroll: { x: Math.round(scrollX || 0), y: Math.round(scrollY || 0) },
+      digest: (hash >>> 0).toString(16).padStart(8, '0')
+    };
+  };
+  if (name === 'browser_receipt') return pageFingerprint();
   if (name === 'browser_transient') {
     const action = args.action || 'read';
     const store = transientStore || ensureTransientCapture();

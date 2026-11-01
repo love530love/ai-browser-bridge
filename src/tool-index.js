@@ -13,7 +13,7 @@
 
 export const TOOL_GROUPS = [
   { id: 'read', purpose: '读页面、读元素、拿 ref', tools: [
-    'browser_read', 'browser_observe', 'browser_ax_snapshot', 'browser_find_text',
+    'browser_at', 'browser_read', 'browser_observe', 'browser_ax_snapshot', 'browser_find_text',
     'browser_find_element', 'browser_shadow_tree', 'browser_frames', 'browser_performance'
   ] },
   { id: 'act', purpose: '点、填、选、按键、滚动', tools: [

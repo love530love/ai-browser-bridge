@@ -1,16 +1,26 @@
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// browser_at reads the page through the same operation as browser_read, so it
+// times out the same way and deserves the same degrade step. It is a separate
+// branch rather than the same argument set because its schema is deliberately
+// narrower: sending maxTextNodes or budgetMs to it is an unknown-argument
+// rejection, and a recovery step that gets rejected is worse than none.
+const DEGRADABLE_READS = new Set(['browser_read', 'browser_at']);
+
 export function nextReadArgs(name, args, result) {
-  if (name !== 'browser_read' || result?.reason !== 'read_timeout') return args;
+  if (!DEGRADABLE_READS.has(name) || result?.reason !== 'read_timeout') return args;
   if (args.mode === 'cheap') return args;
-  return {
+  const next = {
     ...args,
     mode: 'cheap',
     maxChars: Math.min(args.maxChars ?? 6000, 6000),
-    maxElements: Math.min(args.maxElements ?? 120, 120),
-    maxTextNodes: Math.min(args.maxTextNodes ?? 1000, 1000),
-    budgetMs: Math.min(args.budgetMs ?? 1500, 1500)
+    maxElements: Math.min(args.maxElements ?? 120, 120)
   };
+  if (name === 'browser_read') {
+    next.maxTextNodes = Math.min(args.maxTextNodes ?? 1000, 1000);
+    next.budgetMs = Math.min(args.budgetMs ?? 1500, 1500);
+  }
+  return next;
 }
 
 export async function callWithWaitingRecovery({ name, args = {}, rawCall, maxWaitMs = 120000, pause = sleep }) {
