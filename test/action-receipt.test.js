@@ -119,10 +119,24 @@ test('the worker takes the fingerprint on both sides and only remembers dispatch
 
 test('the page-side fingerprint never reads what was typed', () => {
   const page = readFileSync(new URL('../extension/page.js', import.meta.url), 'utf8');
-  const start = page.indexOf('const pageFingerprint = () => {');
+  const start = page.indexOf('const pageFingerprint = (');
   assert.ok(start > 0, 'pageFingerprint must exist');
   const body = page.slice(start, page.indexOf('if (name === \'browser_receipt\')'));
   assert.ok(!/\.value\b/.test(body), 'a receipt must not include input values');
   assert.ok(!/innerText/.test(body), 'innerText would force layout twice per action');
   assert.match(body, /digest/, 'the comparison needs a cheap digest');
+  // A checkbox flipping changes none of url/title/text-length/interactive, so a
+  // digest built from those alone reported changed:false for an action that
+  // visibly changed the page. The control state has to be part of the digest.
+  assert.match(body, /controlState/, 'the digest must include toggle state');
+});
+
+test('the acted-on element is reported by state, never by value', () => {
+  const page = readFileSync(new URL('../extension/page.js', import.meta.url), 'utf8');
+  const start = page.indexOf('const watchState = ref => {');
+  assert.ok(start > 0, 'watchState must exist');
+  const body = page.slice(start, page.indexOf('const pageFingerprint = ('));
+  assert.match(body, /valueLength/, 'the length is the only signal a caller needs');
+  assert.match(body, /ariaChecked/, 'aria state is what a div-based toggle reports');
+  assert.ok(!/value:\s*[^,\n]*el\.value/.test(body), 'watchState may read the length, never the value itself');
 });

@@ -16,6 +16,7 @@ import { reuseKey, samePage, visibleTab, isInternalPage, describeTab, createTabO
 import { RECEIPT_TOOLS, DEDUPE_TOOLS, DUPLICATE_WINDOW_MS, duplicateKey, describeChange, suppressionResult } from './receipt.js';
 import { applyObserveBudget } from './observe-budget.js';
 import { digestState } from './state-digest.js';
+import { evalInPage, EVAL_MAX_EXPRESSION_CHARS } from './eval-main.js';
 
 // Recent dispatched actions, keyed by tool + tab + page state + arguments. Lives
 // for the worker lifetime on purpose: an extension reload clears it, and a
@@ -891,6 +892,12 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     const maxMatches = args.maxMatches ?? 10;
     const allMatches = available.flatMap(item => (item.result.matches || []).map(match => ({ ...match, frameId: item.frameId })));
     const allNearbyElements = available.flatMap(item => (item.result.nearbyElements || []).map(element => ({ ...element, frameId: item.frameId })));
+    // Only present when includeMatchElement was asked for, which is exactly the
+    // shape of field a projection forgets. It is the element that holds the
+    // matched text, with a usable ref: without it "the words are on screen but
+    // there is nothing to click" stays a dead end.
+    const matchElements = available.flatMap(item => (item.result.matchElements || []).map(element => ({ ...element, frameId: item.frameId }))).slice(0, args.maxMatchElements ?? 5);
+    const matchElementsPartial = available.some(item => item.result.matchElementsPartial === true);
     const matches = allMatches.slice(0, maxMatches);
     const nearbyElements = allNearbyElements.slice(0, 20);
     const frameErrorCount = frameResults.length - available.length;
@@ -926,6 +933,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       truncated: maxReached,
       matches,
       nearbyElements,
+      ...(args.includeMatchElement ? { matchElements, matchElementsPartial } : {}),
       ...(notRendered ? { notRendered } : {}),
       diagnostics,
       frameResults,
@@ -1096,6 +1104,84 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     await chrome.tabs.remove(tab.id);
     await tabOwnership.forget(tab.id);
     return { closed: true };
+  }
+  if (name === 'browser_eval') {
+    const expression = typeof args.expression === 'string' ? args.expression : '';
+    if (!expression.trim()) throw new Error('browser_eval needs a non-empty expression. Nothing was evaluated.');
+    if (expression.length > EVAL_MAX_EXPRESSION_CHARS) {
+      throw new Error(`browser_eval expression is ${expression.length} characters, over the ${EVAL_MAX_EXPRESSION_CHARS} limit. It was not truncated: a truncated expression would run as a different program.`);
+    }
+    const options = {
+      readOnly: args.mode !== 'write',
+      maxPreviewChars: Math.min(8000, Math.max(200, Number(args.maxChars) || 4000))
+    };
+    const shape = (reply, channel) => {
+      if (!reply || typeof reply !== 'object') {
+        return { status: 'failed', ok: false, retryable: false, channel, reason: 'no_result',
+          message: 'The evaluation channel returned nothing. Nothing is known about whether the expression ran; do not repeat it blindly.' };
+      }
+      const out = { ...reply, channel, tabId: tab.id };
+      delete out.valueText;
+      delete out.valueIsJson;
+      if (reply.ok === true) {
+        const text = typeof reply.valueText === 'string' ? reply.valueText : '';
+        let value = text;
+        try { value = JSON.parse(text); } catch { value = text; }
+        out.value = value;
+        out.status = 'success';
+      } else {
+        out.status = 'failed';
+      }
+      out.retryable = false;
+      return out;
+    };
+    // Channel 1: the page's own world, through the scripting API. No debugger
+    // attachment, no banner, no foreground, works on a background tab.
+    let first = null;
+    try {
+      const [frame] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id }, world: 'MAIN', func: evalInPage, args: [expression, options]
+      });
+      first = frame?.result ?? null;
+    } catch (error) {
+      first = { ok: false, status: 'failed', reason: 'injection_failed',
+        exception: { name: 'InjectionError', message: String(error?.message ?? error).slice(0, 600) } };
+    }
+    if (first?.ok === true) return shape(first, 'main_world');
+    // Channel 2: CDP, only when the page's CSP refused eval in its own world.
+    // Runtime.evaluate is not subject to page CSP, which is the whole reason
+    // this fallback exists. It costs a debugger attach, so it is not the default.
+    const cspBlocked = first?.reason === 'eval_blocked_by_page_csp';
+    const canAttach = typeof tab.url === 'string' && /^https?:/i.test(tab.url);
+    if (!cspBlocked || !canAttach) {
+      const reply = shape(first, 'main_world');
+      if (!cspBlocked && first?.reason === 'injection_failed' && !canAttach) {
+        reply.message = 'This page cannot be scripted by an extension: chrome:// pages, the Web Store and PDF viewers refuse injection, and a debugger cannot attach to them either. Use the desktop path (browser_desktop_windows, browser_native_action) for browser UI, or operate the page through its own controls.';
+      }
+      return reply;
+    }
+    try {
+      const wrapper = `(${evalInPage.toString()})(${JSON.stringify(expression)}, ${JSON.stringify(options)})`;
+      const result = await withTabDebugger(tab, send => send('Runtime.evaluate', {
+        expression: wrapper, returnByValue: true, awaitPromise: true, userGesture: true, silent: false
+      }));
+      if (result?.exceptionDetails) {
+        return { status: 'failed', ok: false, retryable: false, channel: 'cdp',
+          reason: 'expression_threw',
+          exception: { name: result.exceptionDetails.exception?.className ?? null,
+            message: String(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text ?? '').slice(0, 1200) },
+          message: 'The expression threw. Nothing was retried.' };
+      }
+      const value = result?.result?.value;
+      if (value && typeof value === 'object') return shape(value, 'cdp');
+      return { status: 'failed', ok: false, retryable: false, channel: 'cdp', reason: 'unexpected_reply',
+        message: 'The debugger channel answered with something other than the evaluation envelope. Nothing is known about whether the expression ran.' };
+    } catch (error) {
+      return { status: 'failed', ok: false, retryable: false, channel: 'cdp', reason: 'debugger_channel_failed',
+        mainWorldFailure: first?.reason ?? null,
+        exception: { name: 'DebuggerError', message: String(error?.message ?? error).slice(0, 600) },
+        message: 'Both channels failed: the page refused eval under its CSP, and the debugger fallback could not run. Nothing is known about whether the expression ran; do not repeat it blindly.' };
+    }
   }
   if (name === 'browser_debugger') {
     const action = args.action;
@@ -1291,7 +1377,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     }
     return await cdpAdvanced.run(name, args, { tab, page, guarded });
   }
-  if (!['browser_read', 'browser_at', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch', 'browser_transient', 'browser_popup'].includes(name) && !cdpAdvanced.names.has(name)) throw new Error('Unknown command');
+  if (!['browser_read', 'browser_at', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch', 'browser_transient', 'browser_popup', 'browser_eval'].includes(name) && !cdpAdvanced.names.has(name)) throw new Error('Unknown command');
   const pageWriteTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_select', 'browser_choose', 'browser_pick', 'browser_popup']);
   if (pageWriteTools.has(name) && !(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
   // A login submit is the one moment where a single frame is not enough: the
@@ -1399,7 +1485,11 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   // every caller being able to tell "it worked" from "I sent something".
   const readFingerprint = async () => {
     try {
-      const [out] = await chrome.scripting.executeScript({ target, func: pageOperation, args: ['browser_receipt', {}, config.allowedOrigins, config.allSites] });
+      // The ref the caller acted on travels with the fingerprint so the receipt
+      // can answer "did that control change" directly. Without it the only
+      // signal is the page digest, which cannot see a checkbox flip.
+      const watchRef = typeof routedArgs.ref === 'string' ? routedArgs.ref : null;
+      const [out] = await chrome.scripting.executeScript({ target, func: pageOperation, args: ['browser_receipt', watchRef ? { watchRef } : {}, config.allowedOrigins, config.allSites] });
       if (out?.result?.__aibError) return null;
       return out?.result ?? null;
     } catch {

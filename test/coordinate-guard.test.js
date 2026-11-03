@@ -20,9 +20,42 @@ function fixture() {
   const prepare = (opts = {}) => run('browser_prepare_coordinate', { x: 50, y: 50, ...opts }, [], true);
   const validate = (token, opts = {}) => run('browser_validate_coordinate', { coordinateToken: token, x: 50, y: 50, ...opts }, [], true);
   return { prepare, validate, dialog, context, document, el, cover: () => { hit = { tagName: 'DIV', textContent: 'Cover', isConnected: true, getAttribute: () => null, closest: () => null }; },
-    hide: () => { visibilityState = 'hidden'; focused = false; }, show: () => { visibilityState = 'visible'; focused = true; }, expire: () => { now += 15001; } };
+    hide: () => { visibilityState = 'hidden'; focused = false; }, show: () => { visibilityState = 'visible'; focused = true; }, expire: () => { now += 120001; } };
 }
 
+test('a prepared token outlives one agent round trip', async () => {
+  // 15 seconds was shorter than the gap between two calls in one real task
+  // (measured 10-20s), so prepare-and-tap failed about half the time and the
+  // failures looked like bad coordinates. Two minutes, and the caller can ask.
+  const f = fixture(), p = await f.prepare();
+  assert.equal(p.expiresInMs, 120000);
+  f.context.Date.now = () => 100 + 30000;
+  assert.equal((await f.validate(p.coordinateToken)).status, 'ready');
+  const short = await f.prepare({ ttlMs: 5000 });
+  assert.equal(short.expiresInMs, 5000);
+});
+
+test('a refused token says whether it expired, was used, or never existed', async () => {
+  // One reason string for three different situations made a caller re-prepare
+  // when it had simply reused a token, and retry a dead one forever.
+  const f = fixture();
+  const first = await f.prepare({ ttlMs: 5000 });
+  assert.equal((await f.validate(first.coordinateToken)).status, 'ready');
+  const reused = await f.validate(first.coordinateToken);
+  assert.equal(reused.reason, 'coordinate_token_consumed');
+  assert.equal(reused.tokenState, 'consumed');
+  assert.equal(reused.dispatched, false);
+
+  const expiring = await f.prepare({ ttlMs: 5000 });
+  f.context.Date.now = () => 100 + 6000;
+  const expired = await f.validate(expiring.coordinateToken);
+  assert.equal(expired.reason, 'coordinate_token_expired');
+  assert.equal(expired.tokenLifetimeMs, 5000);
+
+  const invented = await f.validate('00000000-0000-4000-8000-000000000000');
+  assert.equal(invented.reason, 'coordinate_token_never_issued');
+  assert.equal(invented.dispatched, false);
+});
 test('coordinate token is single-use and valid only for unchanged target', async () => {
   const f = fixture(), p = await f.prepare();
   assert.ok(p.coordinateToken);

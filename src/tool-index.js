@@ -12,8 +12,8 @@
 // renamed or removed.
 
 export const TOOL_GROUPS = [
-  { id: 'read', purpose: '读页面、读元素、拿 ref', tools: [
-    'browser_at', 'browser_read', 'browser_observe', 'browser_ax_snapshot', 'browser_find_text',
+  { id: 'read', purpose: '读页面、读元素、拿 ref；扫不到就 eval', tools: [
+    'browser_at', 'browser_read', 'browser_eval', 'browser_observe', 'browser_ax_snapshot', 'browser_find_text',
     'browser_find_element', 'browser_shadow_tree', 'browser_frames', 'browser_performance'
   ] },
   { id: 'act', purpose: '点、填、选、按键、滚动', tools: [
@@ -74,7 +74,7 @@ export const TOOL_GROUPS = [
 const ALIASES = {
   network: ['api', '接口', 'post', 'get', 'http', '请求', '回读', 'verify', '写操作', 'fetch'],
   act: ['点击', '输入', '填写', 'click', 'fill', 'type', '提交', 'submit'],
-  read: ['读', '文本', '元素', 'text', 'dom', '内容'],
+  read: ['读', '文本', '元素', 'text', 'dom', '内容', 'js', 'eval', 'evaluate', '脚本', 'script', 'expression', '执行'],
   overlay: ['遮挡', '弹窗', '蒙层', 'covered', 'popup', 'toast'],
   tab: ['标签页', '窗口', 'tab', 'navigate', '打开'],
   auth: ['登录', '密码', 'login', 'password', 'cookie', 'token'],

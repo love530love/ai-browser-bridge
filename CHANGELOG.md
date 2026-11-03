@@ -1,3 +1,126 @@
+## 0.30.0 — 2026-11-03（**一次真实付费下单暴露的 11 个缺陷**：能力一直在，文档说没有）
+
+0.29.0 修的是「文档承诺的路径没有工具能走到」。这一版是它的反面：**工具一直都在，文档写着「不支持」**。
+
+来源是 `FIELD-REPORT-20261103-veryai-cloud-order.md` —— 一次真实的昆仑芯云主机下单，**任务完成了，代价是
+45 分钟 + 63.52 元，而这 45 分钟里至少 35 分钟是白花的**。报告里最重的一句话是：
+
+> `evaluate` 一直就在那儿，只是文档说「不支持脚本执行」。
+
+**新增 1 个工具（115 → 116）**，其余 10 项全是既有工具的缺陷。
+
+### P0-0：`evaluate` 存在但被文档藏起来 —— 零开发成本、最高收益的一改
+
+- **现象**：`browser_debugger` 的 `action:"evaluate"` 从来就能在页面的 **GLOBAL context** 执行表达式，
+  不需要断点、不需要 DevTools 面板（返回体带 `evaluatedOn:"global"`）。而 `browser_devtools` 的描述写着
+  **"Console/script execution are not implemented"**。调用方读到这句，就再也没试过。
+- **代价**：40 分钟里反复用 `read` / `find_element` / `pick` 试一个 `div` 卡片，全部失败；最后靠人肉坐标点击。
+  错选了 8 卡整机而不是单卡，**多花 63.52 元**。
+- **修法**：新增 **`browser_eval`** 一等工具（`tabId` + `expression` + `mode:"read"|"write"`），
+  同时改正两处误导性描述：`browser_devtools` 现在说「本工具只开/关/查面板，不执行脚本，要执行请用
+  `browser_eval`」，`browser_debugger` 明写「`evaluate` 无需断点、在 GLOBAL context 执行、`evaluatedOn:"global"`，
+  但优先用 `browser_eval`」。
+- **两条通道、一个实现**：`extension/eval-main.js` 的 `evalInPage` 是**自包含函数**（无 import、无外部引用，
+  否则 `toString()` 传不过去），同时被 `chrome.scripting.executeScript({world:'MAIN'})`（快、无 banner、无前台、
+  后台标签可用）和 CDP `Runtime.evaluate`（绕页面 CSP）调用。**只有**主世界那条报
+  `eval_blocked_by_page_csp` 时才降级到 CDP；回复里 `channel:"main_world"|"debugger"` 说明走的哪条。
+- **读模式是护栏不是沙箱**：`mode:"read"` 用 `const fetch = guard ? undefined : bind(g.fetch)` 这类
+  `const` 遮蔽 + 直接 `eval`，让表达式解析到作用域内绑定而非全局。返回体明说 `readOnlyIsGuardrail:true`——
+  表达式仍可经 iframe 绕开，这是防误触，不是安全边界。
+- **密码框**：`preview()` 走 `describeNode()`，密码框给 `valueLength` + `secret:true`，**`value` 恒为 null**。
+- **真机实测**：一次调用完成「选规格 + 读价格 + 下单」——
+  ```json
+  {"channel":"main_world","elapsedMs":2,"ok":true,
+   "value":"{\"picked\":\"1 x 昆仑芯 P800\",\"price\":\"7.94 元/时\",\"counter\":\"ordered spec=1\"}"}
+  ```
+  选对了单卡（报告里错选的是 8 卡整机），**一次调用、2 毫秒**。
+
+### P0-1：modal 里的元素对 read / find_element 完全不可见
+
+- **现象**：`browser_read` 返回 `elementsReturned:76`，**全部是背景页**，modal 里一个控件都没有；
+  `browser_shadow_tree` 拿不到 `div` 卡片；同一 DOM 状态两次扫描给出不同结论（76 vs 79 候选，
+  `found:false` 之后又 `found:true`）。
+- **根因不是「扫得不够」**：modal 追加在 `<body>` 末尾，**DOM 顺序扫描在到达它之前就把元素预算花光了**。
+  加预算只会让背景页多扫一点。修法是 **overlay-first**：先用 `OVERLAY_SELECTOR` +
+  `overlayCandidates()` 定位最上层容器（保留最外层，antd 的 `.ant-modal-wrap` 包着 dialog；按 `zIndex`/`area` 排序），
+  先扫它，再扫 `document`。
+- **`browser_read` 新增 `scope:"auto"|"overlay"|"page"`**（默认 `auto` = overlay-first），返回体带
+  `scopeUsed` / `overlay:{selector,zIndex,controls}` / `diagnostics.overlayControls`。
+  overlay 里 0 控件时给 **`overlaySettling`** —— 那是「渲染还没到」，不是「页面没有这个元素」。
+- **`browser_shadow_tree` 新增 `kind:"clickable"`**：React 的 `onClick` 挂在 `<div>` 上，标记里
+  **一个属性都不留**（无 href、无 role、无 tabindex、无 onclick），唯一的痕迹是 `cursor:pointer`——
+  而 `cursor` 会继承，所以 `clickableContainer()` 必须跳过「祖先已是 pointer」，最外层可点元素胜出。
+  `maxControls` 上限 200 → 400，新增 `includeClickable` / `budgetMs` / `stoppedBy`，`seenElements` 去重，
+  并同样 overlay-first。
+- **扫描结论不一致**：`findElementCandidates` 的 `controlDeadline` 从 250ms 提到 600ms（那个截止时间
+  曾让同一 DOM 两次给出不同答案），并新增 `concluded: !partial` —— 调用方现在能区分「扫完了没有」和「没找到」。
+- **真机实测**：`scope:"page"` → 300 个元素、modal 内 **0** 个；默认 `auto` → `scopeUsed:"overlay-first"`、
+  modal 内 3 个控件排在最前且带 ref。`shadow_tree` → `clickableCount:2`，
+  `8 x 昆仑芯 P800 ref=…:1` / `1 x 昆仑芯 P800 ref=…:2`，点 `:2` 后 `selected=1 x 昆仑芯 P800`。
+
+### P0-2：坐标 token 15 秒、且不给任何几何信息
+
+- **现象**：`prepare_coordinate` 的 token 硬编码 15 秒过期，7 次 `prepare → Tap` 实测成功率约 50%；
+  返回体里没有 `rect`、没有路径，「点歪了」时调用方无从判断歪了多少。
+- **修法**：TTL 默认 **120 秒**，且 `ttlMs`（5000–300000）**记在 token 记录上**（`expiresAt`），
+  不是记在 `browser_validate_coordinate` 的调用参数上——`ttlMs:5000` 铸的 token 不能因为下次调用没传而活成 120 秒。
+- **拒绝原因三分**：`missing`（没传）/ `expired`（过期）/ `consumed`（已用过）以前共用一句话，
+  现在靠 `retired` Map 记住退役原因，`reason` 分别为 `coordinate_token_never_issued` / `_expired` / `_consumed`。
+- **`targetEvidence` 扩为** `{tag,role,label,rowText,rect,path,textLength,childCount}`，新增
+  `offsetFromCenter`（点击坐标离目标中心多远）与 `targetLooksLikeContainer`（点到的是容器不是目标）。
+- **真机实测**：`expiresInMs:120000`；`target:{rect:{height:45,left:1020,top:631,width:520},
+  path:"html[0]/body[1]/div[23]/div[0]/div[2]",textLength:12}`，`offsetFromCenter:{dx:0,dy:0}`，
+  `targetLooksLikeContainer:false`。
+
+### P0-3：`changed:false` 的假阴性 —— 对 checkbox 是数据损坏风险
+
+- **现象**：`browser_click` 勾上 checkbox，回执说 `changed:false`。指纹只算 url / title / 文本长度 /
+  交互控件数，**checkbox 翻转这四项一个都不变**。调用方据此重复点击或反向操作，把用户的表单改坏。
+- **修法两层**：① 指纹里加 `controlState`（全页 toggle 状态的哈希，上限 4000 个控件）；
+  ② 对**被操作的那个元素**单独回读 `checked`/`aria-checked`/`aria-selected`/`aria-expanded`/`aria-pressed`/`disabled`，
+  给出 `stateBefore`/`stateAfter`/`stateChanged`/`stateFieldsChanged`，**独立于 digest**。
+  `changed` 现在是 `digest 变了 || stateChanged`。
+- **`note` 会说清证据强度**：「The control changed (`checked`) even though the page digest did not. Read
+  `stateAfter` for the observed value; that is a DOM reading, not proof the site accepted it.」
+- **真机实测**：`changed:true, stateChanged:true, fields:["checked"], false → true`。
+
+### P1 / P2：三个「报错不指向原因」的缺陷
+
+- **P1-4 `browser_pick` 对卡片组报 `Exact visible option not found`**：现在 `pickFailureHint()` 会把
+  **实际看到的候选文本列出来**，并指名替代路径：「This page also has clickable non-option elements such as
+  `8 x 昆仑芯 P800`, `1 x 昆仑芯 P800`. If the target is one of those, it is a card or tile group rather than a
+  picker: read the page with `scope:"overlay"` … or call `browser_shadow_tree` … or `browser_eval`.
+  **Do not keep retrying `browser_pick` with different text.**」
+- **P1-5 `find_text` 的 `nearbyElements` 不含匹配元素本身**（返回了客服、分页 1/2、地区按钮）：
+  新增 `includeMatchElement` → `matchElements`（TreeWalker 找**包含匹配文本的最深可见元素**，发 ref、给 rect、
+  标 `covered`）。**这个字段第一版真机是 `undefined`** —— worker 的 `frameResults` 投影白名单没带它，
+  正是 MEMORY 里记的第 2 类缺陷（「只在失败时出现的字段」）的重演，已加静态断言锁住。
+- **P2-6 `element_covered` 建议按 Escape**：目标在 modal 内时，按 Escape 会**毁掉目标**。现在按
+  「同 dialog / 目标在 dialog 之后 / 普通遮挡」三分类给 `suggestedAction`，返回 `coveredByIsDialog` /
+  `targetInsideCoverDialog`。真机点背景按钮 → `coveredByIsDialog:true, targetInsideCoverDialog:false`，
+  提示「Escape would close the dialog, which is a change the caller did not ask for」。
+- **P2-7 ref 一次性**：0.29.0 已修，本版改掉 `next-step` 里残留的「Refs are one-shot」措辞。
+
+### 引导层同步（不然弱调用方仍然走不到）
+
+- `src/capability-guide.js` 新增 intent **`script-or-escape-hatch`**，match 含
+  「执行(一段)?(脚本|js|javascript)｜跑(一段)?脚本｜求值｜eval(uate)?｜表达式｜**扫不到｜扫不着｜点不中｜点不到｜
+  读不到｜看不见｜拿不到 ref｜工具看不见**」——**这些正是调用方卡住时真正会说的话**。
+  `backgroundSafe:true`，fallback `browser_eval → browser_shadow_tree → browser_read`。
+- `browser_eval` 同时进 `tool-index.js` 的 `read` 组（紧跟 `browser_read`）与 `FOCUS_POLICY.backgroundSafeTools`。
+- `src/next-step.js` 新增 4 条规则：`coordinate_token`（consumed/expired → 带 `ttlMs:300000` 重新铸造；
+  never_issued → stop）、`eval_blocked`（escalate）、`expression_threw`（stop）、`overlay_settling`（wait 400ms）。
+
+### 验证
+
+- `npm test` **672 条全绿**（新增 `test/field-report-030.test.js` 29 条：P0-0 十条、P0-1 五条、P0-2 三条、
+  P1/P2 三条、next-step 三条、投影一条）。`doctor` **12/12、0 条建议**，服务与扩展均 0.30.0。
+- 新增夹具 `.local/modal-fixture.mjs`（19557）：**400 个背景按钮** + 末尾 `.ant-modal-wrap` 里两张
+  `cursor:pointer` 的 `div.rent-spec-item` 卡片 + `#auto-renew` checkbox —— 每个元素对应一条断言，
+  少一个就少一条验证。
+- 真机端到端（报告里的「理想路径」）：一次 `browser_eval` 完成选规格 + 读价格 + 下单，`elapsedMs:2`。
+  对照报告里的 45 分钟。
+
 ## 0.29.0 — 2026-11-03（**一次真实登录暴露的 7 个缺陷**：密码框没有 ref、ref 每次作废、observe 预算没生效）
 
 0.28.0 教 agent「失败时该走哪一步」。这一版来自**一次真实的登录失败**：调用方拿着正确的密码，做了 9 次 observe、3 次错误判断，最后破坏了浏览器已填好的密码。每一条都能在 624 条单测全绿的情况下复现，因为**单测自己构造结果对象，从不向页面要一个 ref**。

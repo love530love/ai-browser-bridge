@@ -56,6 +56,9 @@ export function isFailure(result) {
   if (result.found === false) return true;
   if (result.ambiguous === true) return true;
   if (result.notRendered) return true;
+  // A dialog that read as empty is not a completed read: the answer about the
+  // thing the caller asked for is still missing, and waiting once is the fix.
+  if (result.overlaySettling) return true;
   return false;
 }
 
@@ -109,11 +112,74 @@ const RULES = [
   {
     id: 'element_covered',
     match: r => r.reason === 'element_covered' || r.status === 'covered',
+    // When the cover is the dialog the target itself lives in, dismissing it
+    // closes the target. Measured on a real antd modal, where the old advice
+    // (press Escape) would have destroyed the form the caller was filling in.
+    step: (r, a) => (r.targetInsideCoverDialog
+      ? {
+        kind: 'diagnose',
+        tool: 'browser_read',
+        arguments: { tabId: a.tabId, scope: 'overlay', mode: 'cheap' },
+        why: 'The click point is owned by another element inside the SAME dialog as the target, so pressing Escape would close the dialog and the target with it. Read the dialog itself: scope "overlay" scans it first and returns refs for the elements that actually own the point.'
+      }
+      : {
+        kind: 'diagnose',
+        tool: 'browser_scan_overlays',
+        arguments: { tabId: a.tabId },
+        why: 'Something else owns the click point. Scanning overlays names the cover and its dismiss path; a click through an obstruction is never the fix, and every ref held from before a dismissal is stale.'
+      })
+  },
+  // A coordinate token is single-use and short-lived, and the three ways it can
+  // fail need three different moves. Reporting them as one reason made a caller
+  // re-prepare when it had simply reused a token, or retry a dead one forever.
+  {
+    id: 'coordinate_token',
+    match: r => /^coordinate_token_/.test(reasonOf(r)) || (Array.isArray(r.validationFailures) && r.validationFailures.some(f => /^coordinate_token_/.test(f))),
+    step: (r, a) => {
+      const kind = reasonOf(r).replace('coordinate_token_', '')
+        || (r.validationFailures ?? []).find(f => /^coordinate_token_/.test(f))?.replace('coordinate_token_', '') || '';
+      if (kind === 'never_issued') {
+        return { kind: 'stop', tool: null, arguments: {},
+          why: 'No coordinate token with that value was ever issued in this document. A token cannot be invented or carried over from another tab: call browser_prepare_coordinate first and use the value it returns.' };
+      }
+      return {
+        kind: 'retry_with_changes',
+        tool: 'browser_prepare_coordinate',
+        arguments: Number.isFinite(a.x) && Number.isFinite(a.y) ? { tabId: a.tabId, x: a.x, y: a.y, ttlMs: 300000 } : { tabId: a.tabId, x: 500, y: 500, ttlMs: 300000 },
+        why: kind === 'consumed'
+          ? 'That token was already used once; a coordinate token is single-use. Prepare the same coordinate again with a longer ttlMs and dispatch it in the very next call.'
+          : 'The token expired before the dispatch reached the page. Prepare again with a longer ttlMs and dispatch immediately, with no other call in between.'
+      };
+    }
+  },
+  {
+    id: 'eval_blocked',
+    match: r => r.reason === 'eval_blocked_by_page_csp' || r.reason === 'debugger_channel_failed',
+    step: () => ({
+      kind: 'escalate',
+      tool: null,
+      arguments: {},
+      why: 'Both evaluation channels failed: the page\'s Content Security Policy forbids eval in its own world, and the debugger fallback could not run either. Do not repeat the expression blindly. Use the page\'s own controls (browser_read, browser_find_element, browser_shadow_tree) or the desktop path for browser UI.'
+    })
+  },
+  {
+    id: 'expression_threw',
+    match: r => r.reason === 'expression_threw' || r.reason === 'promise_rejected' || r.reason === 'empty_expression',
+    step: () => ({
+      kind: 'stop',
+      tool: null,
+      arguments: {},
+      why: 'The expression itself threw, which is a fact about the expression rather than a bridge failure. Fix the expression from the exception in the reply; running the same text again produces the same throw.'
+    })
+  },
+  {
+    id: 'overlay_settling',
+    match: r => !!r.overlaySettling,
     step: (r, a) => ({
-      kind: 'diagnose',
-      tool: 'browser_scan_overlays',
-      arguments: { tabId: a.tabId },
-      why: 'Something else owns the click point. Scanning overlays names the cover and its dismiss path; a click through an obstruction is never the fix, and every ref held from before a dismissal is stale.'
+      kind: 'wait',
+      tool: 'browser_wait',
+      arguments: { tabId: a.tabId, ms: 400 },
+      why: 'A dialog is on screen but read as having no controls, which is what an entrance animation looks like from the DOM: everything inside is at opacity 0 for a few hundred milliseconds. Wait briefly and read again instead of concluding the dialog is empty.'
     })
   },
   {
@@ -140,7 +206,7 @@ const RULES = [
     id: 'stale_reference',
     match: r => /stale|reference|not_found|removed/i.test(reasonOf(r)),
     step: (r, a) => READ_STEP(a.tabId,
-      'The element reference no longer resolves. Refs are one-shot: read the page again and use the refs from that reading.')
+      'The element reference no longer resolves. Refs stay valid only while the element list is unchanged; something on the page changed it. Read the page again and use the refs from that reading.')
   },
   {
     id: 'verify_failed',

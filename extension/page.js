@@ -106,6 +106,52 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (!row || sensitive(row)) return '';
     return clean(row.innerText || row.textContent);
   };
+
+  // A modal is the one place where "read the page" reliably reads the wrong
+  // thing. The controls the caller needs sit in a container appended at the end
+  // of <body>, and a background page with hundreds of controls exhausts the
+  // element budget long before the scan reaches them. Measured on a real antd
+  // modal on a paid-order page: elementsReturned 76, every one of them
+  // background navigation or a filter, while the dialog's own buttons and
+  // checkbox were invisible to browser_read and to browser_find_element.
+  //
+  // The same measurement also produced two different answers for two identical
+  // calls (76 and 79 candidates visited, found:false then found:true), because a
+  // scan bounded by a wall-clock deadline stops wherever the machine happened to
+  // be. Overlay-first makes the answer deterministic for the case that matters:
+  // the dialog is scanned before anything else can spend the budget.
+  const OVERLAY_SELECTOR = '[aria-modal="true"],dialog[open],[role=dialog],[role=alertdialog],.ant-modal-wrap,.ant-modal,.el-dialog,.el-drawer,.ant-drawer,.MuiDialog-container,.ReactModal__Overlay,[class*="modal-wrap"],[class*="modal-container"]';
+  const overlayCandidates = () => {
+    const found = [];
+    try {
+      for (const el of document.querySelectorAll(OVERLAY_SELECTOR)) {
+        if (!visible(el)) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 40 || rect.height < 40) continue;
+        const zIndex = Number.parseInt(getComputedStyle(el).zIndex, 10);
+        found.push({ el, zIndex: Number.isFinite(zIndex) ? zIndex : 0, area: Math.round(rect.width * rect.height) });
+      }
+    } catch { /* a page can be mid-teardown; no overlay is better than a throw */ }
+    // Keep the outermost container of each nested group. The antd wrap holds
+    // the dialog, so scanning the wrap cannot miss the dialog's controls while
+    // scanning the dialog would miss a sibling in the same wrap.
+    const outer = found.filter(item => !found.some(other => other !== item && other.el.contains(item.el) && other.zIndex >= item.zIndex));
+    outer.sort((a, b) => (a.zIndex - b.zIndex) || (a.area - b.area));
+    const top = outer[outer.length - 1] ?? null;
+    if (!top) return null;
+    const role = top.el.getAttribute('role');
+    const firstClass = typeof top.el.className === 'string' ? top.el.className.trim().split(/\s+/)[0] : '';
+    return {
+      el: top.el,
+      zIndex: top.zIndex,
+      area: top.area,
+      selector: top.el.matches('[aria-modal="true"]') ? '[aria-modal="true"]'
+        : role ? `[role=${role}]`
+        : firstClass ? `.${firstClass}`
+        : top.el.tagName.toLowerCase()
+    };
+  };
+
   const renderedTextNode = node => {
     const parent = node.parentElement;
     if (!parent || hiddenByLayout(parent)) return false;
@@ -581,7 +627,72 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const role = el.getAttribute?.('role') ? `[role=${el.getAttribute('role')}]` : '';
     return `${tag}${id}${name}${role}`.slice(0, 120);
   };
-  const pageFingerprint = () => {
+  // A checkbox, switch, radio, tab or disclosure changes none of url / title /
+  // text length / interactive count, so a fingerprint built only from those
+  // reports "changed:false" for an action that visibly changed the page.
+  // Measured on a real antd modal: clicking 启用自动续费 flipped the box, the
+  // receipt said changed:false with an identical digest, and only a screenshot
+  // showed it checked. A false negative on a toggle is the worst answer
+  // available, because it invites the caller to click again - which flips the
+  // control back.
+  //
+  // Hashing the state of every toggle on the page, rather than watching one
+  // element, also covers the case where the click lands on a wrapper and the
+  // control that actually changes is a child.
+  const controlState = () => {
+    let hash = 2166136261;
+    const feed = value => {
+      const text = String(value);
+      for (let i = 0; i < text.length; i += 1) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+    };
+    let counted = 0;
+    let checkedCount = 0;
+    try {
+      const nodes = document.querySelectorAll('input[type=checkbox],input[type=radio],[aria-checked],[aria-selected],[aria-expanded],[aria-pressed],select');
+      for (const el of nodes) {
+        if (counted >= 4000) break;
+        counted += 1;
+        const checked = el.checked === undefined ? '' : el.checked ? '1' : '0';
+        if (checked === '1' || el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-selected') === 'true') checkedCount += 1;
+        feed(el.getAttribute('aria-checked') || checked);
+        feed(el.getAttribute('aria-selected') || '');
+        feed(el.getAttribute('aria-expanded') || '');
+        feed(el.getAttribute('aria-pressed') || '');
+        if (el.tagName === 'SELECT') feed(el.value);
+        feed('|');
+      }
+    } catch { /* a page can be mid-teardown; an unmeasured state is not a false one */ }
+    return { digest: (hash >>> 0).toString(16).padStart(8, '0'), counted, checkedCount };
+  };
+  // The element the caller acted on, read back through the ref registry. This is
+  // the direct answer to "did the toggle flip", which a page-wide digest can
+  // only imply.
+  const watchState = ref => {
+    if (typeof ref !== 'string' || !ref.includes(':')) return null;
+    const state = stateForRef(ref);
+    const index = Number(ref.slice(ref.indexOf(':') + 1));
+    if (!Number.isSafeInteger(index) || index < 1 || !state?.refs) return { resolved: false };
+    const entry = [...state.refs.values()][index - 1];
+    const el = entry?.el;
+    if (!el) return { resolved: false };
+    const connected = !!el.isConnected;
+    return {
+      resolved: true,
+      connected,
+      tag: el.tagName ? el.tagName.toLowerCase() : null,
+      type: el.getAttribute?.('type') ?? null,
+      role: el.getAttribute?.('role') ?? null,
+      label: connected ? label(el) : null,
+      disabled: !!el.disabled,
+      checked: 'checked' in el ? !!el.checked : null,
+      ariaChecked: el.getAttribute?.('aria-checked') ?? null,
+      ariaSelected: el.getAttribute?.('aria-selected') ?? null,
+      ariaExpanded: el.getAttribute?.('aria-expanded') ?? null,
+      ariaPressed: el.getAttribute?.('aria-pressed') ?? null,
+      valueLength: typeof el.value === 'string' ? el.value.length : null
+    };
+  };
+  const pageFingerprint = (options = {}) => {
     const body = document.body;
     const textLength = body ? (body.textContent || '').length : 0;
     let interactive = 0;
@@ -593,12 +704,15 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const found = document.querySelector('[aria-modal="true"],[role="dialog"],[role="alertdialog"]');
       dialog = found ? receiptDescriptor(found) : null;
     } catch { dialog = null; }
+    const controls = controlState();
+    const watch = watchState(options.watchRef);
     let hash = 2166136261;
     const feed = value => {
       const text = String(value);
       for (let i = 0; i < text.length; i += 1) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 16777619); }
     };
     feed(location.href); feed(document.title); feed(textLength); feed(interactive); feed(dialog ?? '');
+    feed(controls.digest);
     return {
       url: location.href,
       title: document.title,
@@ -607,11 +721,13 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       interactive,
       focus: receiptDescriptor(document.activeElement),
       dialog,
+      controlState: controls,
+      ...(watch ? { watch } : {}),
       scroll: { x: Math.round(scrollX || 0), y: Math.round(scrollY || 0) },
       digest: (hash >>> 0).toString(16).padStart(8, '0')
     };
   };
-  if (name === 'browser_receipt') return pageFingerprint();
+  if (name === 'browser_receipt') return pageFingerprint({ watchRef: args.watchRef });
   if (name === 'browser_transient') {
     const action = args.action || 'read';
     const store = transientStore || ensureTransientCapture();
@@ -947,18 +1063,57 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   }
   if (name === 'browser_shadow_tree') {
     const maxRoots = Math.max(1, Math.min(100, args.maxRoots ?? 50));
-    const maxControls = Math.max(1, Math.min(200, args.maxControls ?? 100));
+    const maxControls = Math.max(1, Math.min(400, args.maxControls ?? 200));
+    const includeClickable = args.includeClickable !== false;
     const roots = [], controls = [], seen = new Set();
-    const deadline = performance.now() + 200;
-    let visited = 0, partial = false, customElementCount = 0;
+    const deadline = performance.now() + (args.budgetMs ?? 1500);
+    let visited = 0, partial = false, customElementCount = 0, cursorChecks = 0, clickableCount = 0, stoppedBy = null;
+    const seenElements = new Set();
     const snapshot = crypto.randomUUID();
     const state = rememberState({ snapshot, url: location.href, refs: new Map() });
+    // A React onClick on a <div> leaves nothing in the markup to find: no href,
+    // no role, no tabindex, no onclick attribute. What it does leave is
+    // cursor:pointer, which is exactly how a person knows the card is
+    // clickable. Measured on a real antd spec-card group inside a modal: every
+    // DOM tool in this bridge was blind to those cards, and the only ways to
+    // select one were a hand-solved coordinate or an injected click.
+    //
+    // cursor is inherited, so a child span of a clickable card also reports
+    // pointer. An ancestor that is already pointer is therefore skipped, and the
+    // outermost clickable element wins - which is the one a person would click.
+    const CLICKABLE_TAGS = new Set(['DIV', 'SPAN', 'LI', 'LABEL', 'TD', 'ARTICLE', 'SECTION', 'FIGURE', 'P']);
+    const clickableContainer = el => {
+      if (!includeClickable || cursorChecks >= 1200) return false;
+      if (!el.tagName || !CLICKABLE_TAGS.has(el.tagName)) return false;
+      if (el.matches?.(actionSelector)) return false;
+      // An ancestor of a real control is not the target: the control inside it is.
+      if (el.querySelector?.(actionSelector)) return false;
+      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length > 300) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 24 || rect.height < 16) return false;
+      cursorChecks++;
+      try { if (getComputedStyle(el).cursor !== 'pointer') return false; } catch { return false; }
+      let up = el.parentElement, depth = 0;
+      while (up && depth < 8) {
+        try { if (getComputedStyle(up).cursor === 'pointer') return false; } catch { break; }
+        up = up.parentElement; depth++;
+      }
+      return true;
+    };
     const visit = (node, path) => {
       if (!node || roots.length >= maxRoots) return;
       const children = node instanceof ShadowRoot ? [...node.children] : [...(node.children || [])];
       for (let i = 0; i < children.length; i++) {
-        if (++visited > 10000 || performance.now() >= deadline) { partial = true; return; }
+        if (++visited > 20000) { partial = true; stoppedBy = stoppedBy ?? 'nodeLimit'; return; }
+        if (performance.now() >= deadline) { partial = true; stoppedBy = stoppedBy ?? 'deadline'; return; }
         const el = children[i];
+        // The same budget problem as browser_read, one layer down: a background
+        // page with four hundred controls spends the whole allowance before the
+        // walk reaches a dialog appended at the end of <body>. Measured on the
+        // report's shape: 400 controls returned, zero of them from the dialog.
+        if (seenElements.has(el)) continue;
+        seenElements.add(el);
         if (el.localName.includes('-')) customElementCount++;
         const nextPath = `${path}/${el.tagName.toLowerCase()}[${i}]`;
         if (el.shadowRoot && !seen.has(el.shadowRoot)) {
@@ -966,18 +1121,24 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
           roots.push({ host: el.tagName.toLowerCase(), id: el.id || null, path: nextPath, mode: 'open', controls: [] });
           visit(el.shadowRoot, nextPath + '/shadow');
         }
-        if (controls.length < maxControls && el.matches?.(actionSelector)) {
-          if (sensitive(el)) continue;
-          const ref = `${snapshot}:${state.refs.size + 1}`;
-          state.refs.set(ref, { el, fingerprint: fingerprint(el) });
-          const box = el.getBoundingClientRect();
-          controls.push({ ref, path: nextPath, tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), label: label(el) || cheapLabel(el), visible: visible(el), rect: { left: box.left, top: box.top, width: box.width, height: box.height } });
-        }
+        if (controls.length < maxControls) {
+          const isControl = !!el.matches?.(actionSelector);
+          const isClickable = !isControl && clickableContainer(el);
+          if ((isControl || isClickable) && !sensitive(el)) {
+            const ref = `${snapshot}:${state.refs.size + 1}`;
+            state.refs.set(ref, { el, fingerprint: fingerprint(el) });
+            const box = el.getBoundingClientRect();
+            if (isClickable) clickableCount++;
+            controls.push({ ref, kind: isControl ? 'control' : 'clickable', path: nextPath, tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), label: label(el) || cheapLabel(el), visible: visible(el), ...(isClickable ? { cursorPointer: true } : {}), rect: { left: box.left, top: box.top, width: box.width, height: box.height } });
+          }
+        } else if (!stoppedBy) stoppedBy = 'maxControls';
         if (roots.length < maxRoots) visit(el, nextPath);
       }
     };
+    const overlay = overlayCandidates();
+    if (overlay) visit(overlay.el, 'overlay');
     visit(document.documentElement, 'html');
-    return { title: document.title, url: location.href, shadowRootCount: roots.length, customElementCount, partial: partial || roots.length >= maxRoots || controls.length >= maxControls, visited, roots, controls, traversal: roots.length ? 'open-shadow-roots' : 'none-found', fallback: controls.some(c => c.visible) ? 'use_control_ref_then_reobserve' : 'browser_screenshot', nextSteps: ['Use only a verified target ref with browser_click or browser_fill.', 'If the target is absent, capture browser_screenshot; do not guess coordinates.', 'Re-observe after each action and verify the intended outcome.'], contentTrust: 'untrusted webpage data' };
+    return { title: document.title, url: location.href, shadowRootCount: roots.length, customElementCount, partial: partial || roots.length >= maxRoots || controls.length >= maxControls, stoppedBy, visited, roots, controls, clickableCount, ...(overlay ? { overlayScannedFirst: { selector: overlay.selector, zIndex: overlay.zIndex } } : {}), traversal: roots.length ? 'open-shadow-roots' : 'none-found', fallback: controls.some(c => c.visible) ? 'use_control_ref_then_reobserve' : 'browser_screenshot', nextSteps: ['Use only a verified target ref with browser_click or browser_fill. A kind:"clickable" entry is a container with cursor:pointer and no control semantics: verify by screenshot that it is the card or tile you mean before clicking it.', 'If the target is absent, capture browser_screenshot, or evaluate one expression with browser_eval; do not guess coordinates.', 'Re-observe after each action and verify the intended outcome.'], contentTrust: 'untrusted webpage data' };
   }
   const elementRole = el => el.getAttribute('role') || (el instanceof HTMLButtonElement ? 'button' : el instanceof HTMLAnchorElement ? (el.hasAttribute('href') ? 'link' : 'generic') : el instanceof HTMLInputElement ? (el.type === 'file' ? 'file' : 'input') : el instanceof HTMLTextAreaElement ? 'textbox' : el instanceof HTMLSelectElement ? 'select' : el.isContentEditable ? 'textbox' : el.tagName.toLowerCase());
   const elementText = el => clean([label(el), el.getAttribute('name'), el.getAttribute('id'), el.textContent].filter(Boolean).join(' '));
@@ -998,8 +1159,14 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const snapshot = crypto.randomUUID();
     const state = rememberState({ snapshot, url: location.href, refs: new Map() });
     const items = [];
-    const diagnostics = { textNodesVisited: 0, controlCandidatesVisited: 0, textScanPartial: false, controlScanPartial: false };
-    const candidates = new Set(document.querySelectorAll(actionSelector));
+    const diagnostics = { textNodesVisited: 0, controlCandidatesVisited: 0, textScanPartial: false, controlScanPartial: false, overlayControls: 0 };
+    // Overlay controls first, so a dialog's own buttons are examined before the
+    // background page can spend the scan budget. Same measurement as
+    // browser_read: 76 candidates visited, all background, found:false.
+    const overlay = overlayCandidates();
+    const candidates = new Set();
+    if (overlay) for (const el of overlay.el.querySelectorAll(actionSelector)) { candidates.add(el); diagnostics.overlayControls++; }
+    for (const el of document.querySelectorAll(actionSelector)) candidates.add(el);
     // Portals need no special document traversal, but delegated text-only menu
     // items are absent from semantic control selectors. Exact text is a locator,
     // not proof that a click is meaningful; expose that distinction to callers.
@@ -1020,7 +1187,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
         candidates.add(node); textCandidates.add(node);
       }
     }
-    const controlDeadline = performance.now() + 250;
+    // 250ms was enough to be cut off at a different point on each call, which
+    // produced found:false and found:true for the same DOM state. The budget is
+    // now generous enough that a normal page finishes, and the reply states
+    // whether it did: a partial scan can never be read as "the target is absent".
+    const controlDeadline = performance.now() + 600;
     for (const el of candidates) {
       if (items.length >= Math.max(maxResults * 8, 80) || diagnostics.controlCandidatesVisited >= 5000 || performance.now() >= controlDeadline) { diagnostics.controlScanPartial = true; break; }
       diagnostics.controlCandidatesVisited++;
@@ -1089,6 +1260,41 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   const optionSelector = '[role=option],[role=menuitem],.el-select-dropdown__item,.ant-select-item-option,.ant-select-item,li';
   const findExactOption = exact => [...document.querySelectorAll(optionSelector)]
     .find(option => visible(option) && option.textContent.replace(/\s+/g, ' ').trim() === exact && option.getAttribute('aria-disabled') !== 'true' && !option.matches('[disabled],.is-disabled'));
+  // "Exact visible option not found" is true and useless: it cannot tell a text
+  // mismatch from a component that is not a picker at all. On a real antd page
+  // the text was plainly on screen, and the reason was that the group is a set
+  // of cursor:pointer divs with no option or combobox role anywhere.
+  const seenOptionTexts = (limit = 12) => {
+    const texts = [];
+    for (const option of document.querySelectorAll(optionSelector)) {
+      if (texts.length >= limit) break;
+      if (!visible(option)) continue;
+      const text = option.textContent.replace(/\s+/g, ' ').trim();
+      if (text) texts.push(text.slice(0, 60));
+    }
+    return texts;
+  };
+  const clickableGroupHint = (budgetMs = 150) => {
+    const deadline = performance.now() + budgetMs;
+    const found = [];
+    for (const el of document.querySelectorAll('div,li,span')) {
+      if (found.length >= 6 || performance.now() >= deadline) break;
+      if (!visible(el) || el.querySelector(actionSelector)) continue;
+      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length > 80) continue;
+      try { if (getComputedStyle(el).cursor !== 'pointer') continue; } catch { continue; }
+      found.push(text.slice(0, 60));
+    }
+    return found;
+  };
+  const pickFailureHint = (exact) => {
+    const seen = seenOptionTexts();
+    const group = clickableGroupHint();
+    return `No visible option matched ${JSON.stringify(exact)} exactly. Visible option texts seen: ${seen.length ? seen.map(text => JSON.stringify(text)).join(', ') : '(none)'}.`
+      + (group.length
+        ? ` This page also has clickable non-option elements such as ${group.map(text => JSON.stringify(text)).join(', ')}. If the target is one of those, it is a card or tile group rather than a picker: read the page with scope:"overlay" or call browser_shadow_tree to get a ref for it, or evaluate one click expression with browser_eval. Do not keep retrying browser_pick with different text.`
+        : ' Either the text differs by whitespace or hidden characters, or the control is not a select/combobox. Read the page and act on the element directly.');
+  };
   const chooseOption = async (control, exact, timeoutMs = 5000, query = '') => {
     let option = findExactOption(exact);
     if (!option) {
@@ -1111,7 +1317,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
       const found = findExactOption(exact); if (found) finish(found);
     });
-    if (!option) throw new Error('Exact visible option not found');
+    if (!option) throw new Error(pickFailureHint(exact));
     option.scrollIntoView({ block: 'center', inline: 'nearest' });
     option.click();
     await new Promise(resolve => setTimeout(resolve, 80));
@@ -1135,10 +1341,10 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     control ||= controls.find(el => el instanceof HTMLSelectElement && [...el.options].some(o => o.label.replace(/\s+/g, ' ').trim() === exact || o.textContent.replace(/\s+/g, ' ').trim() === exact));
     control ||= controls[0];
-    if (!control) throw new Error('No picker control found');
+    if (!control) throw new Error(`No picker control found. browser_pick looks for select, [role=combobox], input, .el-select, .ant-select and [aria-haspopup=listbox]; this page has none of them visible${wantedLabel ? ` for label ${JSON.stringify(args.label)}` : ''}. ${pickFailureHint(exact)}`);
     if (control instanceof HTMLSelectElement) {
       const option = [...control.options].find(o => (o.label.replace(/\s+/g, ' ').trim() === exact || o.textContent.replace(/\s+/g, ' ').trim() === exact || o.value === exact) && !o.disabled);
-      if (!option) throw new Error('Native select option not found');
+      if (!option) throw new Error(`Native select option not found. This control is a <select> with ${control.options.length} option(s): ${[...control.options].slice(0, 12).map(o => JSON.stringify(o.label.replace(/\s+/g, ' ').trim())).join(', ')}${control.options.length > 12 ? ', ...' : ''}. The text must match one of them exactly, including whitespace.`);
       control.value = option.value;
       control.dispatchEvent(new Event('input', { bubbles: true }));
       control.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1150,10 +1356,38 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   };
   if (name === 'browser_prepare_coordinate' || name === 'browser_validate_coordinate') {
     const tokens = globalThis.__aiBridgeCoordinateTokens ||= new Map();
+    // A retired token is remembered for a while so the refusal can say WHICH
+    // kind of failure it was. "missing or expired" made a consumed token, an
+    // expired token and a token that was never issued indistinguishable, so a
+    // caller could not tell "prepare again" from "you already used this".
+    const retired = globalThis.__aiBridgeCoordinateRetired ||= new Map();
+    // 15 seconds was shorter than one agent round trip. Measured: 10-20s between
+    // two calls in the same task, so a prepare-and-tap pair succeeded about half
+    // the time and the failures looked like bad coordinates. The window is now
+    // two minutes, and the caller can shorten or lengthen it per call.
+    // The lifetime belongs to the token, not to the call that inspects it: a
+    // token prepared with ttlMs:5000 must not live 120 seconds because the
+    // dispatch call left ttlMs out.
+    const ttlMs = Math.min(300000, Math.max(5000, Number(args.ttlMs) || 120000));
     const now = Date.now();
-    for (const [id, record] of tokens) if (now - record.at > 15000) tokens.delete(id);
+    for (const [id, record] of tokens) {
+      if (now > (record.expiresAt ?? record.at + ttlMs)) { tokens.delete(id); retired.set(id, { reason: 'expired', at: now, ttlMs: record.ttlMs ?? ttlMs }); }
+    }
+    for (const [id, meta] of retired) if (now - meta.at > 600000) retired.delete(id);
+    while (retired.size > 128) retired.delete(retired.keys().next().value);
     const stamp = () => JSON.stringify([location.href, innerWidth, innerHeight, scrollX, scrollY,
       globalThis.visualViewport?.scale, globalThis.visualViewport?.offsetLeft, globalThis.visualViewport?.offsetTop]);
+    const elementPath = el => {
+      const parts = [];
+      let node = el;
+      for (let depth = 0; node && node.nodeType === 1 && depth < 8; depth++) {
+        const parent = node.parentElement;
+        const index = parent ? [...parent.children].indexOf(node) : 0;
+        parts.unshift(`${node.tagName.toLowerCase()}[${index}]`);
+        node = parent;
+      }
+      return parts.join('/');
+    };
     const describeTarget = el => {
       const rect = el.getBoundingClientRect();
       const dialog = el.closest('dialog,[role=dialog],[aria-modal=true],.ant-modal,.el-dialog');
@@ -1165,8 +1399,30 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
         dialog?.textContent?.slice(0, 8000) || '', values]);
     };
     const pageForeground = () => ({ visibilityState: document.visibilityState, focused: document.hasFocus() });
-    const targetEvidence = el => !el ? null : ({ tag: el.tagName?.toLowerCase() || null, role: el.getAttribute?.('role') || null,
-      label: clean(label(el) || el.textContent), rowText: rowContext(el) || null });
+    // The old evidence was tag/role/label/rowText, which answered "what did I
+    // hit" but not "am I close". Three coordinates less than 100 pixels apart
+    // returned an information bar, a section heading and finally the card, and
+    // there was no way to tell which layer a point had landed on without trying
+    // another one. The rect and the offset from its centre answer that directly,
+    // and textLength exposes the tell-tale case where the hit is an ancestor
+    // whose text is the whole group.
+    const targetEvidence = el => {
+      if (!el) return null;
+      // Duck-typed on purpose: this runs on whatever the hit test returned, and a
+      // throw here would turn a refusal into an opaque __aibError with no reason
+      // code at all.
+      const box = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+      return {
+        tag: el.tagName?.toLowerCase() || null,
+        role: el.getAttribute?.('role') || null,
+        label: clean(label(el) || el.textContent),
+        rowText: rowContext(el) || null,
+        rect: box ? { left: Math.round(box.left), top: Math.round(box.top), width: Math.round(box.width), height: Math.round(box.height) } : null,
+        path: elementPath(el),
+        textLength: (el.textContent || '').replace(/\s+/g, ' ').trim().length,
+        childCount: el.children?.length ?? 0
+      };
+    };
     if (name === 'browser_validate_coordinate') {
       // A backgrounded document is not a reason to refuse: the token is bound to
       // a DOM element and re-hit-tested here, so the press still lands on the
@@ -1177,11 +1433,16 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
           nextPollTool: 'browser_health', recommendedNextAction: 'This call asked for foreground evidence. Bring the window and tab to the front, or drop requireForeground to act on the page in the background. No pointer event dispatched.' };
       }
       const record = tokens.get(args.coordinateToken);
-      if (args.consume !== false) tokens.delete(args.coordinateToken);
+      const retiredMeta = retired.get(args.coordinateToken) ?? null;
+      if (args.consume !== false && record) {
+        tokens.delete(args.coordinateToken);
+        retired.set(args.coordinateToken, { reason: 'consumed', at: now });
+      }
       const currentHit = record ? deepHit(record.x, record.y) : null;
       const connected = !!record?.el?.isConnected;
       const failures = [];
-      if (!record) failures.push('coordinate_token_missing_or_expired');
+      const tokenFailure = retiredMeta ? `coordinate_token_${retiredMeta.reason}` : 'coordinate_token_never_issued';
+      if (!record) failures.push(tokenFailure);
       else {
         if (record.stamp !== stamp()) failures.push('page_or_viewport_changed');
         if (record.nx !== args.x || record.ny !== args.y) failures.push('coordinate_mismatch');
@@ -1192,10 +1453,18 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       }
       if (failures.length) {
         tokens.delete(args.coordinateToken);
-        return { status: 'waiting', retryable: true, reason: record ? 'coordinate_target_changed' : 'coordinate_token_missing_or_expired',
+        return { status: 'waiting', retryable: true, reason: record ? 'coordinate_target_changed' : tokenFailure,
           dispatched: false, validationFailures: failures, pageState,
+          ...(record ? {} : { tokenState: retiredMeta ? retiredMeta.reason : 'never_issued',
+            tokenLifetimeMs: retiredMeta?.ttlMs ?? ttlMs,
+            nextPollTool: 'browser_prepare_coordinate',
+            recommendedNextAction: retiredMeta?.reason === 'consumed'
+              ? 'This token was already used once; a coordinate token is single-use. Prepare the same coordinate again and dispatch immediately. No pointer press dispatched.'
+              : retiredMeta?.reason === 'expired'
+                ? `The token expired after ${retiredMeta.ttlMs ?? ttlMs}ms. Prepare again with the same coordinate and dispatch it in the very next call, or pass a larger ttlMs when preparing. No pointer press dispatched.`
+                : 'No token with this value was ever issued in this document. Prepare the coordinate first; do not invent a token. No pointer press dispatched.' }),
           targetChange: record ? { expected: record.expectedTarget, actual: targetEvidence(currentHit) } : undefined,
-          nextPollTool: 'browser_prepare_coordinate', recommendedNextAction: 'Inspect a fresh screenshot and prepare the intended target again. Do not repeat the old coordinate. No pointer press dispatched.' };
+          ...(record ? { nextPollTool: 'browser_prepare_coordinate', recommendedNextAction: 'Inspect a fresh screenshot and prepare the intended target again. Do not repeat the old coordinate. No pointer press dispatched.' } : {}) };
       }
       return { status: 'ready', x: record.x, y: record.y, width: innerWidth, height: innerHeight, pageState };
     }
@@ -1211,14 +1480,24 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (!el || sensitive(el) || !visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') throw new Error('Coordinate target unavailable or protected');
     while (tokens.size >= 32) tokens.delete(tokens.keys().next().value);
     const token = crypto.randomUUID();
-    tokens.set(token, { at: now, el, nx: args.x, ny: args.y, x, y, stamp: stamp(), signature: describeTarget(el), expectedTarget: targetEvidence(el) });
-    return { coordinateToken: token, expiresInMs: 15000, expectedUrl: location.href, x: args.x, y: args.y,
-      target: targetEvidence(el), pageState,
+    const evidence = targetEvidence(el);
+    tokens.set(token, { at: now, ttlMs, expiresAt: now + ttlMs, el, nx: args.x, ny: args.y, x, y, stamp: stamp(), signature: describeTarget(el), expectedTarget: evidence });
+    const box = el.getBoundingClientRect();
+    return { coordinateToken: token, expiresInMs: ttlMs, expectedUrl: location.href, x: args.x, y: args.y,
+      target: evidence,
+      // How far the point is from the centre of what it hit. A point near the
+      // edge of a large box is usually a point on the wrong box, and that is
+      // invisible from a label alone.
+      offsetFromCenter: { dx: Math.round(x - (box.left + box.width / 2)), dy: Math.round(y - (box.top + box.height / 2)) },
+      // A hit whose text is the whole group, or which has many children, is
+      // usually an ancestor of the thing the caller meant.
+      targetLooksLikeContainer: evidence.textLength > 120 || evidence.childCount > 6,
+      pageState,
       viewport: { width: innerWidth, height: innerHeight }, contentTrust: 'untrusted webpage data',
       // A hidden document still resolves the DOM hit test, but a screenshot taken
       // now may show a stale frame. Report that instead of refusing the action.
       evidenceQuality: pageState.visibilityState === 'visible' ? 'live' : 'stale-frame-possible',
-      note: 'Confirm this topmost target matches your intent before using the token. Dispatch does not prove task completion.' };
+      note: 'Confirm this target matches your intent before using the token: check label, rect and offsetFromCenter. The token is single-use and lives for ' + Math.round(ttlMs / 1000) + 's. If targetLooksLikeContainer is true, the point hit an ancestor - try the centre of the rect, or act on the element directly instead of by coordinate. Dispatch does not prove task completion.' };
   }
   if (name === 'browser_viewport') {
     const active = document.activeElement;
@@ -1322,16 +1601,32 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot: cheapSnapshot, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial: true, elements: cheapElements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM; cheap', diagnostics: { mode: 'cheap', cheapReason: reason, budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates: cheapCandidates.length, elementsReturned: cheapElements.length, maxElements, elementsBudgetHit: cheapElements.length >= maxElements || performance.now() >= cheapDeadline, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit }, contentTrust: 'untrusted webpage data' };
     };
     if (args.mode === 'cheap') return cheapRead('requested');
+    // auto: overlay first, then the rest of the page. page: the old behaviour.
+    // overlay: the overlay only, for a caller that already knows the dialog is
+    // the whole task.
+    const scopeArg = args.scope === 'page' || args.scope === 'overlay' ? args.scope : 'auto';
+    const overlay = overlayCandidates();
     const picked = [];
-    for (const el of document.querySelectorAll(selector)) {
-      elementCandidates++;
-      if (picked.length >= maxElements || overBudget()) { elementsBudgetHit = true; break; }
-      try {
-        const isSecret = secretField(el);
-        if ((!visible(el) && !fileInput(el)) || (sensitive(el) && !isSecret)) continue;
-        picked.push({ el, isSecret, fingerprint: fingerprint(el) });
-      } catch { elementErrors++; }
-    }
+    const seenElements = new Set();
+    const take = root => {
+      for (const el of root.querySelectorAll(selector)) {
+        if (picked.length >= maxElements || overBudget()) { elementsBudgetHit = true; return; }
+        elementCandidates++;
+        if (seenElements.has(el)) continue;
+        try {
+          const isSecret = secretField(el);
+          if ((!visible(el) && !fileInput(el)) || (sensitive(el) && !isSecret)) continue;
+          seenElements.add(el);
+          picked.push({ el, isSecret, fingerprint: fingerprint(el) });
+        } catch { elementErrors++; }
+      }
+    };
+    const overlayFirst = !!overlay && scopeArg !== 'page';
+    if (overlayFirst) take(overlay.el);
+    if (!(scopeArg === 'overlay' && overlay)) take(document);
+    const overlayControls = overlayFirst ? picked.filter(item => overlay.el.contains(item.el)).length : 0;
+    const scopeUsed = overlayFirst ? (scopeArg === 'overlay' ? 'overlay-only' : 'overlay-first')
+      : scopeArg === 'overlay' ? 'page-no-overlay' : 'page';
     // Every read used to mint a fresh uuid, so a caller that read twice could not
     // tell "your refs are still good" from "they all just died". Measured: one
     // login produced nine observes and nine different prefixes while not a single
@@ -1360,8 +1655,56 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const notices = collectNotices(5, deadline);
     timings.totalMs = Math.round(performance.now() - started);
     const partial = elementsBudgetHit || collected.textBudgetHit || overBudget();
-    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, sameAsPrevious: reusable, refsReusable: reusable, refLifetime: 'Refs stay valid across reads while the element list is unchanged; a changed list mints a new snapshot.', notices, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM', diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates, elementsReturned: elements.length, secretFieldsRedacted: elements.filter(e => e.secret).length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit }, contentTrust: 'untrusted webpage data' };
+    // A dialog that is on screen but yields no controls is not an empty dialog:
+    // an entrance animation holds opacity at 0 for a few hundred milliseconds,
+    // and every element inside it reads as hidden. Saying "no controls" would
+    // invite the caller to conclude the dialog is empty.
+    const overlaySettling = overlayFirst && overlayControls === 0;
+    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, sameAsPrevious: reusable, refsReusable: reusable, refLifetime: 'Refs stay valid across reads while the element list is unchanged; a changed list mints a new snapshot.', notices, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: `main-frame; light DOM; ${scopeUsed}`, scopeUsed, ...(overlay ? { overlay: { selector: overlay.selector, zIndex: overlay.zIndex, controls: overlayControls } } : {}), ...(overlaySettling ? { overlaySettling: { selector: overlay.selector, note: 'A visible dialog matched but yielded no controls. An entrance animation keeps its contents at opacity 0 for a moment, so this is not evidence that the dialog is empty. Wait 300-500ms (browser_wait with ms) and read again before concluding anything.' } } : {}), diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates, elementsReturned: elements.length, secretFieldsRedacted: elements.filter(e => e.secret).length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit, overlayControls }, contentTrust: 'untrusted webpage data' };
   }
+  // Text search used to return the match and a list of "nearby elements" that
+  // were nothing of the kind: on a real page the four entries were 客服, the
+  // pagination 1/2 and a region button, because the element budget was spent in
+  // DOM order before the match was ever reached. A caller that has the text but
+  // not the element holding it cannot act, which is why includeMatchElement
+  // resolves the deepest element that contains the matched text and hands out a
+  // usable ref for it.
+  const findMatchElements = (needles, { max = 5, budgetMs = 400 } = {}) => {
+    const out = [];
+    if (!needles.length) return { elements: out, visited: 0, partial: false };
+    const snapshot = crypto.randomUUID();
+    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
+    const deadline = performance.now() + budgetMs;
+    let visited = 0;
+    let partial = false;
+    const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (out.length >= max) break;
+      if (performance.now() >= deadline || visited > 20000) { partial = true; break; }
+      visited++;
+      try {
+        if (sensitive(node)) continue;
+        const own = (node.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!own) continue;
+        const needle = needles.find(item => own.includes(item));
+        if (!needle) continue;
+        // Keep the deepest element that still contains the text: that is the
+        // smallest thing a click can land on, and a click on it still bubbles to
+        // whichever card or row owns the handler.
+        if ([...node.children].some(child => (child.textContent || '').includes(needle))) continue;
+        if (!visible(node)) continue;
+        const box = node.getBoundingClientRect();
+        const ref = `${snapshot}:${state.refs.size + 1}`;
+        state.refs.set(ref, { el: node, fingerprint: fingerprint(node) });
+        out.push({ ref, tag: node.tagName.toLowerCase(), role: node.getAttribute('role'),
+          label: clean(own), matched: needle,
+          rect: { left: box.left, top: box.top, width: box.width, height: box.height },
+          covered: deepHit(box.left + box.width / 2, box.top + box.height / 2) !== node });
+      } catch { /* one unreadable node must not end the search */ }
+    }
+    return { elements: out, visited, partial };
+  };
   if (name === 'browser_find_text') {
     const started = performance.now();
     const query = args.query.replace(/\s+/g, ' ').trim();
@@ -1389,7 +1732,12 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     const textLengthBudgetHit = direct.textLengthBudgetHit;
     const textNotRendered = matches.length === 0 && !elementBudgetHit ? notRenderedDiagnostic() : undefined;
-    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || !!direct?.textBudgetHit || textLengthBudgetHit || elementBudgetHit, matches, nearbyElements, ...(textNotRendered ? { notRendered: textNotRendered } : {}), diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: collected.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, directTextNodesVisited: direct?.textNodesVisited ?? 0, maxTextNodes: 50000, textBudgetHit: collected.textBudgetHit || !!direct?.textBudgetHit, textLengthBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
+    // The element that holds the matched text, so "I can see the words but have
+    // nothing to click" stops being a dead end.
+    const matchElements = args.includeMatchElement && matches.length
+      ? findMatchElements([...new Set(matches.map(m => m.match).filter(Boolean))].slice(0, 5), { max: args.maxMatchElements ?? 5, budgetMs: Math.max(150, Math.min(800, deadline - performance.now())) })
+      : null;
+    return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || !!direct?.textBudgetHit || textLengthBudgetHit || elementBudgetHit, matches, nearbyElements, ...(matchElements ? { matchElements: matchElements.elements, matchElementsPartial: matchElements.partial } : {}), ...(textNotRendered ? { notRendered: textNotRendered } : {}), diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: collected.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, directTextNodesVisited: direct?.textNodesVisited ?? 0, maxTextNodes: 50000, textBudgetHit: collected.textBudgetHit || !!direct?.textBudgetHit, textLengthBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit, ...(matchElements ? { matchElementNodesVisited: matchElements.visited } : {}) }, contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_observe') {
     // Three sections came back unconditionally and maxChars only trimmed
@@ -1892,7 +2240,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     // says the search was incomplete, and adding "it might be unrendered" on top
     // of that would offer two explanations for one unknown.
     const notRendered = candidates.length === 0 && !partial ? notRenderedDiagnostic() : undefined;
-    return { title: document.title, url: location.href, query: args.query, action: args.action || 'any', partial, diagnostics, searchStatus: partial ? 'partial' : 'complete', candidates, found: candidates.length > 0, ...(notRendered ? { notRendered } : {}), guidance: partial ? 'Search is incomplete. Do not infer that the target is absent or unique; inspect a screenshot and refine the scope.' : notRendered ? 'Nothing matched, and this page has scrollable containers that may hide unrendered rows. Scroll one and search again before concluding the target is absent.' : 'Verify the intended target and row before using an uncovered enabled candidate. If covered, inspect overlays before writing.', contentTrust: 'untrusted webpage data plus extension hit testing' };
+    return { title: document.title, url: location.href, query: args.query, action: args.action || 'any', partial, concluded: !partial, diagnostics, searchStatus: partial ? 'partial' : 'complete', candidates, found: candidates.length > 0, ...(notRendered ? { notRendered } : {}), guidance: partial ? 'Search is incomplete, so found:false does not mean absent. Do not infer that the target is absent or unique; inspect a screenshot and refine the scope.' : notRendered ? 'Nothing matched, and this page has scrollable containers that may hide unrendered rows. Scroll one and search again before concluding the target is absent.' : 'Verify the intended target and row before using an uncovered enabled candidate. If covered, inspect overlays before writing.', contentTrust: 'untrusted webpage data plus extension hit testing' };
   }
   if (name === 'browser_prepare_action') {
     const { candidates, partial, diagnostics } = findElementCandidates({ query: args.query, rowText: args.rowText, role: args.role, action: args.action || 'any', maxResults: 8, includeCovered: true });
@@ -2087,16 +2435,37 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       // Structured, not thrown: the caller needs the covering element, not a
       // sentence, and it needs to be told that dismissing it invalidates refs.
       const coveredBy = describeCover(hit, el, x, y);
+      // "Press Escape and click again" is actively destructive when the cover
+      // is the dialog the target lives in: Escape closes it and the target with
+      // it. Measured on a real antd modal, where the recommendation would have
+      // destroyed the very form the caller was filling in.
+      const topOverlay = overlayCandidates();
+      const dialogOf = node => node?.closest?.('[aria-modal="true"],dialog,[role=dialog],[role=alertdialog],.ant-modal,.el-dialog,.ant-drawer') ?? null;
+      const targetDialog = dialogOf(el);
+      // The mask of a dialog is not itself a dialog: a click on a background
+      // element lands on .ant-modal-wrap, whose closest dialog is null, so the
+      // mask looks like a stray blocker and the advice becomes "press Escape".
+      const coverDialog = dialogOf(hit) ?? (topOverlay && topOverlay.el.contains(hit) ? topOverlay.el : null);
+      const related = (a, b) => !!a && !!b && (a === b || a.contains(b) || b.contains(a));
+      const sameDialog = related(targetDialog, coverDialog);
+      const targetBehindDialog = !targetDialog && !!coverDialog;
+      const suggestedAction = sameDialog
+        ? 'Do NOT press Escape: it closes this dialog and the target with it. The click point is owned by another element inside the same dialog. Read the dialog with browser_read scope:"overlay" (or browser_shadow_tree) and act on the element that actually owns the point, or click the card or row container that wraps the target.'
+        : targetBehindDialog
+          ? 'The target is behind an open dialog, not under a stray overlay. Operate the dialog instead (browser_read scope:"overlay"), or close it deliberately if the task really is on the page beneath. Escape would close the dialog, which is a change the caller did not ask for.'
+          : coveredBy.dismissPath === 'escape'
+            ? 'browser_key with Escape, then browser_read for fresh refs, then click again.'
+            : coveredBy.dismissPath === 'click_outside'
+              ? 'Click a point outside the covering element, then browser_read for fresh refs, then click again.'
+              : 'browser_scan_overlays then browser_dismiss_overlay, then browser_read for fresh refs, then click again.';
       return {
         status: 'covered', clicked: false, dispatched: false, retryable: false,
         reason: 'element_covered',
         coveredBy,
-        suggestedAction: coveredBy.dismissPath === 'escape'
-          ? 'browser_key with Escape, then browser_read for fresh refs, then click again.'
-          : coveredBy.dismissPath === 'click_outside'
-            ? 'Click a point outside the covering element, then browser_read for fresh refs, then click again.'
-            : 'browser_scan_overlays then browser_dismiss_overlay, then browser_read for fresh refs, then click again.',
-        message: 'Nothing was clicked: another element owns the click point. Refs are one-shot, so dismissing the cover invalidates every ref you are holding - re-read before clicking again, and do not simply repeat this call.'
+        coveredByIsDialog: !!coverDialog,
+        targetInsideCoverDialog: sameDialog,
+        suggestedAction,
+        message: 'Nothing was clicked: another element owns the click point. Refs stay valid only while the element list is unchanged, and dismissing an overlay changes it - re-read before clicking again, and do not simply repeat this call.'
       };
     }
     el.click();

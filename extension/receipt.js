@@ -78,12 +78,34 @@ export function duplicateKey(name, tabId, args, digest) {
 // The comparison is intentionally shallow. A deep diff would be expensive, and a
 // deep diff that says "changed: false" because it looked at the wrong thing is
 // worse than a cheap one that says "no change observed, keep watching".
+//
+// The one thing it must never do is report a false negative for a toggle. A
+// checkbox that flipped is a real change that the caller will otherwise undo by
+// clicking again, so the state of the acted-on element is compared field by
+// field and reported as stateBefore/stateAfter, independently of the digest.
+const TOGGLE_FIELDS = ['checked', 'ariaChecked', 'ariaSelected', 'ariaExpanded', 'ariaPressed', 'disabled'];
+
+function stateDelta(before, after) {
+  const first = before?.watch ?? null;
+  const second = after?.watch ?? null;
+  if (!first?.resolved || !second?.resolved) return null;
+  const changed = TOGGLE_FIELDS.filter(field => first[field] !== second[field]);
+  return {
+    stateBefore: first,
+    stateAfter: second,
+    stateChanged: changed.length > 0,
+    stateFieldsChanged: changed
+  };
+}
+
 export function describeChange(before, after) {
   if (!before || !after) {
     return { measured: false, changed: null,
       note: 'A fingerprint could not be taken on one side of the action, so there is no receipt for it. That is a gap in the evidence, not evidence that nothing changed.' };
   }
-  const changed = before.digest !== after.digest;
+  const state = stateDelta(before, after);
+  const toggled = state?.stateChanged === true;
+  const changed = before.digest !== after.digest || toggled;
   return {
     measured: true,
     changed,
@@ -97,8 +119,14 @@ export function describeChange(before, after) {
     scrolled: before.scroll.x !== after.scroll.x || before.scroll.y !== after.scroll.y,
     digestBefore: before.digest,
     digestAfter: after.digest,
+    // The direct answer to "did the control I acted on actually change", which
+    // the digest can only imply and a screenshot can only settle.
+    ...(state ? { stateBefore: state.stateBefore, stateAfter: state.stateAfter,
+      stateChanged: state.stateChanged, stateFieldsChanged: state.stateFieldsChanged } : {}),
     note: changed
-      ? 'The page differed immediately after the action. A difference is evidence that something happened, not proof that it was the intended thing.'
+      ? toggled && before.digest === after.digest
+        ? `The control changed (${state.stateFieldsChanged.join(', ')}) even though the page digest did not. Read stateAfter for the observed value; that is a DOM reading, not proof the site accepted it.`
+        : 'The page differed immediately after the action. A difference is evidence that something happened, not proof that it was the intended thing.'
       : 'No change was observed immediately after the action. An asynchronous update may not have rendered yet, so this is not evidence that the action failed: use browser_wait or read the page before concluding anything.'
   };
 }
