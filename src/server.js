@@ -404,6 +404,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     : name === 'browser_replay_request' ? Math.max(timeoutMs, 65000)
     : name === 'browser_login_state' && Number.isFinite(args.timeoutMs)
       ? Math.max(timeoutMs, Math.min(60000, args.timeoutMs) + 10000)
+    : name === 'browser_download_wait' && Number.isFinite(args.timeoutMs)
+      ? Math.max(timeoutMs, Math.min(20000, args.timeoutMs) + 5000)
     // A recipe run is many steps in one call, each with its own load wait.
     : name === 'browser_recipe_run' ? Math.max(timeoutMs, 120000)
     : timeoutMs;

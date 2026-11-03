@@ -40,10 +40,14 @@ export const TOOL_GROUPS = [
     'browser_otp_fetch', 'browser_identity', 'browser_cookies', 'browser_cookies_write',
     'browser_storage_read', 'browser_storage_write'
   ] },
-  { id: 'capture', purpose: '截图、PDF、剪贴板、模拟与注入', tools: [
+  { id: 'capture', purpose: '截图、PDF打印保存、整页MHTML保存、剪贴板、模拟与注入', tools: [
     'browser_screenshot', 'browser_pdf_save', 'browser_save_page', 'browser_clipboard',
     'browser_clipboard_write', 'browser_emulation', 'browser_init_script'
   ] },
+  { id: 'download', purpose: '查下载列表、等待一个精确下载ID完成、管理下载项', tools: [
+    'browser_downloads', 'browser_download_wait', 'browser_downloads_control'
+  ] },
+
   { id: 'debug', purpose: '诊断、队列、能力查询', tools: [
     'browser_health', 'browser_debug', 'browser_failure_help', 'browser_queue_status',
     'browser_wait_until_ready', 'browser_capability_guide', 'browser_bridge_modes',
@@ -60,8 +64,7 @@ export const TOOL_GROUPS = [
   ] },
   { id: 'maintenance', purpose: '浏览器自身设置（低频，日常任务通常用不到）', tools: [
     'browser_bookmarks', 'browser_bookmarks_write', 'browser_history', 'browser_history_search',
-    'browser_history_delete', 'browser_downloads', 'browser_downloads_control',
-    'browser_extensions', 'browser_extension_state', 'browser_clear_browsing_data',
+    'browser_history_delete', 'browser_extensions', 'browser_extension_state', 'browser_clear_browsing_data',
     'browser_site_settings', 'browser_site_settings_write', 'browser_privacy_settings',
     'browser_privacy_settings_write', 'browser_windows_control', 'browser_proxy',
     'browser_proxy_write', 'browser_native_messaging', 'browser_native_ports',
@@ -73,25 +76,34 @@ export const TOOL_GROUPS = [
 // Words a caller might use that do not appear in a group id or tool name.
 const ALIASES = {
   network: ['api', '接口', 'post', 'get', 'http', '请求', '回读', 'verify', '写操作', 'fetch'],
-  act: ['点击', '输入', '填写', 'click', 'fill', 'type', '提交', 'submit'],
+  act: ['点击', '输入', '填写', '上传', '附件', 'click', 'fill', 'type', 'upload', 'attach file', '提交', 'submit'],
   read: ['读', '文本', '元素', 'text', 'dom', '内容', 'js', 'eval', 'evaluate', '脚本', 'script', 'expression', '执行'],
   overlay: ['遮挡', '弹窗', '蒙层', 'covered', 'popup', 'toast'],
   tab: ['标签页', '窗口', 'tab', 'navigate', '打开'],
   auth: ['登录', '密码', 'login', 'password', 'cookie', 'token'],
-  capture: ['截图', 'screenshot', 'pdf', '剪贴板'],
+  capture: ['截图', 'screenshot', 'pdf', '打印成pdf', '保存网页为pdf', '剪贴板'],
+  download: ['下载', '下载列表', '下载记录', '下载状态', '下载项', 'download', 'download list', 'download history', 'download status', 'download item'],
   debug: ['报错', '卡住', '失败', 'error', 'stuck', '诊断'],
   desktop: ['原生', 'chrome://', 'uia', '窗口句柄'],
   recipe: ['流程', '复用', 'flow'],
-  maintenance: ['书签', '历史', '下载', '扩展', '代理', '证书', '设置']
+  maintenance: ['书签', '历史', '扩展', '代理', '证书', '设置']
+};
+
+const englishAliasMatches = (needle, alias) => {
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${escaped}\\b`, 'i').test(needle);
 };
 
 function matches(goal) {
-  const needle = goal.toLowerCase();
+  const needle = goal.toLowerCase().replace(/\s+/g, ' ').trim();
   return TOOL_GROUPS.filter(group => {
-    if (group.id.includes(needle)) return true;
-    if (group.purpose.toLowerCase().includes(needle)) return true;
-    if ((ALIASES[group.id] ?? []).some(word => word.toLowerCase().includes(needle))) return true;
-    return group.tools.some(name => name.includes(needle));
+    if (group.id === needle || group.id.includes(needle)) return true;
+    if (needle && group.purpose.toLowerCase().includes(needle)) return true;
+    if ((ALIASES[group.id] ?? []).some(raw => {
+      const alias = raw.toLowerCase();
+      return needle.includes(alias) || (/^[a-z0-9 ]+$/i.test(alias) && englishAliasMatches(needle, alias));
+    })) return true;
+    return group.tools.some(name => needle === name || (needle.length >= 8 && needle.includes(name)));
   });
 }
 

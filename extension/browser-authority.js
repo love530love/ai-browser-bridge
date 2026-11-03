@@ -317,6 +317,50 @@ async function downloadsRead(args) {
     note: 'filename is an absolute local path. exists says whether the file is still on disk; Chrome cannot report that for a file it was never allowed to stat.' };
 }
 
+async function downloadsWait(args) {
+  const id = args.downloadId;
+  if (!Number.isInteger(id) || id < 1) {
+    return badRequest('browser_download_wait', 'download_id_required', 'Waiting for a download needs the exact numeric downloadId from browser_downloads, browser_pdf_save or browser_save_page.');
+  }
+  const timeoutMs = limit(args.timeoutMs, 12000, 20000);
+  const pollMs = limit(args.pollMs, 500, 1000);
+  const deadline = Date.now() + timeoutMs;
+  let polls = 0;
+  let last = null;
+  for (;;) {
+    const items = await chrome.downloads.search({ id });
+    polls++;
+    if (!items.length) {
+      return { status: 'not_found', retryable: false, reason: 'download_not_found', downloadId: id,
+        polls, contentTrust: UNTRUSTED,
+        note: 'Chrome has no download item with this exact id. No new download was started; do not guess another id.' };
+    }
+    const item = items[0];
+    last = downloadRow(item);
+    if (item.state === 'complete') {
+      const fileExists = item.exists === true;
+      return { status: 'success', retryable: false, downloadId: id, outcome: 'complete', terminal: true,
+        download: last, fileExists, verified: fileExists,
+        contentTrust: UNTRUSTED,
+        note: fileExists
+          ? 'Chrome reports this exact download complete and its file exists. This does not validate the file contents, safety or authenticity, and the file was not opened.'
+          : 'Chrome reports this exact download complete, but does not confirm the file still exists. This is not a content-integrity check; the file was not opened.' };
+    }
+    if (item.state === 'interrupted') {
+      return { status: 'failed', retryable: false, reason: 'download_interrupted', downloadId: id,
+        outcome: 'interrupted', terminal: true, download: last, polls, contentTrust: UNTRUSTED,
+        note: 'Chrome reports this exact download interrupted. No retry or second download was started.' };
+    }
+    if (Date.now() >= deadline) {
+      return { status: 'in_progress', retryable: true, reason: 'download_wait_timeout', downloadId: id,
+        outcome: item.state || 'unknown', terminal: false, timedOut: true, polls, download: last,
+        contentTrust: UNTRUSTED,
+        recommendedNextAction: 'The bounded observation window ended before Chrome reported a terminal state. Read browser_downloads for this exact id; decide whether to wait again. Do not start another download to probe the first one.' };
+    }
+    await new Promise(resolve => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
+  }
+}
+
 async function downloadsControl(args) {
   const action = args.action;
   const id = args.downloadId;
@@ -848,6 +892,7 @@ const HANDLERS = {
   browser_history_search: historyRead,
   browser_history_delete: historyDelete,
   browser_downloads: downloadsRead,
+  browser_download_wait: downloadsWait,
   browser_downloads_control: downloadsControl,
   browser_extensions: extensionsRead,
   browser_extension_state: extensionState,

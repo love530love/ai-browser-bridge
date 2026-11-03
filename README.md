@@ -64,6 +64,7 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 - 点击、填写、选择、滚动、上传、下载、导航和关闭标签页，并对关键写操作做结果验证。密码框默认拒绝填写，`browser_fill` / `browser_fill_verified` 需显式 `secret:true` 才放行，且不回显写入的值。
 - 处理 iframe、重型 SPA、虚拟滚动、下拉框、广告、引导层、客服浮窗和透明遮挡。
 - 通过 DOM、Accessibility、Debugger、截图和坐标适配器进行分层兜底；没有 GPT 时仍可使用本地确定性工具链。
+- **下载意图有独立路由和终态观察（0.32.0）**：查看记录走下载列表，等待已有记录用精确 `downloadId` 的 `browser_download_wait`（最长 20 秒），上传与页面下载不再混为一条路径。页面下载要先定位链接并显式点击，再用 URL/文件名/时间证据核对 Chrome 下载记录；当前没有可靠的一键 click→downloadId 关联，多候选就报告歧义。`verified:true` 只证明 Chrome 报 complete 且文件存在，不代表内容可信或已安全扫描，工具不会自动打开文件。
 - **坐标与 DOM ref 现在能无缝交接（0.31.0）**：`browser_prepare_coordinate` 返回 `target.hitRef`，并在目标为语义控件或可验证的 `cursor:pointer` 卡片时另给 `clickRef` + 证据。若 DOM 点击语义相同，优先 `browser_click({tabId, ref:clickRef})`，免去截图像素→坐标→DOM 目标的往返；坐标 token 仍留给必须复现真实指针行为的场景。`browser_pick` 找不到选择器时会在不点击的前提下扫描精确可见卡片，返回可复用 ref、匹配质量、几何和可点击证据；只有一个完全匹配的 `cursor:pointer` 卡片时才附带经 schema 校验的 `browser_click` nextStep；同名语义按钮、多个相同项或子串命中只引导读上下文，不会猜着点。共享 `cursor:pointer` 父容器包着多张卡片时会定位到各自卡片，不会把整组当一张；坐标命中标题文字时会提升到最近的卡片级节点。普通 checkbox/input 不会被误当 picker 触发点击。
 - 停靠式 DevTools 可观察、可选择 Elements/Console/Network 等面板，也可由基座**打开与关闭**：`browser_devtools` 的 `open` / `close` 走浏览器自己的菜单（More tools → Developer tools），不合成 F12，没有焦点竞态；对外是请求一个状态而非切换，已在目标状态就 `dispatched:false`。关闭要求走查完整（`partial:false`）才算数。分离（detached）DevTools 只报 `detachedDevtools`，尚不能绑定。
 - `browser_devtools_capture` 通过 CDP 在单次 attach 的有界窗口内只读捕获 Console 消息、异常、Network 请求行、Sources 脚本列表和 Performance 指标；空结果不证明没有发生，网络记录不含 header/cookie/body，缓冲溢出以 `dropped`/`truncated` 计数上报。

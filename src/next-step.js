@@ -168,6 +168,32 @@ const RULES = [
   // fail need three different moves. Reporting them as one reason made a caller
   // re-prepare when it had simply reused a token, or retry a dead one forever.
   {
+    id: 'download_wait_timeout',
+    match: r => r.reason === 'download_wait_timeout' && Number.isInteger(r.downloadId),
+    step: (r, a) => ({
+      kind: 'diagnose',
+      tool: 'browser_downloads',
+      arguments: { downloadId: r.downloadId, limit: 1, ...(a.agent ? { agent: a.agent } : {}) },
+      why: 'The bounded wait ended while this exact download was still in progress. Read its current Chrome state first; if it remains active, you may intentionally wait again for the same ID. Do not start or replay another download to test it.'
+    })
+  },
+  {
+    id: 'download_not_found',
+    match: r => r.reason === 'download_not_found',
+    step: () => ({
+      kind: 'stop', tool: null, arguments: {},
+      why: 'Chrome has no item with that exact downloadId. Do not guess another ID or repeat the page action; inspect browser_downloads and identify the intended record first.'
+    })
+  },
+  {
+    id: 'download_interrupted',
+    match: r => r.reason === 'download_interrupted',
+    step: () => ({
+      kind: 'stop', tool: null, arguments: {},
+      why: 'Chrome reports this exact download interrupted. Do not automatically repeat it: inspect the reason, destination and user intent before deciding whether a new download is appropriate.'
+    })
+  },
+  {
     id: 'coordinate_token',
     match: r => /^coordinate_token_/.test(reasonOf(r)) || (Array.isArray(r.validationFailures) && r.validationFailures.some(f => /^coordinate_token_/.test(f))),
     step: (r, a) => {

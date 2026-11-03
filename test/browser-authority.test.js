@@ -41,7 +41,14 @@ function fakeChrome() {
     },
     topSites: { get: async () => [{ url: 'https://example.com/', title: 'Example' }] },
     downloads: {
-      search: async () => [], pause: record('downloads', 'pause'), resume: record('downloads', 'resume'),
+      downloadSearchResponses: null,
+      search: async query => {
+        calls.push({ area: 'downloads', method: 'search', args: [query] });
+        const responses = chrome.downloads.downloadSearchResponses;
+        if (!Array.isArray(responses) || !responses.length) return [];
+        if (responses.length > 1) return responses.shift();
+        return responses[0];
+      }, pause: record('downloads', 'pause'), resume: record('downloads', 'resume'),
       cancel: record('downloads', 'cancel'), open: record('downloads', 'open'),
       show: record('downloads', 'show'), erase: record('downloads', 'erase'), download: record('downloads', 'download')
     },
@@ -208,6 +215,60 @@ test('a proxy set is verified against the mode the browser reports back', async 
   assert.deepEqual(sent.args[0].value.rules.singleProxy, { scheme: 'http', host: '127.0.0.1', port: 8080 });
   // The fake still reports "system", so the honest answer is verified:false.
   assert.equal(result.verified, false);
+});
+
+test('download wait returns terminal completion only for the requested Chrome download id', async () => {
+  const { module, chrome } = await load();
+  chrome.downloads.downloadSearchResponses = [[{
+    id: 17, filename: 'C:\\fixture\\report.pdf', url: 'https://files.example/report.pdf',
+    finalUrl: 'https://cdn.example/report.pdf', state: 'complete', exists: true,
+    bytesReceived: 256, totalBytes: 256, danger: 'safe'
+  }]];
+  const result = await module.runAuthorityTool('browser_download_wait', { downloadId: 17 });
+  assert.equal(result.status, 'success');
+  assert.equal(result.outcome, 'complete');
+  assert.equal(result.downloadId, 17);
+  assert.equal(result.verified, true);
+  assert.equal(result.download.filename, 'C:\\fixture\\report.pdf');
+  assert.deepEqual(chrome.calls.filter(call => call.method === 'search').map(call => call.args[0]), [{ id: 17 }]);
+  assert.match(result.note, /does not validate the file contents/);
+});
+
+test('download wait does not overstate a missing file or an interrupted transfer', async () => {
+  const f = await load();
+  f.chrome.downloads.downloadSearchResponses = [[{ id: 18, state: 'complete', exists: false, filename: 'C:\\fixture\\gone.pdf' }]];
+  const missingFile = await f.module.runAuthorityTool('browser_download_wait', { downloadId: 18 });
+  assert.equal(missingFile.outcome, 'complete');
+  assert.equal(missingFile.fileExists, false);
+  assert.equal(missingFile.verified, false);
+
+  f.chrome.downloads.downloadSearchResponses = [[{ id: 19, state: 'interrupted', error: 'NETWORK_FAILED', filename: 'C:\\fixture\\partial.pdf' }]];
+  const interrupted = await f.module.runAuthorityTool('browser_download_wait', { downloadId: 19 });
+  assert.equal(interrupted.status, 'failed');
+  assert.equal(interrupted.reason, 'download_interrupted');
+  assert.equal(interrupted.retryable, false);
+});
+
+test('download wait times out without starting or replaying a download', async () => {
+  const { module, chrome } = await load();
+  chrome.downloads.downloadSearchResponses = [[{ id: 21, state: 'in_progress', exists: false, bytesReceived: 10, totalBytes: 100 }]];
+  const result = await module.runAuthorityTool('browser_download_wait', { downloadId: 21, timeoutMs: 250, pollMs: 100 });
+  assert.equal(result.status, 'in_progress');
+  assert.equal(result.reason, 'download_wait_timeout');
+  assert.equal(result.timedOut, true);
+  assert.equal(result.terminal, false);
+  assert.ok(chrome.calls.filter(call => call.area === 'downloads').every(call => call.method === 'search'));
+});
+
+test('download wait refuses a missing or invented id without searching broadly', async () => {
+  const { module, chrome } = await load();
+  const noId = await module.runAuthorityTool('browser_download_wait', {});
+  assert.equal(noId.reason, 'download_id_required');
+  assert.equal(chrome.calls.length, 0);
+  chrome.downloads.downloadSearchResponses = [[]];
+  const missing = await module.runAuthorityTool('browser_download_wait', { downloadId: 999 });
+  assert.equal(missing.reason, 'download_not_found');
+  assert.deepEqual(chrome.calls.find(call => call.method === 'search').args[0], { id: 999 });
 });
 
 test('a chrome API rejection becomes a structured failure, not an exception', async () => {

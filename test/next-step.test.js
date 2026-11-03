@@ -55,6 +55,26 @@ test('a picker-card handoff clicks only one exact candidate and reads on ambigui
   assert.equal(partial.tool, 'browser_read', 'an incomplete scan cannot prove uniqueness');
 });
 
+test('download wait timeout and failures never suggest starting or opening another file', () => {
+  const timeout = nextStepFor('browser_download_wait', { downloadId: 17, agent: 'workbuddy' }, {
+    status: 'in_progress', reason: 'download_wait_timeout', downloadId: 17, retryable: true
+  });
+  assert.equal(timeout.tool, 'browser_downloads');
+  assert.deepEqual(timeout.arguments, { downloadId: 17, limit: 1, agent: 'workbuddy' });
+
+  const missing = nextStepFor('browser_download_wait', { downloadId: 99 }, {
+    status: 'not_found', reason: 'download_not_found', downloadId: 99
+  });
+  assert.equal(missing.kind, 'stop');
+  assert.equal(missing.tool, null);
+
+  const interrupted = nextStepFor('browser_download_wait', { downloadId: 21 }, {
+    status: 'failed', reason: 'download_interrupted', downloadId: 21
+  });
+  assert.equal(interrupted.kind, 'stop');
+  assert.equal(interrupted.tool, null);
+});
+
 test('a covered click points at the overlay scan, not at a second click', () => {
   const step = nextStepFor('browser_click', { tabId: TAB, ref: 'e1' }, { status: 'covered', reason: 'element_covered', dispatched: false });
   assert.equal(step.tool, 'browser_scan_overlays');

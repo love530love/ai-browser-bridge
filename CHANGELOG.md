@@ -1,3 +1,28 @@
+## 0.32.0 — 2026-11-03（**下载不再误路由到上传，已知 downloadId 可等到终态**）
+
+0.31.0 修了「找到目标 ref 后怎么交接」。这一版修更早的一步：**Agent 说“下载”，能力指南却把它路由到上传**；即使调用方找到正确下载工具，也只能反复查列表猜状态。
+
+### P0：把上传、页面下载、下载管理与 PDF 打印拆成不同意图
+
+- `capability-guide` 删除宽泛的 `upload-or-download`，拆成三个有不同执行语义的 intent：
+  - `download-manager`：查看记录/状态/列表 → `browser_downloads`、精确 ID 的 `browser_download_wait` 与下载项控制。
+  - `download-from-page`：页面文件下载 → 先读页面找到明确链接，再由 Agent 显式点击，最后查 Chrome 下载项；不假装点击与记录已关联。
+  - `upload-file`：只处理本地文件上传；不把下载/附件/通用 file 需求统统推荐上传。
+- 页面打印为 PDF 仍然走 `print-to-pdf` / `browser_pdf_save`；保存整个页面为 MHTML 不是页面文件下载，也不叫 PDF 打印。
+- 工具索引新增独立 `download` 组，并补自然语言短语/英文 token 匹配。“查看下载列表并等待完成”缩窄到下载组，“保存网页为 PDF”缩窄到 capture 组，“上传本地文件”缩窄到 act 组，而不是退回完整工具清单。
+
+### P1：给已知 downloadId 增加有界终态等待
+
+- 新增只读工具 **`browser_download_wait`**：只接受精确数字 `downloadId`，只查询 Chrome `downloads.search({id})`；不会启动、重试、打开或编辑下载。
+- 最长观察 20 秒，默认 12 秒；返回 `complete`、`interrupted`、`not_found` 或 `in_progress + timedOut:true`。超时后的下一步是读同一 ID 的当前状态，不是再次触发文件下载。
+- `verified:true` 仅表示 Chrome 报 `state:"complete"` 且 `exists:true`；它**不验证文件内容、来源或安全性**，也不会打开文件。文件名和 URL 明确是非可信浏览器元数据。
+- **有意保留的缺口**：普通页面点击还没有与下载记录建立可靠的一对一关联。指南要求用 URL/文件名/时间等证据核对；多候选时报告歧义，不按“刚出现”猜测。用户对安全判断的委托不构成 Chrome/OS 授权或目标绑定依据。
+
+### 验证
+
+- 新增/更新测试覆盖下载路由隔离、索引自然语言缩窄、精确 ID 查询、完成且文件存在/缺失、interrupted、bounded timeout 与 unknown ID；超时/中断都不推荐自动发起第二次下载。
+- 验证：专项路由/authority/next-step 测试 **52/52**；全量 `npm test` **687/687**。服务与扩展均为 **0.32.0**；`doctor` **12/12**（config、service/deployment、extension、target、schema、queue 全通过）；已 reload 扩展并关闭 reload 工具新开的 `chrome://extensions/` 错误页标签。
+
 ## 0.31.0 — 2026-11-03（**从「坐标点到了谁」走到「给我可复用的目标句柄」**）
 
 0.30.0 让工具看见了卡片；这一版把最后一段人工翻译也拿掉：以前需要「截图 → 猜坐标 → `prepare_coordinate` →

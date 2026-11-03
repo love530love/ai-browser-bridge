@@ -63,6 +63,23 @@ test('a goal narrows the index, in either language', () => {
   assert.deepEqual(nothing.groups, TOOL_GROUPS.map(group => group.id));
 });
 
+test('natural download and PDF goals resolve to the right, separate groups', () => {
+  const downloads = toolIndex({ goal: '查看下载列表并等待这个下载完成' });
+  assert.deepEqual(downloads.groups, ['download']);
+  assert.ok(downloads.index.includes('browser_downloads'));
+  assert.ok(downloads.index.includes('browser_download_wait'));
+  assert.ok(!downloads.index.includes('browser_upload'));
+
+  const pdf = toolIndex({ goal: '把当前网页保存为 PDF' });
+  assert.deepEqual(pdf.groups, ['capture']);
+  assert.ok(pdf.index.includes('browser_pdf_save'));
+  assert.ok(!pdf.index.includes('browser_downloads_control'));
+
+  const upload = toolIndex({ goal: '上传本地文件' });
+  assert.deepEqual(upload.groups, ['act']);
+  assert.ok(upload.index.includes('browser_upload_verified'));
+});
+
 test('the json form carries the same data as the text form', () => {
   const json = toolIndex({ format: 'json' });
   assert.equal(json.status, 'success');

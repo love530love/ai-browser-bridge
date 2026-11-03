@@ -19,7 +19,7 @@ REA 明确这是静态证据：未执行扩展启动代码，动态名称、运�
 | 点击、输入、选择、滚动、拖拽、键盘操作 | content script + 坐标回退 | 已实现 | 写操作需租约；不确定结果不自动重放 |
 | 后台标签/非前台窗口下的读写与指针派发 | content script + CDP（按 tabId 投递） | 已实现且本机实测（2026-10-27，0.5.24，`test/focus-matrix.js` 25/25） | 默认不要求前台；`requireForeground:true` 可恢复严格模式；真正的前台硬限制只有 UIA 的 `SendKeys`（扩展 Reload）与最小化窗口下的 UIA 回读 |
 | 文件上传与上传校验 | Bridge 受限目录 | 已实现 | 仅配置的 uploadRoots；路径越界拒绝 |
-| 下载触发与完成核验 | 页面交互；完整下载事件适配器待实现 | 部分实现 | 可点击页面下载入口；尚无 Chrome 下载完成/中断事件与落盘文件关联闭环 |
+| 下载记录与单项终态观察（0.32.0） | `browser_downloads` + `browser_download_wait(downloadId)` | 已实现且有界 | 等待只按已知精确 ID 查询，不启动/重放/打开文件；`verified:true` 仅代表 Chrome complete + exists。普通页面点击到 downloadId 的一对一关联仍未实现，多候选必须报歧义 |
 | 页面截图、元素截图、视口/布局信息 | Extension/Debugger | 已实现 | 页面权限和浏览器版本相关 |
 | 网络请求/控制台/性能诊断 | Debugger/CDP 适配器 | 部分实现 | 需明确启用 debugger；敏感内容脱敏 |
 | 源代码、脚本、样式和资源 URL | Debugger/页面资源读取 | 部分实现 | 跨源、受保护资源和加密内容可能不可见 |

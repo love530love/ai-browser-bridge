@@ -183,7 +183,27 @@ test('the DevTools-parity capabilities are routed to by goal, not by name', () =
   // intents, and a loose match here would re-route those goals silently.
   assert.equal(capabilityGuide({ goal: '把这个请求重放一次看看返回什么' }).primary.intent, 'network');
   assert.equal(capabilityGuide({ goal: '给这个页面打个断点，然后改一下脚本' }).primary.intent, 'debug-or-breakpoint');
-  assert.equal(capabilityGuide({ goal: '下载这个 pdf 附件' }).primary.intent, 'upload-or-download');
+  const pageDownload = capabilityGuide({ goal: '下载这个 pdf 附件' });
+  assert.equal(pageDownload.primary.intent, 'download-from-page');
+  assert.ok(pageDownload.primary.tools.includes('browser_downloads'));
+  assert.ok(pageDownload.primary.tools.includes('browser_click'));
+  assert.ok(!pageDownload.primary.tools.includes('browser_upload'));
+  assert.match(pageDownload.primary.why, /not automatically correlated to a download ID/i);
+
+  const downloadList = capabilityGuide({ goal: '查看下载列表' });
+  assert.equal(downloadList.primary.intent, 'download-manager');
+  assert.ok(downloadList.primary.tools.includes('browser_download_wait'));
+  assert.deepEqual(downloadList.matchedIntents, ['download-manager']);
+  assert.ok(!downloadList.chain.includes('browser_upload'));
+  assert.ok(!downloadList.chain.includes('browser_history_delete'));
+
+  const upload = capabilityGuide({ goal: '上传附件' });
+  assert.equal(upload.primary.intent, 'upload-file');
+  assert.ok(upload.primary.tools.includes('browser_upload_verified'));
+
+  const pdfSave = capabilityGuide({ goal: '把当前网页保存为 PDF' });
+  assert.equal(pdfSave.primary.intent, 'print-to-pdf');
+  assert.ok(pdfSave.primary.tools.includes('browser_pdf_save'));
   // Each reply has to carry its own uncertainty rather than a bare success.
   assert.match(capabilityGuide({ goal: '有个确认对话框挡住了，帮我点掉' }).primary.prefer, /verified:false/);
   assert.match(capabilityGuide({ goal: '把这张卡片拖到回收站里' }).primary.prefer, /verified is always false/);
