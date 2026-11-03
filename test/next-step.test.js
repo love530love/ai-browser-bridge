@@ -22,6 +22,39 @@ test('an uncertain write is sent to a read, never to a retry', () => {
   assert.match(step.why, /repeating a write that may have already happened/);
 });
 
+test('a picker-card handoff clicks only one exact candidate and reads on ambiguity or prior dispatch', () => {
+  const candidate = { ref: 'snapshot:1', match: 'exact', clickability: 'cursor-pointer' };
+  const unique = nextStepFor('browser_pick', { tabId: TAB, chooseText: '1 x P800', agent: 'workbuddy' }, {
+    status: 'not_found', reason: 'picker_card_candidates', dispatched: false, candidates: [candidate]
+  });
+  assert.equal(unique.tool, 'browser_click');
+  assert.deepEqual(unique.arguments, { tabId: TAB, ref: 'snapshot:1', agent: 'workbuddy' });
+
+  const semantic = nextStepFor('browser_pick', { tabId: TAB, chooseText: '1 x P800' }, {
+    status: 'not_found', reason: 'picker_card_candidates', dispatched: false,
+    candidates: [{ ...candidate, clickability: 'semantic-control' }]
+  });
+  assert.equal(semantic.tool, 'browser_read', 'a matching button is not a card-selection proof');
+
+  const ambiguous = nextStepFor('browser_pick', { tabId: TAB, chooseText: '1 x P800' }, {
+    status: 'not_found', reason: 'picker_card_candidates', dispatched: false,
+    candidates: [candidate, { ...candidate, ref: 'snapshot:2' }]
+  });
+  assert.equal(ambiguous.tool, 'browser_read');
+
+  const opened = nextStepFor('browser_pick', { tabId: TAB, chooseText: '1 x P800', agent: 'workbuddy' }, {
+    status: 'not_found', reason: 'picker_card_candidates', dispatched: true, candidates: [candidate]
+  });
+  assert.equal(opened.tool, 'browser_read', 'a prior dispatch requires fresh observation even with one exact result');
+  assert.deepEqual(opened.arguments, { tabId: TAB, mode: 'cheap', agent: 'workbuddy' });
+
+  const partial = nextStepFor('browser_pick', { tabId: TAB, chooseText: '1 x P800' }, {
+    status: 'not_found', reason: 'picker_card_candidates', dispatched: false, candidates: [candidate],
+    candidateScan: { partial: true, stoppedBy: 'result_limit' }
+  });
+  assert.equal(partial.tool, 'browser_read', 'an incomplete scan cannot prove uniqueness');
+});
+
 test('a covered click points at the overlay scan, not at a second click', () => {
   const step = nextStepFor('browser_click', { tabId: TAB, ref: 'e1' }, { status: 'covered', reason: 'element_covered', dispatched: false });
   assert.equal(step.tool, 'browser_scan_overlays');

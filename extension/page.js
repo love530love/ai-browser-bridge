@@ -83,7 +83,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   };
   const cheapLabel = el => (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || el.getAttribute('id') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180);
   const fingerprint = el => JSON.stringify([el.tagName, el.getAttribute('type'), label(el), el.getAttribute('href'), el.getAttribute('formaction')]);
-  const rememberState = state => {
+  const rememberState = (state, makeCurrent = true) => {
     state.createdAt = Date.now();
     const snapshots = globalThis.__aiBrowserBridgeSnapshots instanceof Map ? globalThis.__aiBrowserBridgeSnapshots : new Map();
     snapshots.set(state.snapshot, state);
@@ -93,7 +93,10 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       if (now - (value.createdAt || 0) > 120000 || snapshots.size > 12) snapshots.delete(key);
     }
     globalThis.__aiBrowserBridgeSnapshots = snapshots;
-    globalThis.__aiBrowserBridge = state;
+    // Auxiliary handoff refs (coordinate target and picker candidates) must not
+    // replace the last page-read snapshot: that snapshot controls sameAsPrevious
+    // and the validity of refs already handed to the caller.
+    if (makeCurrent) globalThis.__aiBrowserBridge = state;
     return state;
   };
   const stateForRef = ref => {
@@ -248,6 +251,17 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { x, y, left: box.left, top: box.top, width: box.width, height: box.height, covered: !inViewport || box.width <= 0 || box.height <= 0 || !hit || (hit !== el && !el.contains(hit)), hitTag: hit?.tagName?.toLowerCase() || null };
   };
   const shortSelector = el => clean([el.tagName?.toLowerCase(), el.id ? `#${el.id}` : '', el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 3).join('.') : ''].join(''));
+  const elementPath = el => {
+    const parts = [];
+    let node = el;
+    for (let depth = 0; node && node.nodeType === 1 && depth < 8; depth++) {
+      const parent = node.parentElement;
+      const index = parent ? [...parent.children].indexOf(node) : 0;
+      parts.unshift(`${node.tagName.toLowerCase()}[${index}]`);
+      node = parent;
+    }
+    return parts.join('/');
+  };
   const elementSummary = (el, extra = {}) => ({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: clean(label(el) || el.textContent), selector: shortSelector(el), ...elementBox(el), ...extra });
   // An SPA route that does not exist renders nothing and reports nothing: the
   // document loads, the mount container stays empty, and the read comes back with
@@ -398,9 +412,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   // Handing out refs is the same three lines in every scan, and getting the
   // snapshot bookkeeping subtly different between two of them is exactly how a
   // ref stops resolving. One factory instead.
-  const newRefState = () => {
+  const newRefState = ({ makeCurrent = true } = {}) => {
     const snapshot = crypto.randomUUID();
-    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
+    const state = rememberState({ snapshot, url: location.href, refs: new Map() }, makeCurrent);
     const makeRef = el => {
       for (const [existingRef, entry] of state.refs) if (entry.el === el) return existingRef;
       const ref = `${snapshot}:${state.refs.size + 1}`;
@@ -442,6 +456,68 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   };
   const closeHint = el => /^(×|x)$/i.test(clean(el.textContent)) || /(close|dismiss|skip|got it|later|no thanks|not now|accept|agree|关闭|取消|跳过|我知道|知道了|稍后|不再|同意|接受)/i.test(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.textContent || ''}`);
   const actionSelector = 'a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[role=combobox],[contenteditable=true]';
+  const actionableTargetFor = hit => {
+    const usable = el => el && !sensitive(el) && visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+    const topmost = el => {
+      const box = el.getBoundingClientRect();
+      if (box.width <= 0 || box.height <= 0) return false;
+      const x = Math.min(Math.max(box.left + box.width / 2, 0), innerWidth - 1);
+      const y = Math.min(Math.max(box.top + box.height / 2, 0), innerHeight - 1);
+      const owner = deepHit(x, y);
+      return !!owner && (owner === el || el.contains(owner));
+    };
+    // Prefer the closest semantic control: clicking the exact <button> inside a
+    // pointer-styled card is safer than upgrading it to the whole card.
+    let current = hit;
+    for (let depth = 0; current && current !== document.body && current !== document.documentElement && depth < 10; depth++, current = current.parentElement) {
+      if (current.matches?.(actionSelector) && usable(current) && topmost(current)) {
+        return { el: current, source: 'semantic-control', confidence: 'semantic' };
+      }
+    }
+    // React-style cards can have no role, tabindex or handler attribute. CSS
+    // cursor is the visible evidence. It is inherited, so resolve the hit to the
+    // nearest card-like pointer ancestor (not the outermost shared wrapper, and
+    // not a tiny title span). A click on the card bubbles to a delegated wrapper;
+    // clicking the wrapper itself would lose the card as event.target.
+    const clickableTags = new Set(['DIV', 'LI', 'LABEL', 'TD', 'ARTICLE', 'SECTION', 'FIGURE', 'P']);
+    const pointerAncestors = [];
+    for (current = hit; current && current !== document.body && current !== document.documentElement; current = current.parentElement) {
+      try {
+        if (getComputedStyle(current).cursor === 'pointer') pointerAncestors.push(current);
+      } catch { break; }
+    }
+    const pointer = pointerAncestors.find(node => clickableTags.has(node.tagName)) || pointerAncestors[0] || null;
+    if (pointer && usable(pointer) && !pointer.querySelector?.(actionSelector) && topmost(pointer)) {
+      const pointerText = (pointer.innerText || pointer.textContent || '').replace(/\s+/g, ' ').trim();
+      let nestedPointerTargets = 0;
+      try {
+        for (const child of pointer.querySelectorAll('div,span,li,label,td,article,section,figure,p')) {
+          if (nestedPointerTargets >= 2) break;
+          if (!visible(child)) continue;
+          if (getComputedStyle(child).cursor !== 'pointer') continue;
+          if (child.querySelector?.(actionSelector)) continue;
+          const childText = (child.innerText || child.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!childText || childText.length > 180) continue;
+          const childBox = child.getBoundingClientRect();
+          const parentBox = pointer.getBoundingClientRect();
+          const parentArea = Math.max(1, parentBox.width * parentBox.height);
+          const childArea = Math.max(0, childBox.width * childBox.height);
+          // Inherited pointer on a small title/price span is not an independent
+          // tile. Count only descendants that occupy a substantial part of the
+          // wrapper, as sibling cards do in a grid/list.
+          if (childBox.width >= parentBox.width * 0.35 && childBox.height >= parentBox.height * 0.25 && childArea >= parentArea * 0.1) nestedPointerTargets++;
+        }
+      } catch { /* incomplete descendant evidence fails closed below */ }
+      // Do not promote a shared clickable wrapper around several cards. The
+      // computed cursor is inherited, so a wrapper and its children can all
+      // report pointer even though the action handlers live on separate tiles.
+      // A long aggregate label, many direct children, or multiple compact nested
+      // pointer targets is insufficient evidence for a single click target.
+      const looksLikeGroup = pointerText.length > 180 || (pointer.children?.length ?? 0) > 8 || nestedPointerTargets >= 2;
+      if (!looksLikeGroup) return { el: pointer, source: 'cursor-pointer', confidence: 'inferred' };
+    }
+    return null;
+  };
 
   // --- transient notice capture -------------------------------------------
   // A toast lives for two or three seconds. An agent that only samples the DOM
@@ -1295,6 +1371,75 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
         ? ` This page also has clickable non-option elements such as ${group.map(text => JSON.stringify(text)).join(', ')}. If the target is one of those, it is a card or tile group rather than a picker: read the page with scope:"overlay" or call browser_shadow_tree to get a ref for it, or evaluate one click expression with browser_eval. Do not keep retrying browser_pick with different text.`
         : ' Either the text differs by whitespace or hidden characters, or the control is not a select/combobox. Read the page and act on the element directly.');
   };
+  const clickableTextCandidates = (requested, limit = 8, budgetMs = 250) => {
+    const exact = String(requested || '').replace(/\s+/g, ' ').trim();
+    const deadline = performance.now() + budgetMs;
+    const scanSelector = 'div,span,li,label,td,article,section,figure,p';
+    const overlay = overlayCandidates();
+    const roots = [...new Set([overlay?.el, document.body || document.documentElement].filter(Boolean))];
+    const seenNodes = new Set(), seenTargets = new Set(), matches = [];
+    let visited = 0, stoppedBy = null;
+    let refs = null;
+    for (const root of roots) {
+      for (const node of root.querySelectorAll(scanSelector)) {
+        if (seenNodes.has(node)) continue;
+        seenNodes.add(node);
+        if (++visited > 3000) { stoppedBy = 'node_limit'; break; }
+        if (performance.now() >= deadline) { stoppedBy = 'deadline'; break; }
+        if (!visible(node) || sensitive(node)) continue;
+        const actionTarget = actionableTargetFor(node);
+        if (!actionTarget || seenTargets.has(actionTarget.el)) continue;
+        const text = (actionTarget.el.innerText || actionTarget.el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text || text.length > 500 || !exact) continue;
+        const match = text === exact ? 'exact' : text.includes(exact) ? 'contains' : null;
+        if (!match) continue;
+        const box = actionTarget.el.getBoundingClientRect();
+        if (box.width < 24 || box.height < 16) continue;
+        const x = Math.min(Math.max(box.left + box.width / 2, 0), innerWidth - 1);
+        const y = Math.min(Math.max(box.top + box.height / 2, 0), innerHeight - 1);
+        const pointOwner = deepHit(x, y);
+        if (!pointOwner || (pointOwner !== actionTarget.el && !actionTarget.el.contains(pointOwner))) continue;
+        seenTargets.add(actionTarget.el);
+        refs ||= newRefState({ makeCurrent: false });
+        matches.push({
+          ref: refs.makeRef(actionTarget.el),
+          tag: actionTarget.el.tagName.toLowerCase(),
+          role: actionTarget.el.getAttribute('role') || null,
+          text: text.slice(0, 240),
+          match,
+          clickability: actionTarget.source,
+          confidence: actionTarget.confidence,
+          rect: { left: Math.round(box.left), top: Math.round(box.top), width: Math.round(box.width), height: Math.round(box.height) },
+          path: elementPath(actionTarget.el)
+        });
+        if (matches.length >= limit) { stoppedBy ||= 'result_limit'; break; }
+      }
+      if (stoppedBy) break;
+    }
+    matches.sort((a, b) => Number(b.match === 'exact') - Number(a.match === 'exact') || a.text.length - b.text.length);
+    return { candidates: matches.slice(0, limit), scanned: visited, partial: !!stoppedBy, stoppedBy };
+  };
+  const pickerMiss = (exact, reason, dispatched = false) => {
+    const scan = clickableTextCandidates(exact);
+    const candidates = scan.candidates;
+    return {
+      status: 'not_found',
+      reason: candidates.length ? 'picker_card_candidates' : reason,
+      retryable: false,
+      dispatched,
+      requested: { chooseText: exact, label: args.label ?? null },
+      candidateCount: candidates.length,
+      candidates,
+      candidateScan: { scanned: scan.scanned, partial: scan.partial, stoppedBy: scan.stoppedBy, scope: 'overlay-first' },
+      message: pickFailureHint(exact),
+      recommendedNextAction: dispatched
+        ? 'The picker control was opened but no matching option was selected. Re-read the page first; do not click one of the returned candidates until its current state is confirmed.'
+        : candidates.length
+          ? 'No picker option was selected. Use the returned ref for the exact, visible card only if it is the intended item; if more than one exact candidate is listed, resolve the ambiguity before clicking.'
+          : 'No picker option was selected. Read the page or inspect browser_shadow_tree; do not keep retrying browser_pick with different text.',
+      contentTrust: 'untrusted webpage data'
+    };
+  };
   const chooseOption = async (control, exact, timeoutMs = 5000, query = '') => {
     let option = findExactOption(exact);
     if (!option) {
@@ -1326,7 +1471,13 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   const pickControl = async () => {
     const exact = args.chooseText.replace(/\s+/g, ' ').trim();
     const wantedLabel = (args.label || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    const controls = [...document.querySelectorAll('select,[role=combobox],input,.el-select,.ant-select,[aria-haspopup=listbox]')]
+    // A bare `input` is not evidence of a picker. Treating every input as one
+    // used to select the first input on the page (often a checkbox), click it to
+    // open an option list, then fail after silently changing unrelated state.
+    // Search inputs remain supported when the page marks them as a combobox or
+    // listbox popup, or when they live inside a known picker container.
+    const pickerSelector = 'select,[role=combobox],.el-select,.ant-select,[aria-haspopup=listbox]';
+    const controls = [...document.querySelectorAll(pickerSelector)]
       .filter(el => visible(el) && !sensitive(el));
     let control = null;
     if (wantedLabel) {
@@ -1341,17 +1492,23 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     control ||= controls.find(el => el instanceof HTMLSelectElement && [...el.options].some(o => o.label.replace(/\s+/g, ' ').trim() === exact || o.textContent.replace(/\s+/g, ' ').trim() === exact));
     control ||= controls[0];
-    if (!control) throw new Error(`No picker control found. browser_pick looks for select, [role=combobox], input, .el-select, .ant-select and [aria-haspopup=listbox]; this page has none of them visible${wantedLabel ? ` for label ${JSON.stringify(args.label)}` : ''}. ${pickFailureHint(exact)}`);
+    if (!control) return pickerMiss(exact, 'picker_not_found');
     if (control instanceof HTMLSelectElement) {
       const option = [...control.options].find(o => (o.label.replace(/\s+/g, ' ').trim() === exact || o.textContent.replace(/\s+/g, ' ').trim() === exact || o.value === exact) && !o.disabled);
-      if (!option) throw new Error(`Native select option not found. This control is a <select> with ${control.options.length} option(s): ${[...control.options].slice(0, 12).map(o => JSON.stringify(o.label.replace(/\s+/g, ' ').trim())).join(', ')}${control.options.length > 12 ? ', ...' : ''}. The text must match one of them exactly, including whitespace.`);
+      if (!option) return pickerMiss(exact, 'picker_option_not_found');
       control.value = option.value;
       control.dispatchEvent(new Event('input', { bubbles: true }));
       control.dispatchEvent(new Event('change', { bubbles: true }));
       return { chosen: exact, value: control.value, control: { tag: control.tagName.toLowerCase(), label: label(control) } };
     }
     const input = control.matches('input,[role=combobox]') ? control : control.querySelector('input,[role=combobox]') || control;
-    const result = await chooseOption(input, exact, args.timeoutMs ?? 5000, args.query || exact);
+    let result;
+    try {
+      result = await chooseOption(input, exact, args.timeoutMs ?? 5000, args.query || exact);
+    } catch (error) {
+      if (/No visible option matched/.test(String(error?.message || error))) return pickerMiss(exact, 'picker_option_not_found_after_open', true);
+      throw error;
+    }
     return { ...result, control: { tag: control.tagName.toLowerCase(), label: label(control) } };
   };
   if (name === 'browser_prepare_coordinate' || name === 'browser_validate_coordinate') {
@@ -1377,17 +1534,6 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     while (retired.size > 128) retired.delete(retired.keys().next().value);
     const stamp = () => JSON.stringify([location.href, innerWidth, innerHeight, scrollX, scrollY,
       globalThis.visualViewport?.scale, globalThis.visualViewport?.offsetLeft, globalThis.visualViewport?.offsetTop]);
-    const elementPath = el => {
-      const parts = [];
-      let node = el;
-      for (let depth = 0; node && node.nodeType === 1 && depth < 8; depth++) {
-        const parent = node.parentElement;
-        const index = parent ? [...parent.children].indexOf(node) : 0;
-        parts.unshift(`${node.tagName.toLowerCase()}[${index}]`);
-        node = parent;
-      }
-      return parts.join('/');
-    };
     const describeTarget = el => {
       const rect = el.getBoundingClientRect();
       const dialog = el.closest('dialog,[role=dialog],[aria-modal=true],.ant-modal,.el-dialog');
@@ -1481,10 +1627,20 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     while (tokens.size >= 32) tokens.delete(tokens.keys().next().value);
     const token = crypto.randomUUID();
     const evidence = targetEvidence(el);
+    // Give the caller a DOM-ref route to the very same point target. For a text
+    // node inside a React card, promote to the nearest semantic control or the
+    // outermost cursor:pointer card. These are auxiliary refs: they live beside,
+    // rather than replacing, the last browser_read snapshot.
+    const handoff = newRefState({ makeCurrent: false });
+    const hitRef = handoff.makeRef(el);
+    const actionTarget = actionableTargetFor(el);
+    const clickRef = actionTarget ? handoff.makeRef(actionTarget.el) : null;
     tokens.set(token, { at: now, ttlMs, expiresAt: now + ttlMs, el, nx: args.x, ny: args.y, x, y, stamp: stamp(), signature: describeTarget(el), expectedTarget: evidence });
     const box = el.getBoundingClientRect();
     return { coordinateToken: token, expiresInMs: ttlMs, expectedUrl: location.href, x: args.x, y: args.y,
-      target: evidence,
+      target: { ...evidence, hitRef },
+      clickRef,
+      clickRefEvidence: actionTarget ? { ref: clickRef, source: actionTarget.source, confidence: actionTarget.confidence, ...targetEvidence(actionTarget.el) } : null,
       // How far the point is from the centre of what it hit. A point near the
       // edge of a large box is usually a point on the wrong box, and that is
       // invisible from a label alone.
@@ -1497,7 +1653,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       // A hidden document still resolves the DOM hit test, but a screenshot taken
       // now may show a stale frame. Report that instead of refusing the action.
       evidenceQuality: pageState.visibilityState === 'visible' ? 'live' : 'stale-frame-possible',
-      note: 'Confirm this target matches your intent before using the token: check label, rect and offsetFromCenter. The token is single-use and lives for ' + Math.round(ttlMs / 1000) + 's. If targetLooksLikeContainer is true, the point hit an ancestor - try the centre of the rect, or act on the element directly instead of by coordinate. Dispatch does not prove task completion.' };
+      note: clickRef
+        ? 'Confirm clickRefEvidence matches the intended target. Prefer browser_click with this clickRef: it operates on the same DOM target without coordinate translation and returns the normal click receipt. Use the coordinate token only when pointer-coordinate semantics are required. The token is single-use and lives for ' + Math.round(ttlMs / 1000) + 's; dispatch does not prove task completion.'
+        : 'The hit element has no verified semantic-control or cursor:pointer ancestor, so no clickRef was issued. Inspect the target before clicking; do not treat the hitRef as proof of clickability. Check label, rect and offsetFromCenter. The coordinate token is single-use and lives for ' + Math.round(ttlMs / 1000) + 's; dispatch does not prove task completion.' };
   }
   if (name === 'browser_viewport') {
     const active = document.activeElement;

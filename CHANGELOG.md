@@ -1,3 +1,60 @@
+## 0.31.0 — 2026-11-03（**从「坐标点到了谁」走到「给我可复用的目标句柄」**）
+
+0.30.0 让工具看见了卡片；这一版把最后一段人工翻译也拿掉：以前需要「截图 → 猜坐标 → `prepare_coordinate` →
+核对目标 → 再用坐标 token」，现在**同一份命中证据直接交出 DOM ref**。而 `browser_pick` 失败也不再只说「看一看别的工具」——
+它会把可操作目标、为什么认为它可点、以及唯一无歧义时的下一步一起交回来。
+
+### P0：坐标命中和 DOM ref 之间不再断链
+
+- **之前**：`browser_prepare_coordinate` 能严格证明「这个 0..1000 坐标命中了哪个 DOM 节点」，
+  但调用方若想改用 `browser_click`，必须再扫一次页面拿 ref。又扫可能遇到预算 / 顺序 / 动画变化，
+  还引入第二个坐标→元素翻译机会。
+- **现在**：签发坐标 token 的同一轮里，也会签发 `target.hitRef`（精确 hit）与 **`clickRef`**（仅在证明可操作时提供）：
+  1. 命中本身是语义控件 → 最近的可用语义控件作为 clickRef；
+  2. 没有语义控件 → 在 `cursor:pointer` 继承链里选最近的卡片级节点（跳过只有标题的 span，也不选共享外层 wrapper）；
+  3. 再用候选中心点的 hit-test 确认这个祖先真是当前最上层目标。
+- 返回 `clickRefEvidence:{source,confidence,tag,role,label,rect,path,...}`，`source` 是 `semantic-control` 或
+  `cursor-pointer`。**没有足够证据时 `clickRef:null`**——仅有坐标命中不等于该节点可点击，不把 `hitRef` 冒充成 click 能力。
+- `browser_click({tabId,ref:clickRef})` 复用既有 ref 校验、覆盖检测、去重与动作回执；坐标 token 仍在，
+  只在必须复现真实指针语义时才需要走 `browser_action`。这不是「自动点击」：preflight 只交证据和句柄。
+- Handoff refs 注册在独立 snapshot，不覆盖上一次 `browser_read` 的当前快照，因此不破坏 `sameAsPrevious` 或已有 ref。
+
+### P1：`browser_pick` 对卡片组从死胡同变成单跳交接
+
+- **之前**：没有 `<select>`/combobox 时，只抛一句 `Exact visible option not found`；调用方读完提示后还要自己再跑
+  `browser_shadow_tree`，重新扫描、重新选择候选，失败信息里没有可复用 ref。
+- **现在**：无控件 / 无匹配选项时返回结构化 `status:"not_found"`，并在 overlay-first 扫描中查找语义控件或
+  `cursor:pointer` 卡片，结果携带 `ref`、完整可见文本、`match:"exact"|"contains"`、点击性证据、`rect`、`path`、
+  scan 是否因预算截断。**只产候选，绝不替调用方点卡片。**
+- `next-step` 新增 `picker_card_candidates`：
+  - picker 没有产生任何副作用，且只有一个**精确文本 + cursor-pointer 卡片**候选 → 给出 schema 校验过的
+    `browser_click({tabId,ref})` 单步建议；同名语义按钮只列出来、引导读上下文，不自动升级为卡片点击；
+  - 多个完全匹配或只有子串匹配 → 去 `browser_read` 看上下文，不猜；
+  - 先前已打开过 picker（`dispatched:true`）→ 一律先重新读取，不直接复用候选。
+- **拒绝失败闭环**：候选 finder 限 3000 节点 / 250ms / 8 个结果，overlay 优先；候选中心点必须仍命中该目标或其子节点。
+  点不到、被遮挡、没有当前 hit-test 证据的元素不发 clickRef；如果扫描因时间/节点/结果上限截断，`candidateScan.partial:true`，
+  `next-step` 不会把「当前只看到一个」误称为「全页只有一个」。候选 ref 的签发不覆盖既有 read snapshot。
+- **顺手堵住更危险的误操作**：旧 `browser_pick` 把页面上的任意 `input` 都当成 picker；modal 里只有 checkbox 时，
+  它会先点 checkbox（页面状态已变），再因没有 option 报错。现在只认 `select` / combobox / 明确 picker 容器 / listbox popup，
+  不再把无关文本框或 checkbox 变成下拉框。
+- **继承 cursor 的父容器不冒充单卡**：如果一个共享 `cursor:pointer` wrapper 包着多张卡，计算样式会让 wrapper 与卡片都显示 pointer。
+  坐标 handoff 选最近的卡片级 pointer 节点（小标题 span 不会抢走目标；共享 wrapper 不会覆盖子卡）；picker 遇到 wrapper 自身命中时，
+  检出多个紧凑的内嵌 pointer 目标、过长聚合文本或过多子项即失败关闭，不发父级 clickRef。测试覆盖了同名标题、单卡 wrapper 与多卡 wrapper。
+
+### 验证
+
+- 新增行为测试：语义按钮与 `cursor:pointer` 卡片均可由 `prepare_coordinate` 直接 `browser_click`；
+  `browser_pick` 对唯一精确卡片返回可用 ref，执行建议前 click 次数仍为 0，下一次显式 `browser_click` 才使计数器 +1；
+  checkbox 绝不会被误当 picker 点击；共享 pointer 父容器、标题 span、子串候选、重复同名候选、picker 已派发与扫描截断均有覆盖。
+- `npm test` **681/681**；`doctor` **12/12、0 建议**；0.31.0 服务与扩展部署匹配。
+- **真实 Chrome fixture 复核**：`browser_pick` 在 `.ant-modal-wrap` 中只扫 34 个节点，返回 `dispatched:false`、
+  `candidateCount:1`、`match:"exact"`、`clickability:"cursor-pointer"`；`nextStep` 指向这张卡片的 `browser_click`。
+  显式 click 后 `receipt.changed:true`。`browser_prepare_coordinate` 的 `x:500,y:514` 返回同一张卡片的
+  `clickRef`、`offsetFromCenter:{dx:0,dy:0}`；前后 `browser_read` 均为同一 snapshot、`refsReusable:true`，
+  证明辅助 handoff 不会冲掉 read refs。该 tab 当时 `evidenceQuality:"stale-frame-possible"`，故只检验了 ref 交接，
+  没有派发真实坐标点击。
+- 版本 **0.31.0**；README、Chrome 能力矩阵已同步；旧 `CAPABILITY-GAP-ANALYSIS-2026-11-01.md` 加了明确的历史时点注，避免把 11-01 的「无 JS」过期结论再当现状。能力说明不把「可推测」写成「已验证」。
+
 ## 0.30.0 — 2026-11-03（**一次真实付费下单暴露的 11 个缺陷**：能力一直在，文档说没有）
 
 0.29.0 修的是「文档承诺的路径没有工具能走到」。这一版是它的反面：**工具一直都在，文档写着「不支持」**。

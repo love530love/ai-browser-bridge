@@ -64,7 +64,7 @@ REA 明确这是静态证据：未执行扩展启动代码，动态名称、运�
 | `browser_eval`（0.30.0） | 可用，主世界执行、无 banner、后台标签可求值；页面 CSP 拒绝时降级 CDP |
 | `browser_click` / `browser_fill` / `browser_key` / `browser_scroll` / `browser_select` | 可用，且 DOM 副作用真实发生（计数器 0→1） |
 | `browser_devtools_capture` | 可用，能读到后台标签的 console 输出 |
-| `browser_prepare_coordinate` | 可用，签发 token，返回 `evidenceQuality` |
+| `browser_prepare_coordinate`（0.31.0） | 可用，返回 `target.hitRef` + 经语义/`cursor:pointer` 验证的 `clickRef`（可直接交给 `browser_click`）；坐标 token 仍可用于真实指针路径 |
 | `browser_action` `Tap` / `Hover` | 可用，**点击真实落到预备的 DOM 目标**（计数器 1→2） |
 | `browser_reload_extension` | 可用且**不需要前台**：扩展自我重载（`chrome.runtime.reload`），服务端以新会话+版本为证据 |
 | `browser_launch` | 与焦点无关：只在无 chrome 进程时启动，且不带任何 profile 标志 |
@@ -76,7 +76,7 @@ REA 明确这是静态证据：未执行扩展启动代码，动态名称、运�
 - **提示项**（只上报，不拦截）：`tab_inactive`、`window_not_focused`、`document_hidden`、`document_unfocused`。它们回答“能不能看见”，不回答“点得到谁”。
 - 调用方显式传 `requireForeground:true` 时，提示项并入硬阻断。
 
-**真正的安全网**与焦点无关：token 绑定 DOM 元素 + `stamp()`（URL/视口/滚动/缩放）+ `hit_target_changed` / `prepared_target_changed` / `prepared_target_disconnected` + 15s TTL + 单次使用。一次窗口切换不再推倒整条坐标流水线。
+**真正的安全网**与焦点无关：token 绑定 DOM 元素 + `stamp()`（URL/视口/滚动/缩放）+ `hit_target_changed` / `prepared_target_changed` / `prepared_target_disconnected` + 默认 120s TTL（`ttlMs` 可在 token 签发时设定）+ 单次使用。0.31.0 另给同一目标签发 `clickRef`：语义控件或通过 `cursor:pointer` 与中心命中复核的卡片可直接交给 `browser_click`；它不替代坐标 token，只是在 DOM 点击等价时避免坐标来回翻译。一次窗口切换不再推倒整条坐标流水线。
 
 **证据质量**：`browser_prepare_coordinate` 返回 `evidenceQuality`。`stale-frame-possible` 表示文档自报隐藏，此时截图可能是旧帧，但命中测试仍有效；`live` 表示文档自报可见。该字段是提示，不是拒绝理由。
 

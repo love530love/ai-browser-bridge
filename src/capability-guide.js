@@ -168,7 +168,7 @@ const INTENTS = [
   { id: 'select-or-picker', match: /下拉|选择|选项|select|dropdown|combobox|picker/i,
     tools: PICK, focusRequired: false,
     why: 'Native selects and portal pickers are driven by DOM events and verified by reading the resulting value.',
-    backgroundSafe: true, prefer: 'browser_select for native selects, browser_pick for custom pickers. If browser_pick answers "no visible option matched", read its candidate list: when the group is a set of clickable divs rather than a picker, use browser_shadow_tree (kind:"clickable") or browser_eval instead of retrying with different text.', fallback: [...PICK, 'browser_shadow_tree', 'browser_eval'] },
+    backgroundSafe: true, prefer: 'browser_select for native selects, browser_pick for custom pickers. If browser_pick returns picker_card_candidates, it now includes live refs for visible clickable cards/tiles, their exact-vs-contains match, clickability source, rect/path, and a validated browser_click nextStep only when exactly one exact cursor:pointer card exists. Matching semantic buttons are reported for inspection but never promoted to a click step. Never click automatically from the failed pick; use the step only if the candidate is the intended item, otherwise resolve ambiguity from the surrounding read. If no refs are available, use browser_shadow_tree (kind:"clickable") or browser_eval instead of retrying browser_pick with different text.', fallback: [...PICK, 'browser_shadow_tree', 'browser_eval'] },
   { id: 'write-or-submit', match: /点击|提交|按钮|填写|输入|click|submit|button|fill|type/i,
     tools: WRITE, focusRequired: false,
     why: 'Dispatched through the page DOM, so the tab and window may be in the background.',

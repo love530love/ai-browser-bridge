@@ -5,23 +5,57 @@ import { randomUUID } from 'node:crypto';
 import { pageOperation } from '../extension/page.js';
 import { createBridge } from '../src/server.js';
 
-function fixture() {
+function fixture({ tagName = 'BUTTON', pointer = false } = {}) {
   const dialog = { textContent: 'P800 1 card 7.94/hour' };
-  const el = { tagName: 'BUTTON', innerText: '开始使用', isConnected: true,
-    getAttribute: () => null, matches: () => false,
+  const el = { nodeType: 1, tagName, innerText: '开始使用', textContent: '开始使用', isConnected: true, children: [], parentElement: null,
+    getAttribute: () => null, matches: selector => tagName === 'BUTTON' && selector.includes('button'),
     closest: selector => selector.startsWith('dialog') ? dialog : null,
+    contains: node => node === el, scrollIntoView: () => {}, clickCount: 0, click() { this.clickCount++; },
     getClientRects: () => [{}], getBoundingClientRect: () => ({ left: 10, top: 10, width: 100, height: 40 }) };
   let hit = el, now = 100, visibilityState = 'visible', focused = true;
-  const document = { elementFromPoint: () => hit, get visibilityState() { return visibilityState; }, hasFocus: () => focused };
+  const document = { elementFromPoint: () => hit, get visibilityState() { return visibilityState; }, hasFocus: () => focused, body: null, documentElement: null };
   const context = vm.createContext({ location: { protocol: 'https:', origin: 'https://fixture.test', href: 'https://fixture.test/' },
     innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0, crypto: { randomUUID }, Map,
-    Date: { now: () => now }, getComputedStyle: () => ({ visibility: 'visible', display: 'block' }), document });
+    Date: { now: () => now }, getComputedStyle: node => ({ visibility: 'visible', display: 'block', cursor: pointer && node === el ? 'pointer' : 'default' }),
+    HTMLAnchorElement: class {}, HTMLButtonElement: class {}, HTMLInputElement: class {}, HTMLTextAreaElement: class {}, HTMLSelectElement: class {}, document });
   const run = vm.runInContext(`(${pageOperation.toString()})`, context);
   const prepare = (opts = {}) => run('browser_prepare_coordinate', { x: 50, y: 50, ...opts }, [], true);
   const validate = (token, opts = {}) => run('browser_validate_coordinate', { coordinateToken: token, x: 50, y: 50, ...opts }, [], true);
-  return { prepare, validate, dialog, context, document, el, cover: () => { hit = { tagName: 'DIV', textContent: 'Cover', isConnected: true, getAttribute: () => null, closest: () => null }; },
+  return { run, prepare, validate, dialog, context, document, el, cover: () => { hit = { tagName: 'DIV', textContent: 'Cover', isConnected: true, getAttribute: () => null, closest: () => null }; },
     hide: () => { visibilityState = 'hidden'; focused = false; }, show: () => { visibilityState = 'visible'; focused = true; }, expire: () => { now += 120001; } };
 }
+
+test('coordinate preparation also hands off a browser_click ref for the exact semantic target', async () => {
+  const f = fixture();
+  const prepared = await f.prepare();
+  assert.ok(prepared.coordinateToken);
+  assert.equal(prepared.target.hitRef, prepared.clickRef);
+  assert.equal(prepared.clickRefEvidence.source, 'semantic-control');
+  assert.equal(prepared.clickRefEvidence.label, '开始使用');
+  const clicked = await f.run('browser_click', { ref: prepared.clickRef }, [], true);
+  assert.equal(clicked.clicked, true, JSON.stringify(clicked));
+  assert.equal(f.el.clickCount, 1);
+});
+
+test('coordinate preparation promotes a pointer-style card hit to a click ref', async () => {
+  const f = fixture({ tagName: 'DIV', pointer: true });
+  const prepared = await f.prepare();
+  assert.ok(prepared.clickRef);
+  assert.equal(prepared.clickRefEvidence.source, 'cursor-pointer');
+  assert.equal(prepared.clickRefEvidence.confidence, 'inferred');
+  const clicked = await f.run('browser_click', { ref: prepared.clickRef }, [], true);
+  assert.equal(clicked.clicked, true, JSON.stringify(clicked));
+  assert.equal(f.el.clickCount, 1);
+});
+
+test('coordinate preparation never claims an unverified generic element is clickable', async () => {
+  const f = fixture({ tagName: 'DIV', pointer: false });
+  const prepared = await f.prepare();
+  assert.ok(prepared.target.hitRef, 'the exact hit may still be inspected');
+  assert.equal(prepared.clickRef, null);
+  assert.equal(prepared.clickRefEvidence, null);
+  assert.match(prepared.note, /no verified semantic-control or cursor:pointer ancestor/);
+});
 
 test('a prepared token outlives one agent round trip', async () => {
   // 15 seconds was shorter than the gap between two calls in one real task

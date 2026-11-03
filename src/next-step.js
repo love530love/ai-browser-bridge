@@ -110,6 +110,41 @@ const RULES = [
     })
   },
   {
+    id: 'picker_card_candidates',
+    match: r => r.reason === 'picker_card_candidates' && Array.isArray(r.candidates),
+    step: (r, a) => {
+      // Opening a custom picker is itself a dispatched interaction. Its open
+      // state may change which candidate ref is correct, so read before acting.
+      if (r.dispatched === true || r.candidateScan?.partial === true) return {
+        kind: 'diagnose',
+        tool: 'browser_read',
+        arguments: { tabId: a.tabId, mode: 'cheap', ...(a.agent ? { agent: a.agent } : {}) },
+        why: r.dispatched === true
+          ? 'The picker was opened but no option was selected. Its popup may still be changing the page; re-read before using any candidate ref, and do not repeat the pick blindly.'
+          : 'Candidate discovery hit its time, node or result limit. The returned list may be incomplete, so uniqueness is not established; re-read with context or run a broader deliberate scan before clicking.'
+      };
+      // Picker fallback is specifically for non-picker card/tile groups. A
+      // button that happens to have the same label may be a destructive action,
+      // so semantic controls are reported for inspection but never promoted to
+      // an automatic click suggestion from this recovery path.
+      const exact = r.candidates.filter(candidate => candidate.match === 'exact' && candidate.clickability === 'cursor-pointer');
+      if (exact.length === 1) return {
+        kind: 'retry_with_changes',
+        tool: 'browser_click',
+        arguments: { tabId: a.tabId, ref: exact[0].ref, ...(a.agent ? { agent: a.agent } : {}) },
+        why: 'No picker exists, but exactly one visible, topmost clickable target matches the requested text. This step uses its fresh ref directly; it does not click automatically. After the click, read the page and verify the selected state before any further action.'
+      };
+      return {
+        kind: 'diagnose',
+        tool: 'browser_read',
+        arguments: { tabId: a.tabId, scope: 'auto', mode: 'cheap', ...(a.agent ? { agent: a.agent } : {}) },
+        why: exact.length > 1
+          ? 'Several visible click targets match exactly; choosing one would be a guess. Read the overlay/page context and resolve the ambiguity before clicking.'
+          : 'The visible candidates only contain the requested text or do not have one unique exact match. Read their surrounding context and choose by evidence; do not upgrade a substring match into a click.'
+      };
+    }
+  },
+  {
     id: 'element_covered',
     match: r => r.reason === 'element_covered' || r.status === 'covered',
     // When the cover is the dialog the target itself lives in, dismissing it
