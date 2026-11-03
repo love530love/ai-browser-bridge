@@ -105,7 +105,13 @@ test('the worker takes the fingerprint on both sides and only remembers dispatch
   const worker = readFileSync(new URL('../extension/worker.js', import.meta.url), 'utf8');
   assert.match(worker, /args: \['browser_receipt'/, 'the worker must ask the page for a fingerprint');
   assert.match(worker, /const before = wantsReceipt \? await readFingerprint\(\) : null;/);
-  assert.match(worker, /const after = await readFingerprint\(\);/);
+  assert.match(worker, /let after = await readFingerprint\(\);/);
+  // One sample taken immediately after dispatch lands before an async render, so
+  // "changed:false" was a false negative on every tab switch and every submit.
+  // The worker must take a second, settled sample before it calls it unchanged.
+  assert.match(worker, /after\.digest === before\.digest/, 'an unchanged fingerprint must trigger a settle');
+  assert.match(worker, /receipt\.pending = true/);
+  assert.match(worker, /settledMs/);
   // A refused click must not make the next correct click look like a repeat.
   assert.match(worker, /if \(before && dispatched\) \{/);
   assert.match(worker, /routedArgs\.allowRepeat !== true/);

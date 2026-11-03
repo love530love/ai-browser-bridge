@@ -4,6 +4,47 @@
 
 ## 目标
 
+## 2026-11-03 接手增量（0.29.0）：一次真实登录暴露的 7 个缺陷
+
+输入是一次**真实登录失败**的复盘：调用方拿着正确密码，做了 9 次 observe、3 次误判，最后破坏了浏览器已填好的密码配对。
+这七条在 624 条单测全绿时都还在，共同点是**单测自己构造结果对象，从不向页面要一个 ref**。
+
+### P0：`secret:true` 那条文档承诺的路径不可达
+
+- `browser_observe` 报 `elementCandidates:32 / elementsReturned:12`，密码框在被丢掉的那 20 个里；`browser_find_element(query:"密码")` → `found:false`。
+  唯一为密码框发 ref 的是 `browser_login_state`，所以「browser_fill + secret:true + passwordFields 里的 ref」没有任何常规读路径能走到。
+- 代价链：改用 `clipboard_write` + `Ctrl+V` → 报告 `verified:true`、页面 `value:null` → 无法判断 → 三次误判 → 把用户名改成手机号，
+  破坏浏览器保存的「用户名+密码」配对 → 两次被拒。
+- 现在：`browser_read`/`observe`/`find_element` **为密码框发 ref**，`value:null` + `valueLength` + `hasValue` + `secret:true`；
+  `browser_key` 回读 `focusedElement`（长度，不取值）；密码框上的普通 fill 抛**指名 `secret:true`** 的错误，并配 `password_needs_secret_fill` 规则给出不带值的下一步。
+- `[data-ai-private]` 仍是硬排除：长度也会泄漏。`browser_click` 上的同类拒绝**不改消息**——指向 fill 是错误方向。
+
+### P1：ref 不是一次性的，`maxChars` 也不是
+
+- **ref 生命周期**：有效性由**元素指纹**在每次使用时判定，与快照 uuid 无关。所以元素列表完全相同时**复用快照**：
+  `sameAsPrevious:true` / `refsReusable:true` / 前缀不变 / 旧 ref 仍可用。列表一变才铸新快照。
+  真机：两次连续读 → 同 snapshot、同 ref，第一次的 ref 在第二次读之后仍能 fill。
+- **observe 预算**：`extension/observe-budget.js`（纯函数）把预算作用于**整个 payload**，`sections` 可以少要。
+  削减顺序按「最不能失去」排：`geometry` → debug 大列表 → 散文/诊断 → 整个 debug → elements（40/15/5/0）→ text → `notices` → 常量串。
+  真机（全量 3241）：`1200` → 1163 且保留 elements；`16000` → 12971；`150` → 395 + `budgetExceeded:true`（地板是页面身份元数据）。
+
+### P2/P3
+
+- `changed:false` 加 320ms settle 再测，仍不变标 `pending:true`；真机无副作用按钮：`changed:false, settledMs:320, pending:true`。
+- `browser_wait` 支持 `ms` 纯延时（`tabId` 是唯一必需参数）；返回 `waitedMs` 并明说「延时不是页面已稳定的证据」。
+- `browser_read` 新增 `notices`（可见 alert/toast/表单错误，去重、上限 5）。真机被拒登录 →
+  `[{role:"alert", selector:"div#msg", text:"用户名或密码错误"}]`，不必再 diff 7 个字符。
+- `emptyMount` 在 `readyState === 'complete'` 时先提示「重载当前 URL，看是否落到登录页」（SPA 会话过期的真实原因），仍在加载才说 hydration。
+
+### 复查方法（0.29.0）
+
+- 夹具 `.local/login-fixture.mjs`（gitignored，`node .local/login-fixture.mjs` → `127.0.0.1:19556`）：
+  用户名/密码/登录 + 一个**无副作用按钮**（用于 `pending`），错误以 `div[role=alert]` 出现。
+  脚本 `.local/verify-029.mjs <tabId>` 与 `.local/verify-029b.mjs <tabId>` 逐条打印证据。
+- 断言要点：密码框 `value` 必须是 `null` 而 `valueLength` 是真实长度；`browser_read` 的 JSON 里**不得出现密码明文**；
+  连续两次读的 `snapshot`/`ref` 必须相同；`observe.payloadChars <= maxChars`（达不到时必须带 `budgetExceeded`）。
+- **改 page.js 或 worker.js 后必须 `browser_reload_extension`**，否则跑的是旧 worker，新字段一律看不到。
+
 ## 2026-11-02 接手增量（0.27.0）：把实战反馈的 11 项缺口补上
 
 输入文档：`docs/CAPABILITY-GAP-ANALYSIS-2026-11-01.md`（一次真实会话的复盘，111 个工具、读侧全通）。

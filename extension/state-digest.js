@@ -33,12 +33,19 @@ export function digestState(read, { tabId, maxActions = 8, maxTextChars = 420 } 
     label: clip(el.label, 80) || null,
     ...(el.type ? { type: el.type } : {}),
     // Whether the field holds anything, never what it holds: a digest must not
-    // become the one path that echoes what the user typed.
-    ...(el.value ? { hasValue: true } : {}),
+    // become the one path that echoes what the user typed. A password field
+    // reports its length instead, which is the difference between "my paste
+    // landed" and "nothing happened" - the exact judgement that went wrong three
+    // times on a real login.
+    ...(el.secret ? { secret: true, valueLength: el.valueLength ?? 0, hasValue: el.valueLength > 0 } : (el.hasValue ?? !!el.value) ? { hasValue: true } : {}),
     ...(el.readOnly ? { readOnly: true } : {})
   }));
   const counts = { elements: elements.length, actionable: actionable.length, shown: actions.length };
   const text = clip(read.text, maxTextChars);
+  // A form error is the single most useful sentence on the page and it used to be
+  // reachable only by diffing text. It goes in the digest because the digest is
+  // what a small model actually reads.
+  const notices = (Array.isArray(read.notices) ? read.notices : []).slice(0, 3).map(n => ({ text: clip(n.text, 160), role: n.role ?? null }));
   const truncated = Boolean(read.truncated) || actions.length < actionable.length || (read.text ?? '').length > maxTextChars;
   return {
     status: 'success',
@@ -48,11 +55,12 @@ export function digestState(read, { tabId, maxActions = 8, maxTextChars = 420 } 
     readyState: read.readyState ?? null,
     viewport: read.viewport ?? null,
     text,
+    ...(notices.length ? { notices } : {}),
     actions,
     counts,
     ...(read.partial ? { partial: true } : {}),
     ...(truncated ? { truncated: true } : {}),
-    howToAct: 'Act on these refs with browser_click, browser_fill, browser_select or browser_key. Refs are one-shot: any change to the page invalidates every ref you are holding, so read again after acting instead of reusing one.',
+    howToAct: 'Act on these refs with browser_click, browser_fill, browser_select or browser_key. A ref stays valid while the element list is unchanged (read.refsReusable says so), and it fails with "Stale element reference" the moment the page changes, so reuse it rather than re-reading between every step. A field marked secret:true needs browser_fill with secret:true; the reply reports valueLength, never the value.',
     contentTrust: 'untrusted webpage data'
   };
 }

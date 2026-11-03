@@ -1,3 +1,45 @@
+## 0.29.0 — 2026-11-03（**一次真实登录暴露的 7 个缺陷**：密码框没有 ref、ref 每次作废、observe 预算没生效）
+
+0.28.0 教 agent「失败时该走哪一步」。这一版来自**一次真实的登录失败**：调用方拿着正确的密码，做了 9 次 observe、3 次错误判断，最后破坏了浏览器已填好的密码。每一条都能在 624 条单测全绿的情况下复现，因为**单测自己构造结果对象，从不向页面要一个 ref**。
+
+### P0：password 输入框没有 ref，`secret:true` 那条文档承诺的路径不可达
+
+- **现象**：`browser_observe` 返回 `elementCandidates: 32 / elementsReturned: 12`，密码框在被丢掉的那 20 个里；`browser_find_element(query:"密码")` 返回 `found:false`；而 `browser_fill` 的文档说「Password inputs are refused unless `secret:true`」。**唯一会为密码框发 ref 的是 `browser_login_state`**，所以文档里写的路径没有任何工具能走到。
+- **代价**：调用方改用 `clipboard_write` + `Ctrl+V`，报告 `verified:true`，页面却显示 `value:null` ⇒ 无法判断是否写入 ⇒ 连续误判三次，其中一次把用户名改成手机号，破坏了浏览器保存的「用户名+密码」配对。
+- **修法**：`browser_read` / `browser_observe` / `browser_find_element` 现在**为密码框发 ref**，`value` 恒为 `null`，另给 `valueLength` / `hasValue` / `secret:true`。`[data-ai-private]` 仍是硬排除——长度也会泄漏。
+- **`browser_key` 回读焦点元素**：返回 `focusedElement`（`tag`/`type`/`valueLength`/`hasValue`，秘密字段 `value:null`）。「`dispatched:true`」以前是真话且无用；**`valueLength` 是唯一能回答「我刚粘进去的那 12 个字符在不在」的信号**，且不泄漏值。
+- **拒绝消息可执行**：密码框上做普通 fill 以前抛 `Element unavailable or protected`（真的、且没法用）。现在指名 `secret:true`，并由 `next-step` 的 `password_needs_secret_fill` 规则给出**不带值的**下一步（`kind:'retry_with_changes'`，`tool:null`，绝不把秘密抄进 step 对象）。`browser_click` 上的同类拒绝仍是原来的消息——指向 fill 是错误方向。
+
+### P1：每次 observe 都让上一轮 ref 整体作废
+
+- **现象**：一次登录 9 次 observe，9 个不同的 ref 前缀，**页面元素一个都没动**。
+- **根因不是「设计如此」**：有效性从来不是那个 uuid 决定的，而是每次使用时的**元素指纹**校验。所以快照现在**在元素列表完全相同时复用**：`sameAsPrevious: true`、`refsReusable: true`、前缀不变，旧 ref 继续可用。列表一变（指纹或顺序不同）才铸造新快照。
+- **代价对照**：真机实测两次连续 `browser_read` → `sameAsPrevious:true`、同一 `snapshot`、同一 ref，且**第一次的 ref 在第二次读之后仍能用来 fill**。
+
+### P1：`maxChars` 只截断 `read.text`，其余部分是同一份数据的三次重复
+
+- **现象**：传 `maxChars:150`，实际返回接近一万字符。`geometry` 重复 `read.elements`，`debug` 重复 `activeElement`，两者都没被计量。
+- **修法**：新增 `extension/observe-budget.js`（纯函数、可无浏览器测试），预算**作用于整个 payload**；新增 `sections: ["read"|"debug"|"geometry"]` 直接少要。
+- **削减顺序按「最不能失去」排**，不按体积排：`geometry` → debug 的大列表 → 散文/诊断 → 整个 debug → elements（40/15/5/0 分级）→ text → notices（表单错误最后才丢，它决定任务）→ 常量串。
+- **真机实测**（重页面，全量 3241 字符）：`maxChars:1200` → 1163 且保留 elements；`maxChars:16000` → 12971；`maxChars:150` → 395 并**诚实标记 `budgetExceeded:true`**（地板是页面身份元数据，不是内容）。
+- **`trimmed` 逐项列出被丢掉的东西**，所以「没有 geometry」不会被误读成「页面没有元素」。
+
+### P2：三个会造成误判的小缺陷
+
+- **`changed:false` 是假阴性**：异步渲染在下一帧或 fetch 之后，第一次采样必然落在变化之前。现在 `changed:false` 时做一次 320ms 的 settle 再测，仍不变则标 `pending:true` 并说明「异步更新可能还在路上，这不是没生效的证据」。真机实测无副作用按钮：`changed:false, settledMs:320, pending:true`。
+- **`browser_wait` 不能纯延时**：schema 强制 `text`，于是「切 tab 后等 600ms」无调用可用，调用方拿 observe 顶替（那不是等待，还会换 ref）。现在 `ms` 合法，`tabId` 是唯一必需参数；返回 `waitedMs` 并明说「延时不是页面已稳定的证据」。
+- **表单错误不在结构化字段里**：`browser_read` 新增 `notices`（可见 alert/toast/表单错误，`{text, role, tag, selector, live}`，去重、上限 5）。真机实测被拒登录 → `[{role:"alert", selector:"div#msg", text:"用户名或密码错误"}]`，不再需要 diff 7 个字符。
+
+### P3：`emptyMount` 指错方向
+
+空挂载容器以前一律提示「check the URL against the app's routes」。真机那次是 **SPA 会话过期**，路由是对的。现在 `readyState === 'complete'` 时先说「先重载当前 URL，看是否落到登录页」，仍在加载时才说 hydration。
+
+### 验证
+
+- `npm test` **635 条全绿**（新增 `test/login-readback.test.js` 11 条 + `secret-fill` 里 5 条真实 DOM 路径用例）。
+- `node src/cli.js doctor` **12/12、0 条建议**；服务与扩展均 0.29.0。
+- 真机：密码框 ref + `valueLength`、`find 密码` → `found:true`、无 secret 的 fill → 指名 `secret:true` 的拒绝 + 可执行下一步、secret fill 后 `valueLength:12` 且 `value:null`、连续两次读复用 ref、`observe maxChars` 三档、`browser_wait {ms:600}`、无副作用点击 `pending:true`、被拒登录的 `notices`。
+
 ## 0.28.0 — 2026-11-02（**让弱 agent 被引导**：失败只给一个下一步、动作给回执、读给固定形状）
 
 0.27.0 修的是「工具能不能做成」。这一版修的是另一件事：**一个不强的调用方能不能被引导着做成**。它失败的方式从来不是「工具不存在」，而是「工具说了不行，我不知道还能试什么」——于是要么重复同一个调用，要么自己发明一个。三件事逐条收口，**新增 1 个工具（114 → 115）**。

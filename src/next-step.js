@@ -94,6 +94,19 @@ const RULES = [
     })
   },
   {
+    id: 'password_needs_secret_fill',
+    match: r => r.reason === 'password_needs_secret_fill' || /password field/i.test(typeof r.message === 'string' ? r.message : ''),
+    // Deliberately carries no tool and no arguments: the missing piece is a flag on
+    // the call the caller already made, and the value must not be copied into a
+    // step object that may be logged. Saying which flag to add is enough.
+    step: () => ({
+      kind: 'retry_with_changes',
+      tool: null,
+      arguments: {},
+      why: 'This is a password field and a plain fill is refused by design. Repeat the same call on the same ref with the same text plus secret:true (browser_fill or browser_fill_verified). The reply then reports the character count and a boolean match and never the value. Never paste a password through the clipboard instead: that path reports success without being able to show whether the text landed.'
+    })
+  },
+  {
     id: 'element_covered',
     match: r => r.reason === 'element_covered' || r.status === 'covered',
     step: (r, a) => ({
@@ -200,7 +213,9 @@ function stripInternal(args) {
 const SCHEMAS = new Map(TOOLS.map(entry => [entry.name, entry.inputSchema]));
 
 function validStep(step) {
-  if (!step.tool) return step.kind === 'stop' || step.kind === 'escalate';
+  // A tool-less step is only allowed for moves that are instructions rather than
+  // calls: stop, escalate, and "same call plus one flag" (retry_with_changes).
+  if (!step.tool) return ['stop', 'escalate', 'retry_with_changes'].includes(step.kind);
   const schema = SCHEMAS.get(step.tool);
   if (!schema) return false;
   const args = step.arguments ?? {};
@@ -251,6 +266,7 @@ export function withNextStep(name, args, result) {
 // matched by guessing is worse than no rule.
 const ERROR_REASONS = [
   [/stale element|reference no longer|not_found|element.*removed/i, 'stale_reference'],
+  [/password field/i, 'password_needs_secret_fill'],
   [/timed out|timeout|timed_out/i, 'timeout'],
   [/not connected|disconnected|extension paused|bridge is paused/i, 'extension_disconnected'],
   [/covered|intercepts pointer events/i, 'element_covered']

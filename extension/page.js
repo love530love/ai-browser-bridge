@@ -220,8 +220,47 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     if (!found) return { emptyMount: null, mountChecked: false, note: 'No known SPA mount container (#root, #app, #__next, #__nuxt, [data-reactroot], main) is present, so an empty mount cannot be detected here.' };
     if (!empty.length) return { emptyMount: false, mountChecked: true };
+    // An empty mount has two very different causes and the first hint named only
+    // one of them. Measured on a real session: the app had been working, the SPA
+    // session expired, the router rendered nothing into #root, and the caller was
+    // told to "check the URL against the app's routes" - which is the wrong
+    // direction and cost a round of route guessing instead of one reload.
+    // readyState separates them: still loading means hydration, already complete
+    // means the app gave up, and the common cause of that is a dead session.
+    const settled = document.readyState === 'complete';
     return { emptyMount: true, mountChecked: true, emptyContainers: empty,
-      hint: 'A client-rendered mount container is empty. The route may not exist, or the page may still be hydrating. An empty mount is not evidence that the element you want is missing - check the URL against the app\'s routes before searching again.' };
+      hint: settled
+        ? 'A client-rendered mount container is empty even though the document has finished loading. The route may not exist, but on an app that was rendering a moment ago this is usually an expired session: the SPA redirected, the guard failed, and nothing was mounted. Reload the current URL first (browser_navigate to the same URL) and see whether it lands on a login page. Guessing at routes before trying a reload is the expensive order.'
+        : 'A client-rendered mount container is empty and the document is still loading. The page may simply still be hydrating. Wait for readyState complete or for visible text before concluding that the element you want is missing, and check the URL against the app\'s routes only after that.' };
+  };
+  // A form error is the single most useful sentence on the page and it was the
+  // only one with no field of its own: "username or password is incorrect" sat at
+  // the end of read.text, `dialogs` was empty because it is a div, and the caller
+  // had to diff 7 characters of text to notice it had appeared. Notices are that
+  // diff, done once, with the element named.
+  //
+  // Scope is deliberately narrow: visible, text-only leaves, no form controls
+  // inside (a whole <form> matches [class*=error] on some frameworks and would
+  // be reported as a 3000-character "notice"), deduped by text, capped.
+  const NOTICE_SELECTOR = '[role=alert],[role=status],[aria-live=polite],[aria-live=assertive],dialog[open],[class*=error i],[class*=alert i],[class*=toast i],[class*=notice i],[class*=invalid i],[class*=warn i],[class*=message i],[id*=error i],[id*=alert i],[id*=toast i]';
+  const collectNotices = (limit = 5, deadline = Infinity) => {
+    const found = [];
+    const seen = new Set();
+    let scanned = 0;
+    let list;
+    try { list = document.querySelectorAll(NOTICE_SELECTOR); } catch { return found; }
+    for (const el of list) {
+      if (found.length >= limit || performance.now() >= deadline || ++scanned > 400) break;
+      try {
+        if (!visible(el) || sensitive(el)) continue;
+        if (el.querySelector('input,textarea,select,button[type=submit]')) continue;
+        const text = clean(el.textContent || el.getAttribute('aria-label') || '');
+        if (text.length < 2 || text.length > 300 || seen.has(text)) continue;
+        seen.add(text);
+        found.push({ text, role: el.getAttribute('role') || null, tag: el.tagName.toLowerCase(), selector: shortSelector(el), live: el.getAttribute('aria-live') || null });
+      } catch { /* one unreadable node must not cost the whole read */ }
+    }
+    return found;
   };
   // A virtualised list does not render a row until it is near the viewport, so a
   // search for that row fails with "not found" while the row exists. That is a
@@ -944,7 +983,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   const elementText = el => clean([label(el), el.getAttribute('name'), el.getAttribute('id'), el.textContent].filter(Boolean).join(' '));
   const actionCompatible = (el, action = 'any') => {
     if (action === 'any' || action === 'click') return true;
-    if (action === 'fill') return (el instanceof HTMLInputElement && !fileInput(el) && ['text', 'email', 'search', 'url', 'tel', 'number', ''].includes(el.type)) || el instanceof HTMLTextAreaElement || el.isContentEditable;
+    if (action === 'fill') return (el instanceof HTMLInputElement && !fileInput(el) && ['text', 'email', 'search', 'url', 'tel', 'number', 'password', ''].includes(el.type)) || el instanceof HTMLTextAreaElement || el.isContentEditable;
     if (action === 'select') return el instanceof HTMLSelectElement || el.getAttribute('role') === 'combobox' || el.getAttribute('role') === 'option';
     if (action === 'upload') return fileInput(el);
     return true;
@@ -985,7 +1024,12 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     for (const el of candidates) {
       if (items.length >= Math.max(maxResults * 8, 80) || diagnostics.controlCandidatesVisited >= 5000 || performance.now() >= controlDeadline) { diagnostics.controlScanPartial = true; break; }
       diagnostics.controlCandidatesVisited++;
-      if (sensitive(el) || !visible(el) || !actionCompatible(el, action)) continue;
+      // A password field is searchable and ref-able, but its value never enters
+      // the haystack or the result: only the length does. Otherwise "password"
+      // returned found:false on a page with a visible password box, which is the
+      // one query a login task always asks first.
+      const isSecret = el.matches('input[type=password]') && !el.closest('[data-ai-private]');
+      if ((sensitive(el) && !isSecret) || !visible(el) || !actionCompatible(el, action)) continue;
       const rowText = rowContext(el);
       if (requiredRow && !rowText.toLowerCase().includes(requiredRow)) continue;
       const r = elementRole(el).toLowerCase();
@@ -1000,7 +1044,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const box = elementBox(el);
       if (box.covered && !includeCovered) continue;
       const score = (exact ? 100 : starts ? 80 : includes ? 60 : 0) + (box.covered ? -40 : 10) + (actionCompatible(el, action) ? 10 : 0);
-      items.push({ ref, score, rowText, locatorEvidence: textCandidates.has(el) ? 'exact-visible-text; clickability-unverified' : 'semantic-control', clickability: textCandidates.has(el) ? 'unverified' : 'semantic-control', covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...box });
+      items.push({ ref, score, rowText, locatorEvidence: textCandidates.has(el) ? 'exact-visible-text; clickability-unverified' : 'semantic-control', clickability: textCandidates.has(el) ? 'unverified' : 'semantic-control', covered: box.covered, role: r, text: elementText(el), tag: el.tagName.toLowerCase(), disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', ...(isSecret ? { secret: true, valueLength: (el.value || '').length, hasValue: (el.value || '').length > 0, needsSecretFill: true } : {}), ...box });
     }
     return { candidates: items.sort((a, b) => b.score - a.score).slice(0, maxResults), partial: diagnostics.textScanPartial || diagnostics.controlScanPartial, diagnostics };
   };
@@ -1184,6 +1228,15 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { width, height, url: location.href, layoutReady: width > 0 && height > 0, visibilityState: document.visibilityState, focused: document.hasFocus(), editable: !!active && !sensitive(active) && !active.disabled && !active.readOnly && (active.isContentEditable || active.matches('textarea,input[type=text],input:not([type]),input[type=search],input[type=email],input[type=url],input[type=tel],input[type=number]')) };
   }
   if (name === 'browser_wait') {
+    // A plain delay was impossible: text was required, so "the SPA is rendering
+    // after a tab switch, give it 600ms" had no call at all. Callers filled the
+    // gap with another observe, which is not a wait and mints new refs.
+    if (!args.text) {
+      const ms = Math.min(Math.max(args.ms ?? 0, 0), 15000);
+      if (!ms) throw new Error('browser_wait needs text (wait for visible text) or ms (a plain delay in milliseconds).');
+      await new Promise(resolve => setTimeout(resolve, ms));
+      return { waitedMs: ms, matched: null, url: location.href, note: 'Time passed and nothing else was awaited. A delay is not evidence that the page settled; read again to learn what changed.' };
+    }
     const matches = () => ['http:', 'https:'].includes(location.protocol) && (allSites || allowedOrigins.includes(location.origin)) && (document.body?.innerText || '').includes(args.text);
     if (matches()) return { matched: true, url: location.href };
     return await new Promise(resolve => {
@@ -1194,13 +1247,30 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       if (matches()) finish({ matched: true, url: location.href });
     });
   }
+  if (name === 'browser_active_element') {
+    // Where did that keystroke land? A clipboard paste reported verified:true while
+    // the page read value:null, so the caller could not separate "it went in" from
+    // "nothing happened" and got it wrong three times before a screenshot settled
+    // it. The length is the answer, and it does not leak the value.
+    const active = document.activeElement;
+    if (!active || active === document.body || active === document.documentElement) {
+      return { focused: false, tag: active ? active.tagName.toLowerCase() : null, url: location.href,
+        note: 'No control inside this frame had focus. A key was dispatched to the browser, but this document had nothing focused to receive it, so the text may have gone nowhere. Click or fill the field first, then send the key.' };
+    }
+    const isSecret = active.matches('input[type=password]') || !!active.closest('[data-ai-private]');
+    const length = typeof active.value === 'string' ? active.value.length : (active.isContentEditable ? (active.textContent || '').length : 0);
+    return { focused: true, tag: active.tagName.toLowerCase(), type: active.getAttribute('type'), role: active.getAttribute('role'), label: label(active),
+      disabled: !!active.disabled, readOnly: !!active.readOnly, editable: active.isContentEditable || active.matches('input,textarea'),
+      valueLength: length, hasValue: length > 0,
+      ...(isSecret ? { value: null, secret: true } : { value: typeof active.value === 'string' ? active.value.slice(0, 200) : null }),
+      url: location.href,
+      note: 'The element that held focus after the previous action. valueLength is a DOM measurement, not proof that the site accepted the value.' };
+  }
   if (name === 'browser_read') {
     const started = performance.now();
     const deadline = started + (args.budgetMs ?? 6000);
     const timings = {};
     const overBudget = () => performance.now() >= deadline;
-    const snapshot = crypto.randomUUID();
-    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
     const elements = [];
     let elementCandidates = 0;
     let elementsBudgetHit = false;
@@ -1210,7 +1280,30 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const max = args.maxChars ?? 16000;
     const maxTextNodes = args.maxTextNodes ?? 4000;
     const mount = mountDiagnostics();
+    // A password field used to be invisible to every read path, so the route the
+    // documentation promises - browser_fill with secret:true on a ref - had no ref
+    // to take. Measured on a real login page: elementCandidates 32,
+    // elementsReturned 12, the password field among the missing, and
+    // browser_find_element query "password" returned found:false. The caller fell
+    // back to clipboard + Ctrl+V, which reports success without being able to show
+    // whether the text landed, and misjudged it three times in a row.
+    // The fix hands out the ref and the length, never the value: value stays null
+    // and valueLength is the one signal that answers "did my paste go in".
+    // [data-ai-private] is still a hard exclusion: that is a third party declaring
+    // a region private, and a length would leak from it too.
+    const secretField = el => el.matches('input[type=password]') && !el.closest('[data-ai-private]');
+    const describeElement = (el, ref, isSecret) => {
+      const field = (el instanceof HTMLInputElement && !fileInput(el)) || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement;
+      const length = typeof el.value === 'string' ? el.value.length : 0;
+      return { ref, tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: label(el), disabled: !!el.disabled,
+        ...(field && isSecret ? { value: null, valueLength: length, hasValue: length > 0, secret: true, readOnly: !!el.readOnly } : {}),
+        ...(field && !isSecret ? { value: el.value.slice(0, 2000), valueTruncated: el.value.length > 2000, readOnly: !!el.readOnly } : {}),
+        ...(fileInput(el) ? { upload: true, accept: (el.accept || '').slice(0, 1000), multiple: !!el.multiple } : {}),
+        ...(el.matches('input[type=checkbox],input[type=radio]') ? { checked: el.checked } : {}),
+        ...(el instanceof HTMLSelectElement ? { options: [...el.options].slice(0, 100).map(o => ({ value: o.value, label: o.label, selected: o.selected, disabled: o.disabled || !!o.closest('optgroup[disabled]') })), optionsTruncated: el.options.length > 100 } : {}) };
+    };
     const cheapRead = (reason = 'requested') => {
+      const cheapSnapshot = crypto.randomUUID();
       const cheapStarted = performance.now();
       const cheapElements = [];
       const cheapCandidates = document.querySelectorAll(selector);
@@ -1226,32 +1319,48 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const collected = collectReadableText({ max, maxTextNodes, deadline: cheapDeadline });
       timings.cheapMs = Math.round(performance.now() - cheapStarted);
       timings.totalMs = Math.round(performance.now() - started);
-      return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial: true, elements: cheapElements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM; cheap', diagnostics: { mode: 'cheap', cheapReason: reason, budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates: cheapCandidates.length, elementsReturned: cheapElements.length, maxElements, elementsBudgetHit: cheapElements.length >= maxElements || performance.now() >= cheapDeadline, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit }, contentTrust: 'untrusted webpage data' };
+      return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot: cheapSnapshot, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial: true, elements: cheapElements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM; cheap', diagnostics: { mode: 'cheap', cheapReason: reason, budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates: cheapCandidates.length, elementsReturned: cheapElements.length, maxElements, elementsBudgetHit: cheapElements.length >= maxElements || performance.now() >= cheapDeadline, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit }, contentTrust: 'untrusted webpage data' };
     };
     if (args.mode === 'cheap') return cheapRead('requested');
-    const candidates = document.querySelectorAll(selector);
-    for (const el of candidates) {
+    const picked = [];
+    for (const el of document.querySelectorAll(selector)) {
       elementCandidates++;
-      if (elements.length >= maxElements || overBudget()) { elementsBudgetHit = true; break; }
+      if (picked.length >= maxElements || overBudget()) { elementsBudgetHit = true; break; }
       try {
-      if ((!visible(el) && !fileInput(el)) || sensitive(el)) continue;
-      const ref = `${snapshot}:${elements.length + 1}`;
-      state.refs.set(ref, { el, fingerprint: fingerprint(el) });
-      const field = (el instanceof HTMLInputElement && !fileInput(el)) || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement;
-      elements.push({ ref, tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), type: el.getAttribute('type'), label: label(el), disabled: !!el.disabled,
-        ...(field ? { value: el.value.slice(0, 2000), valueTruncated: el.value.length > 2000, readOnly: !!el.readOnly } : {}),
-        ...(fileInput(el) ? { upload: true, accept: (el.accept || '').slice(0, 1000), multiple: !!el.multiple } : {}),
-        ...(el.matches('input[type=checkbox],input[type=radio]') ? { checked: el.checked } : {}),
-        ...(el instanceof HTMLSelectElement ? { options: [...el.options].slice(0, 100).map(o => ({ value: o.value, label: o.label, selected: o.selected, disabled: o.disabled || !!o.closest('optgroup[disabled]') })), optionsTruncated: el.options.length > 100 } : {}) });
+        const isSecret = secretField(el);
+        if ((!visible(el) && !fileInput(el)) || (sensitive(el) && !isSecret)) continue;
+        picked.push({ el, isSecret, fingerprint: fingerprint(el) });
       } catch { elementErrors++; }
     }
+    // Every read used to mint a fresh uuid, so a caller that read twice could not
+    // tell "your refs are still good" from "they all just died". Measured: one
+    // login produced nine observes and nine different prefixes while not a single
+    // element had moved. Validity was never the uuid - it is the element
+    // fingerprint, checked on every use - so the snapshot is now reused whenever
+    // the element list is identical. Same page, same controls, same refs.
+    const signature = picked.map(p => `${p.fingerprint}${p.isSecret ? '#secret' : ''}`).join('\n');
+    const previous = globalThis.__aiBrowserBridgeLastRead;
+    const reusable = !!previous && previous.signature === signature && previous.url === location.href
+      && previous.state?.refs?.size === picked.length
+      && [...previous.state.refs.values()].every(entry => entry.el?.isConnected);
+    const snapshot = reusable ? previous.state.snapshot : crypto.randomUUID();
+    const state = reusable ? previous.state : rememberState({ snapshot, url: location.href, refs: new Map() });
+    state.createdAt = Date.now();
+    globalThis.__aiBrowserBridge = state;
+    picked.forEach((p, index) => {
+      const ref = `${snapshot}:${index + 1}`;
+      if (!reusable) state.refs.set(ref, { el: p.el, fingerprint: p.fingerprint });
+      elements.push(describeElement(p.el, ref, p.isSecret));
+    });
+    globalThis.__aiBrowserBridgeLastRead = { signature, url: location.href, state };
     timings.elementsMs = Math.round(performance.now() - started);
     if (elements.length === 0 && timings.elementsMs > Math.min(1000, (args.budgetMs ?? 6000) / 2)) return cheapRead('normal-elements-slow');
     // Extract rendered text nodes, not input values, scripts, or hidden content.
     const collected = collectReadableText({ max, maxTextNodes, deadline });
+    const notices = collectNotices(5, deadline);
     timings.totalMs = Math.round(performance.now() - started);
     const partial = elementsBudgetHit || collected.textBudgetHit || overBudget();
-    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM', diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates, elementsReturned: elements.length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit }, contentTrust: 'untrusted webpage data' };
+    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, sameAsPrevious: reusable, refsReusable: reusable, refLifetime: 'Refs stay valid across reads while the element list is unchanged; a changed list mints a new snapshot.', notices, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: 'main-frame; light DOM', diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates, elementsReturned: elements.length, secretFieldsRedacted: elements.filter(e => e.secret).length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit }, contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_find_text') {
     const started = performance.now();
@@ -1283,16 +1392,35 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { title: document.title, url: location.href, readyState: document.readyState, query, found: matches.length > 0, matchCount: matches.length, truncated: matches.length >= maxMatches || collected.textBudgetHit || !!direct?.textBudgetHit || textLengthBudgetHit || elementBudgetHit, matches, nearbyElements, ...(textNotRendered ? { notRendered: textNotRendered } : {}), diagnostics: { mode: cheap ? 'cheap' : 'normal', elapsedMs: Math.round(performance.now() - started), textLength: collected.length, contextChars, maxMatches, textNodesVisited: collected.textNodesVisited, directTextNodesVisited: direct?.textNodesVisited ?? 0, maxTextNodes: 50000, textBudgetHit: collected.textBudgetHit || !!direct?.textBudgetHit, textLengthBudgetHit, budgetMs, maxElements, elementCandidates, elementBudgetHit }, contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_observe') {
-    const read = await pageOperation('browser_read', { ...args, maxChars: args.maxChars ?? 16000 }, allowedOrigins, allSites);
-    const debug = await pageOperation('browser_debug', args, allowedOrigins, allSites);
+    // Three sections came back unconditionally and maxChars only trimmed
+    // read.text, so a call with maxChars:150 still answered with roughly ten
+    // thousand characters: geometry repeated read.elements, debug repeated the
+    // active element, and the budget never saw either. Measured in a real login:
+    // nine observes, every one of them ~10k characters.
+    // The budget now applies to the whole payload and the caller can ask for one
+    // section. Nothing disappears silently: `trimmed` names what was dropped.
+    const wanted = Array.isArray(args.sections) && args.sections.length
+      ? args.sections.filter(s => ['read', 'debug', 'geometry'].includes(s))
+      : ['read', 'debug', 'geometry'];
+    const wantRead = wanted.includes('read') || wanted.includes('geometry');
+    const read = wantRead ? await pageOperation('browser_read', { ...args, maxChars: args.maxChars ?? 16000 }, allowedOrigins, allSites) : null;
+    const debug = wanted.includes('debug') ? await pageOperation('browser_debug', args, allowedOrigins, allSites) : null;
     const geometry = [];
-    const state = globalThis.__aiBrowserBridge;
-    for (const item of read.elements.slice(0, 100)) {
-      const entry = state?.refs.get(item.ref);
-      if (!entry?.el?.isConnected) continue;
-      geometry.push({ ref: item.ref, label: item.label, tag: item.tag, role: item.role, upload: !!item.upload, ...elementBox(entry.el) });
+    if (wanted.includes('geometry') && read) {
+      const state = globalThis.__aiBrowserBridge;
+      for (const item of read.elements.slice(0, 100)) {
+        const entry = state?.refs.get(item.ref);
+        if (!entry?.el?.isConnected) continue;
+        geometry.push({ ref: item.ref, label: item.label, tag: item.tag, role: item.role, upload: !!item.upload, ...elementBox(entry.el) });
+      }
     }
-    return { read, debug, geometry, observationTrust: 'untrusted webpage data plus extension geometry', scope: 'main-frame; light DOM' };
+    const payload = {};
+    if (wanted.includes('read') && read) payload.read = read;
+    if (wanted.includes('debug') && debug) payload.debug = debug;
+    if (wanted.includes('geometry')) payload.geometry = geometry;
+    // The budget is applied in the worker (extension/observe-budget.js), where it
+    // covers this whole object rather than read.text alone.
+    return { ...payload, sections: wanted, observationTrust: 'untrusted webpage data plus extension geometry', scope: 'main-frame; light DOM' };
   }
   if (name === 'browser_scan_overlays') {
     const snapshot = crypto.randomUUID();
@@ -1776,7 +1904,13 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     let recommended = 'read';
     if (close && (blocker || scan.overlays.some(o => o.areaRatio > 0.2 || o.hint))) { recommended = 'dismiss_overlay'; steps.push({ tool: 'browser_dismiss_overlay', args: { tabId: args.tabId, ref: close.close.ref, expectGoneRef: close.overlayRef }, reason: `Possible blocker ${close.overlayHint || close.overlayLabel || 'overlay'}` }); }
     if (top && !top.covered && !top.disabled) {
-      if (top.locatorEvidence?.includes('clickability-unverified')) {
+      if (top.secret) {
+        // A password field only accepts a secret fill. Recommending browser_fill
+        // without the flag is a step the page will refuse, which teaches the caller
+        // that the guide cannot be trusted.
+        recommended = 'fill_secret';
+        steps.push({ tool: 'browser_fill_verified', args: { secret: true }, ref: top.ref, reason: 'Password field: it needs secret:true, and the reply reports only the character count. This field already holds ' + (top.valueLength ?? 0) + ' characters, so check whether something filled it before typing over it.' });
+      } else if (top.locatorEvidence?.includes('clickability-unverified')) {
         recommended = 'verify_text_target';
         steps.push({ tool: 'browser_screenshot', args: { tabId: args.tabId }, ref: top.ref, reason: 'Exact text has a ref but no semantic control role. Verify its menu/row context and user intent before clicking; never infer success from dispatch alone.' });
       } else { recommended = args.action === 'fill' ? 'fill' : args.action === 'select' ? 'pick_or_select' : args.action === 'upload' ? 'upload' : 'click'; steps.push({ tool: recommended === 'pick_or_select' ? 'browser_pick/browser_select' : `browser_${recommended}`, ref: top.ref, reason: 'Top uncovered enabled candidate' }); }
@@ -1869,7 +2003,17 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     && args.secret === true
     && el.matches('input[type=password]')
     && !el.closest('[data-ai-private]');
-  if ((sensitive(el) && !secretTarget) || el.disabled || el.getAttribute('aria-disabled') === 'true' || (!visible(el) && name !== 'browser_upload')) throw new Error('Element unavailable or protected');
+  if (sensitive(el) && !secretTarget) {
+    // "Element unavailable or protected" told the caller nothing it could act on:
+    // the field was visible, had a ref, and the only missing piece was secret:true.
+    // Only the two fill operations get this advice - a click on a password field is
+    // a different refusal, and pointing it at a fill would be the wrong direction.
+    if ((name === 'browser_fill' || name === 'browser_fill_verified') && el.matches('input[type=password]') && !el.closest('[data-ai-private]')) {
+      throw new Error('Password field. A plain fill is refused by design: call browser_fill or browser_fill_verified on this same ref with secret:true and the same text. The reply then reports the character count and a boolean match, never the value.');
+    }
+    throw new Error('Element unavailable or protected');
+  }
+  if (el.disabled || el.getAttribute('aria-disabled') === 'true' || (!visible(el) && name !== 'browser_upload')) throw new Error('Element unavailable or protected');
   if (name === 'browser_scroll_element') {
     if (!Number.isInteger(args.deltaY) || Math.abs(args.deltaY) > 5000) throw new Error('Invalid scroll');
     if (typeof el.scrollTop !== 'number' || el.scrollHeight <= el.clientHeight) throw new Error('Element is not a scrollable container');

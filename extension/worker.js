@@ -14,6 +14,7 @@ import { createIdentity } from './identity.js';
 import { runAuthorityTool } from './browser-authority.js';
 import { reuseKey, samePage, visibleTab, isInternalPage, describeTab, createTabOwnership } from './tab-identity.js';
 import { RECEIPT_TOOLS, DEDUPE_TOOLS, DUPLICATE_WINDOW_MS, duplicateKey, describeChange, suppressionResult } from './receipt.js';
+import { applyObserveBudget } from './observe-budget.js';
 import { digestState } from './state-digest.js';
 
 // Recent dispatched actions, keyed by tool + tab + page state + arguments. Lives
@@ -1003,7 +1004,14 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   if (name === 'browser_key' || name === 'browser_hover') {
     const point = routedArgs.ref ? await page('browser_resolve', { ...routedArgs, focus: name === 'browser_key' }) : null;
     await guarded(send => name === 'browser_key' ? key(send, args.key) : pointer(send, { ...point, action: 'hover' }));
-    return { dispatched: true, inspectOutcome: true };
+    if (name === 'browser_hover') return { dispatched: true, inspectOutcome: true };
+    // "dispatched:true, inspectOutcome:true" is true and useless: after Ctrl+V the
+    // caller has no way to tell whether the text landed. Read the focused element
+    // back, length only. Measured cost of not doing this: three wrong conclusions
+    // about one password field, including overwriting a working autofill.
+    let focusedElement = null;
+    try { focusedElement = await page('browser_active_element'); } catch { focusedElement = null; }
+    return { dispatched: true, inspectOutcome: true, ...(focusedElement ? { focusedElement } : { focusedElementUnreadable: true, note: 'The key was dispatched, but the focused element could not be read back (the page may have navigated). Read the page to see the outcome.' }) };
   }
   if (name === 'browser_prepare_coordinate') {
     const state = await pointerForeground({ requireForeground: args.requireForeground === true });
@@ -1123,11 +1131,10 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   }
   if (name === 'browser_observe') {
     const observation = await page('browser_observe');
-    if (args.maxChars && observation.read?.text?.length > args.maxChars) {
-      observation.read.text = observation.read.text.slice(0, args.maxChars);
-      observation.read.truncated = true;
-    }
-    return observation;
+    // The old truncation touched read.text only, so maxChars:150 still answered
+    // with roughly ten thousand characters: geometry repeated read.elements and
+    // debug repeated the active element, and neither was ever measured.
+    return applyObserveBudget(observation, args.maxChars ?? 16000);
   }
   if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'].includes(name)) {
     if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
@@ -1414,8 +1421,29 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   if (result?.result === undefined) throw new Error('No page result. Page may have navigated; inspect before retrying.');
   const value = result.result;
   if (!wantsReceipt) return value;
-  const after = await readFingerprint();
+  let after = await readFingerprint();
+  // "changed:false" measured once, immediately, is not a verdict: a tab switch or
+  // a submit renders on the next frame or after a fetch, so the first sample lands
+  // before the change and reports a no-op. That produced a false negative on every
+  // asynchronous action. One short settle, only when nothing moved, and the result
+  // is still labelled: an unchanged page after 320ms may simply be slow.
+  let settledMs = 0;
+  if (before && after && after.digest === before.digest) {
+    for (const delay of [120, 200]) {
+      await new Promise(resolve => setTimeout(resolve, delay));
+      settledMs += delay;
+      const again = await readFingerprint();
+      if (!again) break;
+      after = again;
+      if (again.digest !== before.digest) break;
+    }
+  }
   const receipt = describeChange(before, after);
+  if (settledMs) receipt.settledMs = settledMs;
+  if (before && after && after.digest === before.digest) {
+    receipt.pending = true;
+    receipt.pendingNote = `The page fingerprint was identical before and after, including a ${settledMs}ms settle. An asynchronous update may still be in flight, so this is not evidence that the action did nothing - read the page before deciding.`;
+  }
   // Only a dispatched action is worth remembering: a refused click must not
   // make the next, correct click look like a duplicate.
   const dispatched = value?.dispatched === true || value?.clicked === true || value?.filled === true || value?.status === 'success';

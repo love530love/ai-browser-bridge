@@ -75,6 +75,7 @@ function build(specs) {
         return false;
       }),
       closest: selector => (spec.privateRegion && selector === '[data-ai-private]' ? PRIVATE : null),
+      contains: () => true,
       getClientRects: () => [{}],
       getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 30 }),
       focus: () => {},
@@ -88,13 +89,22 @@ function build(specs) {
   const document = {
     title: 'fixture',
     querySelectorAll: () => nodes,
-    getElementById: () => null
+    getElementById: () => null,
+    // Added for browser_read: it asks for SPA mount containers, walks text nodes,
+    // and hit-tests element centres. None of those paths existed in this harness
+    // before, so nothing here changes the behaviour the older tests rely on.
+    querySelector: () => null,
+    createTreeWalker: () => ({ nextNode: () => null }),
+    elementFromPoint: () => nodes[0] ?? null,
+    body: null,
+    documentElement: null
   };
   const context = vm.createContext({
     location: { protocol: 'https:', origin: 'https://fixture.test', href: HREF },
     innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
     crypto: { randomUUID }, Map, Date: { now: () => 1000 }, console,
     setTimeout, clearTimeout,
+    NodeFilter: { SHOW_TEXT: 4, SHOW_ELEMENT: 1 },
     performance: { now: () => 0 },
     getComputedStyle: () => ({ visibility: 'visible', display: 'block', contentVisibility: 'visible', opacity: '1', position: 'static', zIndex: 'auto' }),
     InputEvent: class InputEvent { constructor(type, init) { this.type = type; Object.assign(this, init ?? {}); } },
@@ -105,6 +115,9 @@ function build(specs) {
     // instead of a ReferenceError.
     MutationObserver: class MutationObserver { observe() {} disconnect() {} },
     HTMLInputElement: Input, HTMLTextAreaElement: TextArea, HTMLSelectElement: Select,
+    // elementRole() checks instanceof for these, so a search over a control that
+    // is not an input needs them to exist even when nothing constructs one.
+    HTMLButtonElement: class HTMLButtonElement {}, HTMLAnchorElement: class HTMLAnchorElement {},
     document
   });
   const run = vm.runInContext(`(${pageOperation.toString()})`, context);
@@ -144,7 +157,10 @@ test('browser_fill without secret still refuses a password field', async () => {
   const { run } = build([{ attrs: { type: 'password', name: 'pw', placeholder: 'Password' } }]);
   const ref = await passwordRef(run);
   const result = await run('browser_fill', { ref, text: SECRET }, [], true);
-  assert.equal(failureOf(result), 'Element unavailable or protected');
+  // "Element unavailable or protected" was true and unusable: the field was
+  // visible, had a ref, and the only missing piece was one flag. The refusal now
+  // names it, because the caller's next move is to repeat the same call plus it.
+  assert.match(failureOf(result), /Password field\. A plain fill is refused by design: call browser_fill or browser_fill_verified on this same ref with secret:true/);
 });
 
 test('secret fill really writes the password into the field', async () => {
@@ -236,4 +252,72 @@ test('login_state guidance points at secret:true instead of a fill that cannot w
   assert.match(guidance, /secret:true/);
   assert.match(guidance, /browser_password_manager_reveal/);
   assert.ok(!/fill it with browser_fill_verified: that is faster/.test(guidance), 'the dead-end instruction is back');
+});
+
+// The deadlock this file was written for had a second half that nobody noticed:
+// browser_login_state minted a ref, and every other read path dropped the field.
+// So the documented route - "browser_fill with secret:true and the ref from
+// passwordFields" - was unreachable through the tools a caller actually reaches
+// for. Measured on a real login: observe returned 12 of 32 candidates, the
+// password box among the missing, browser_find_element query "password" returned
+// found:false, and the caller fell back to clipboard + Ctrl+V, which reports
+// success and cannot show whether the text landed.
+test('browser_read hands out a ref for a password field, with a length and no value', async () => {
+  const { run } = build([{ attrs: { type: 'password', name: 'pw', placeholder: '密码' } }]);
+  const read = await run('browser_read', {}, [], true);
+  assert.ok(!read.__aibError, `read was refused: ${read.__aibError}`);
+  const field = read.elements.find(el => el.secret === true);
+  assert.ok(field, `a password field must be listed, got ${JSON.stringify(read.elements)}`);
+  assert.equal(field.value, null, 'the value must never be returned');
+  assert.equal(field.valueLength, 0);
+  assert.equal(field.hasValue, false);
+  assert.ok(typeof field.ref === 'string' && field.ref.includes(':'), 'the ref is what makes secret:true reachable');
+  assert.ok(!JSON.stringify(read).includes(SECRET), 'nothing in a read may contain a secret');
+});
+
+test('a filled password field reports its length, which is how a paste is judged', async () => {
+  const { run, nodes } = build([{ attrs: { type: 'password', name: 'pw', placeholder: '密码' } }]);
+  nodes[0].value = SECRET;
+  const read = await run('browser_read', {}, [], true);
+  const field = read.elements.find(el => el.secret === true);
+  assert.equal(field.value, null);
+  assert.equal(field.valueLength, SECRET.length);
+  assert.equal(field.hasValue, true);
+  assert.ok(!JSON.stringify(read).includes(SECRET));
+});
+
+test('searching for a password field finds it', async () => {
+  const { run } = build([{ attrs: { type: 'password', name: 'pw', placeholder: '密码' } }]);
+  const found = await run('browser_find_element', { query: '密码', action: 'fill' }, [], true);
+  assert.ok(!found.__aibError, `find was refused: ${found.__aibError}`);
+  assert.equal(found.found, true, `expected the password field, got ${JSON.stringify(found.candidates)}`);
+  assert.equal(found.candidates[0].secret, true);
+  assert.equal(found.candidates[0].needsSecretFill, true);
+});
+
+test('two identical reads keep the same refs instead of invalidating them', async () => {
+  const { run } = build([{ attrs: { type: 'password', name: 'pw', placeholder: '密码' } }]);
+  const first = await run('browser_read', {}, [], true);
+  const second = await run('browser_read', {}, [], true);
+  assert.equal(second.sameAsPrevious, true, 'an unchanged element list must not mint a new snapshot');
+  assert.equal(second.refsReusable, true);
+  assert.equal(second.snapshot, first.snapshot);
+  assert.equal(second.elements[0].ref, first.elements[0].ref);
+  // The ref from the first read must still resolve after the second one.
+  const ref = first.elements[0].ref;
+  const filled = await run('browser_fill', { ref, text: SECRET, secret: true }, [], true);
+  assert.ok(!filled.__aibError, `the old ref was rejected: ${filled.__aibError}`);
+});
+
+test('a changed element identity does mint a new snapshot', async () => {
+  const { run, nodes } = build([{ attrs: { type: 'password', name: 'pw', placeholder: '密码' } }]);
+  const first = await run('browser_read', {}, [], true);
+  // The fingerprint is [tag, type, label, href, formaction]: renaming the field is
+  // the same element list changing identity, which is what a new snapshot is for.
+  // A field merely becoming disabled is NOT a new identity - the ref still points
+  // at the same element - so that case must keep the snapshot.
+  nodes[0].getAttribute = name => (name === 'placeholder' ? '新密码' : name === 'type' ? 'password' : null);
+  const second = await run('browser_read', {}, [], true);
+  assert.equal(second.sameAsPrevious, false);
+  assert.notEqual(second.snapshot, first.snapshot);
 });
