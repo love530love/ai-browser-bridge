@@ -19,7 +19,7 @@
 // confirmation the gate asked for - never a fabricated one.
 import { TOOLS } from './tools.js';
 
-const SUCCESS_STATUSES = new Set(['success', 'verified', 'nothing_to_clear', 'cleared', 'already_in_state']);
+const SUCCESS_STATUSES = new Set(['success', 'verified', 'nothing_to_clear', 'cleared', 'already_in_state', 'available']);
 const WAIT_STEP = () => ({
   kind: 'wait',
   tool: 'browser_wait_until_ready',
