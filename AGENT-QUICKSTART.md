@@ -63,6 +63,10 @@ native select、ARIA combobox、Element Plus/Ant/react 风格选择器和 portal
 必须传入 `expect`，例如 `textAppears`、`urlContains`、`elementLabelAppears` 或
 `valueMatches`。工具只执行一次动作并等待期望结果；若返回 `failed/uncertain`，先观察诊断，不要自动重放。
 
+所有写操作必须使用 `_verified` 变体：`browser_click_verified`、`browser_fill_verified`、
+`browser_upload_verified`、`browser_navigate_verified`、`browser_select_verified`、
+`browser_choose_verified`、`browser_action_verified`。非 verified 变体仅用于诊断——它从不证明发生了什么。dispatch 后未观察到的结果是不确定的且不可重放；必须重新观察后再执行下一步。
+
 遇到下拉框、上传区、SPA 空读或遮挡不确定时，先调用只读 `browser_debug`。它返回
 readyState、焦点、滚动位置、可见 option、combobox、file input、dialog 和 iframe
 计数，用来定位问题；不要把 `browser_debug` 当作写操作成功证明。

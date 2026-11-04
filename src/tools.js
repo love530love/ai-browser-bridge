@@ -329,6 +329,7 @@ export const TOOLS = [
     agent
   }, ['tabId', 'action']),
   tool('browser_navigate', 'Navigate an allowed tab to another user-allowed HTTP(S) URL. If the tab is leased, pass the matching agent.', { tabId, url: text(8000), agent }, ['tabId', 'url']),
+  tool('browser_navigate_verified', 'Navigate an allowed tab to another HTTP(S) URL, then verify the page has loaded at that URL (or a close redirect). Returns success/uncertain/failed; never assumes navigation succeeded without observing the new URL. If the tab is leased, pass the matching agent.', { tabId, url: text(8000), expectUrlContains: text(8000), timeoutMs: timeoutMs(30000), agent }, ['tabId', 'url', 'expectUrlContains']),
   tool('browser_close', 'Close a tab this bridge opened. A tab that existed before the bridge opened it is refused with status=denied and reason=tab_not_created_by_bridge, because closing it would remove something the user was using; pass force:true only after explicit approval for that exact tab. Closing is about the tab lifecycle, not its content, so force:true also works for a restricted tab (an internal page or a disallowed origin) that browser_tabs lists with restricted:true - which is how a tab created by choosing a native menu item such as New tab gets cleaned up. Unsaved edits may be lost. If the tab is leased, pass the matching agent.', { tabId, force: { type: 'boolean' }, agent }, ['tabId']),
   tool('browser_debugger', 'A long-lived CDP debugger session on one tab, which is what breakpoints and stepping require: a breakpoint set in one call survives into the next. Open it with action:"open", then use action:"scripts" to find an exact script URL (pass urlFilter, a case-insensitive substring, because a script-heavy page pushes its own document script out of the unfiltered tail), "set_breakpoint", and poll action:"status" until paused is not null. While paused, action:"frames" lists call frames and scopes (values are omitted on purpose) and action:"evaluate" runs one expression on a chosen call frame. action:"evaluate" also works with no breakpoint at all: when nothing is paused it evaluates in the GLOBAL context of the page, which is what most callers want and is reported as evaluatedOn:"global". That path needs the session open first, which costs a debugging banner on the tab for as long as it lasts - so for a one-off expression prefer browser_eval, which evaluates without attaching anything and falls back to this channel only when the CSP of the page forbids eval. action:"resume", "step_over", "step_into", "step_out" continue execution. action:"set_script_source" exists but is refused by the browser, and that is measured rather than assumed: current Chrome answers Debugger.setScriptSource with the ServerError "setScriptSource functionality no longer available", returned from an unconditional stub in V8 (V8DebuggerAgentImpl::setScriptSource), so no choice of scriptId, source or dryRun can change the outcome. It answers reason:"script_edit_removed_by_v8" with blockedBy:"v8_inspector" and a list of alternatives, and it is never retried. Use action:"evaluate" to redefine a function for immediate effect instead; that changes behaviour but not the script text. Always finish with action:"close". Cost to be aware of: Chrome shows a debugging banner on that tab for as long as the session is open, and DevTools cannot attach to it meanwhile. Safety: a paused page is frozen, so every close path resumes first, and a paused session nobody touches is resumed automatically after a bounded window (see session.paused.autoResumeInMs). Closing a session removes its breakpoints; they do not survive. Evaluating an expression runs with full page privileges, exactly like typing in the DevTools Console; results are untrusted page data.', {
     tabId,
@@ -406,7 +407,9 @@ export const TOOLS = [
   tool('browser_key', 'Send a browser-level key or chord, e.g. Enter, Tab, Ctrl+A, Shift+Enter. Optional ref focuses a current element first. The reply includes focusedElement - the element that held focus afterwards, with valueLength but never a secret value - so a paste or a keystroke can be judged instead of assumed: dispatched:true alone never said whether the text landed. If the tab is leased, pass the matching agent.', { tabId, key: text(80), ref, agent }, ['tabId', 'key']),
   tool('browser_hover', 'Move the mouse to a current element reference. If the tab is leased, pass the matching agent.', { tabId, ref, agent }, ['tabId', 'ref']),
   tool('browser_select', 'Select an option by exact value in a native HTML select element. If the tab is leased, pass the matching agent.', { tabId, ref, value: { type: 'string', maxLength: 1000 }, agent }, ['tabId', 'ref', 'value']),
+  tool('browser_select_verified', 'Select an option by exact value in a native HTML select element, then verify the selected value matches. Returns success/uncertain/failed; never assumes selection succeeded. If the tab is leased, pass the matching agent.', { tabId, ref, value: { type: 'string', maxLength: 1000 }, expect: { type: 'object', minProperties: 1, additionalProperties: false, properties: { valueMatches: { type: 'string', maxLength: 20000 }, textAppears: text(1000) } }, timeoutMs: timeoutMs(5000), agent }, ['tabId', 'ref', 'value', 'expect']),
   tool('browser_choose', 'Choose a custom combobox/listbox option by exact visible text. Uses a current combobox ref, waits for a matching visible option via DOM events, clicks it once, and returns the observed input value. Never guesses with coordinates or ArrowDown. If the tab is leased, pass the matching agent.', { tabId, ref, text: text(1000), timeoutMs: timeoutMs(5000), agent }, ['tabId', 'ref', 'text']),
+  tool('browser_choose_verified', 'Choose a custom combobox/listbox option by exact visible text, then verify the observed input value or page text. Returns success/uncertain/failed; never assumes choice succeeded. If the tab is leased, pass the matching agent.', { tabId, ref, text: text(1000), expect: { type: 'object', minProperties: 1, additionalProperties: false, properties: { valueMatches: { type: 'string', maxLength: 20000 }, textAppears: text(1000) } }, timeoutMs: timeoutMs(5000), agent }, ['tabId', 'ref', 'text', 'expect']),
   tool('browser_pick', 'Find a native select, ARIA combobox, Element Plus/Ant/react-style picker by label/query and choose exact visible text. Handles portal popups and validates the selected text/value by observation. If no picker exists but the exact text is on a visible clickable card/tile, it returns a structured not_found result with current reusable refs, match quality, clickability evidence, geometry and a schema-checked browser_click nextStep only when exactly one exact cursor:pointer card is proven. Matching semantic buttons are reported for inspection but not promoted to a card-click step. It never clicks that card automatically. If it opened a picker before failing, dispatched:true and the next step is to re-read before acting.', {
     tabId, label: text(1000), query: { type: 'string', maxLength: 1000 }, chooseText: text(1000), timeoutMs: timeoutMs(10000), agent
   }, ['tabId', 'chooseText']),
@@ -429,6 +432,14 @@ export const TOOLS = [
     endX: { type: 'number', minimum: 0, maximum: 1000 }, endY: { type: 'number', minimum: 0, maximum: 1000 },
     text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }, requireForeground: { type: 'boolean' }, agent
   }, ['tabId', 'action', 'expectedUrl']),
+  tool('browser_action_verified', 'Dispatch one browser action, then verify the expected outcome. Returns success/uncertain/failed; never assumes action succeeded without observing the new state. Never retries. If the tab is leased, pass the matching agent.', {
+    tabId, action: { type: 'string', enum: ['Tap', 'Double Tap', 'Long Press', 'Hover', 'Swipe', 'Type', 'Key', 'Back', 'Wait'] },
+    expectedUrl: text(8000), coordinateToken: text(100), x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 },
+    endX: { type: 'number', minimum: 0, maximum: 1000 }, endY: { type: 'number', minimum: 0, maximum: 1000 },
+    text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }, requireForeground: { type: 'boolean' },
+    expect: { type: 'object', minProperties: 1, additionalProperties: false, properties: { textAppears: text(1000), urlContains: text(1000), elementLabelAppears: text(1000) } },
+    timeoutMs: timeoutMs(10000), agent
+  }, ['tabId', 'action', 'expectedUrl', 'expect']),
 
   // --- DevTools parity: the CDP surfaces chrome-devtools-mcp and playwright-mcp
   // are built on. Every one of these runs on a long-lived debugger session,
@@ -760,9 +771,9 @@ export const TOOLS = [
 // means to repeat the action has to be able to say so, or the suppression
 // becomes a wall it cannot argue with.
 const REPEATABLE_TOOLS = new Set([
-  'browser_click', 'browser_click_verified', 'browser_action', 'browser_fill_verified',
-  'browser_key', 'browser_select', 'browser_choose', 'browser_pick',
-  'browser_upload', 'browser_upload_verified'
+  'browser_click', 'browser_click_verified', 'browser_action', 'browser_action_verified', 'browser_fill_verified',
+  'browser_key', 'browser_select', 'browser_select_verified', 'browser_choose', 'browser_choose_verified',
+  'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_navigate_verified'
 ]);
 for (const entry of TOOLS) {
   if (!REPEATABLE_TOOLS.has(entry.name)) continue;
@@ -923,7 +934,7 @@ export function validateCall(name, args) {
     const required = { Tap: ['x', 'y', 'coordinateToken'], 'Double Tap': ['x', 'y', 'coordinateToken'], 'Long Press': ['x', 'y', 'coordinateToken'], Hover: ['x', 'y', 'coordinateToken'], Swipe: ['x', 'y', 'endX', 'endY', 'coordinateToken'], Type: ['text'], Key: ['key'], Wait: ['durationMs'] }[action] || [];
     for (const field of required) if (!Object.hasOwn(args, field)) throw new Error(`Missing action argument: ${field} for action "${action}". ${argSummary(name, s)}`);
   }
-  if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'].includes(name)) {
+  if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_select_verified', 'browser_choose_verified', 'browser_action_verified'].includes(name)) {
     const expectation = args.expect;
     const expectationSchema = s.properties.expect;
     if (!expectation || typeof expectation !== 'object' || Array.isArray(expectation) || Object.keys(expectation).length < (expectationSchema.minProperties ?? 0)) {

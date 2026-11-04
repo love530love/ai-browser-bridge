@@ -59,6 +59,13 @@ test('an unknown goal still returns a usable chain instead of nothing', () => {
   assert.ok(guide.incidentRecoveryContract.neverCopyBrowserProfileStores.includes('Login Data'));
   assert.match(guide.whenAToolIsMissing, /Do not copy or parse Chrome profiles/);
   assert.match(guide.whenAToolIsMissing, /recommend revocation\/rotation/);
+  assert.ok(guide.verifiedWriteContract);
+  assert.equal(guide.verifiedWriteContract.rule, 'Every state-changing action MUST use its _verified variant.');
+  assert.ok(guide.verifiedWriteContract.tools.includes('browser_navigate_verified'));
+  assert.ok(guide.verifiedWriteContract.tools.includes('browser_select_verified'));
+  assert.ok(guide.verifiedWriteContract.tools.includes('browser_action_verified'));
+  assert.ok(guide.verifiedWriteContract.tools.includes('browser_choose_verified'));
+  assert.equal(guide.verifiedWriteContract.neverAssumeSuccess, 'The non-verified variant is diagnostic only — it never proves what happened. Never replay an uncertain write.');
 });
 
 test('capability gaps are stated instead of being hidden behind a refusal', () => {

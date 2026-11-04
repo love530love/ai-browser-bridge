@@ -18,10 +18,11 @@ export const TOOL_GROUPS = [
   ] },
   { id: 'act', purpose: '点、填、选、按键、滚动', tools: [
     'browser_prepare_action', 'browser_click', 'browser_click_verified', 'browser_fill',
-    'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick',
-    'browser_key', 'browser_hover', 'browser_scroll', 'browser_scroll_element',
-    'browser_action', 'browser_prepare_coordinate', 'browser_drag', 'browser_upload',
-    'browser_upload_verified', 'browser_dialog', 'browser_wait'
+    'browser_fill_verified', 'browser_select', 'browser_select_verified', 'browser_choose',
+    'browser_choose_verified', 'browser_pick', 'browser_key', 'browser_hover', 'browser_scroll',
+    'browser_scroll_element', 'browser_action', 'browser_action_verified',
+    'browser_prepare_coordinate', 'browser_drag', 'browser_upload', 'browser_upload_verified',
+    'browser_dialog', 'browser_wait'
   ] },
   { id: 'overlay', purpose: '遮挡层、浮层、toast、tooltip', tools: [
     'browser_scan_overlays', 'browser_dismiss_overlay', 'browser_transient', 'browser_popup'
@@ -31,9 +32,9 @@ export const TOOL_GROUPS = [
     'browser_network_summary', 'browser_network_rules', 'browser_devtools_capture'
   ] },
   { id: 'tab', purpose: '标签、导航、窗口', tools: [
-    'browser_tabs', 'browser_open', 'browser_close', 'browser_navigate', 'browser_navigation',
-    'browser_claim_tab', 'browser_renew_tab', 'browser_release_tab', 'browser_tab_lease',
-    'browser_windows', 'browser_tab_groups', 'browser_session_restore', 'browser_launch'
+    'browser_tabs', 'browser_open', 'browser_close', 'browser_navigate', 'browser_navigate_verified',
+    'browser_navigation', 'browser_claim_tab', 'browser_renew_tab', 'browser_release_tab',
+    'browser_tab_lease', 'browser_windows', 'browser_tab_groups', 'browser_session_restore', 'browser_launch'
   ] },
   { id: 'auth', purpose: '登录态、凭据、cookie、站点存储', tools: [
     'browser_login_state', 'browser_credential_lookup', 'browser_password_manager_reveal',

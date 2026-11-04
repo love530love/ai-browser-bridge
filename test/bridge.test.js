@@ -289,6 +289,11 @@ test('queue status and ready waits are served locally while a command is active'
   assert.ok(guide.incidentRecoveryContract.neverCopyBrowserProfileStores.includes('Cookies'));
   assert.match(guide.firstSteps.join('\n'), /Never copy, clone, archive, start with, parse, upload/);
   assert.match(guide.firstSteps.join('\n'), /If a password, SSH credential/);
+  assert.ok(guide.defaults.verifiedWriteContract);
+  assert.ok(guide.defaults.verifiedWriteContract.tools.includes('browser_navigate_verified'));
+  assert.ok(guide.defaults.verifiedWriteContract.tools.includes('browser_select_verified'));
+  assert.ok(guide.defaults.verifiedWriteContract.tools.includes('browser_action_verified'));
+  assert.ok(guide.defaults.verifiedWriteContract.tools.includes('browser_choose_verified'));
   const status = await b.call('browser_queue_status', {});
   assert.equal(status.connected, true);
   assert.equal(status.active.tool, 'browser_read');

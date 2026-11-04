@@ -294,6 +294,15 @@ export function capabilityGuide({ goal = '', tabId = null } = {}) {
       neverPersistRawSecretsIn: ['shell commands', 'scripts', 'logs', 'reports', 'chat summaries'],
       onSecretExposure: 'stop_using_exposed_copy_and_recommend_rotation_without_echoing_value'
     },
+    verifiedWriteContract: {
+      rule: 'Every state-changing action MUST use its _verified variant.',
+      tools: ['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_navigate_verified', 'browser_select_verified', 'browser_choose_verified', 'browser_action_verified'],
+      expectBased: ['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_select_verified', 'browser_choose_verified', 'browser_action_verified'],
+      urlBased: ['browser_navigate_verified'],
+      dispatchOnce: 'After dispatch, an unobserved outcome is uncertain and non-retryable; re-observe and verify before the next action.',
+      notDispatched: 'If the expected condition is already true before dispatch, returns not_dispatched — nothing was sent.',
+      neverAssumeSuccess: 'The non-verified variant is diagnostic only — it never proves what happened. Never replay an uncertain write.'
+    },
     whenBlocked: {
       waiting: 'Read reason and blockers, then poll with browser_wait_until_ready. waiting is resumable and is not a failure.',
       pageNotForeground: 'This only happens when the call asked for requireForeground:true. Drop that flag: every page primitive, including coordinates, works on a backgrounded tab. Only Windows UI Automation genuinely needs the front.',
