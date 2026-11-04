@@ -153,7 +153,7 @@ export const TOOLS = [
     mode: { type: 'string', enum: ['normal', 'cheap'] },
     agent,
   }, ['tabId', 'query'], true),
-  tool('browser_find_element', 'Find elements by label/text/role/placeholder/nearby text and return ranked refs with geometry, coverage, and clickability evidence. Exact-text anchors without href may be surfaced as unverified text targets, not guaranteed links or buttons. Read-only; verify row/context before choosing an action.', {
+  tool('browser_find_element', 'Find elements by label/text/role/placeholder/nearby text and return ranked refs with geometry, coverage, and clickability evidence. Exact-text anchors without href may be surfaced as unverified text targets, not guaranteed links or buttons. For pure onClick text elements (React/Vue rendered span/div with no href, role or tabindex) that return unverified targets here, use browser_find_text with includeMatchElement:true to get the deepest visible element containing matched text, which returns a usable ref, rect and covered flag. Read-only; verify row/context before choosing an action.', {
     tabId,
     query: text(1000),
     rowText: { type: 'string', minLength: 1, maxLength: 240, description: 'Require this text in the nearest table/ARIA row. Does not infer identities across detached fixed-column copies.' },

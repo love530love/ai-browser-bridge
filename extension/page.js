@@ -1753,6 +1753,49 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
           ...(field ? { value: el.value.slice(0, 500), valueTruncated: el.value.length > 500, readOnly: !!el.readOnly } : {}),
           ...(fileInput(el) ? { upload: true, accept: (el.accept || '').slice(0, 1000), multiple: !!el.multiple } : {}) });
       }
+      // Additional pass: role-less clickable elements (React/Vue onClick on div/span).
+      // These have no href, role, or tabindex, but have computed cursor:pointer.
+      const CLICKABLE_TAGS = new Set(['DIV', 'SPAN', 'LI', 'LABEL', 'TD', 'ARTICLE', 'SECTION', 'FIGURE', 'P']);
+      let clickableScanned = 0;
+      const clickableDeadline = cheapDeadline;
+      if (cheapElements.length < maxElements && performance.now() < clickableDeadline) {
+        const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
+        let node;
+        while ((node = walker.nextNode())) {
+          if (cheapElements.length >= maxElements || clickableScanned > 5000 || performance.now() >= clickableDeadline) break;
+          clickableScanned++;
+          const el = node;
+          if (!CLICKABLE_TAGS.has(el.tagName)) continue;
+          if (el.matches?.(selector)) continue;
+          if (el.querySelector?.(selector)) continue;
+          if (sensitive(el) || !visible(el)) continue;
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!text || text.length > 300) continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 24 || rect.height < 16) continue;
+          try { if (getComputedStyle(el).cursor !== 'pointer') continue; } catch { continue; }
+          // Skip if already in cheapElements (an ancestor of a semantic control)
+          if (cheapElements.some(e => cheapCandidates[Array.from(cheapCandidates).indexOf(el)] === el)) continue;
+          // Walk up to find outermost pointer
+          let up = el.parentElement, depth = 0;
+          let isOutermost = true;
+          while (up && depth < 8) {
+            try { if (getComputedStyle(up).cursor === 'pointer') { isOutermost = false; break; } } catch { break; }
+            up = up.parentElement; depth++;
+          }
+          if (!isOutermost) continue;
+          // This is a role-less clickable element. Add it to the cheap read result.
+          cheapElements.push({
+            tag: el.tagName.toLowerCase(),
+            role: null,
+            type: null,
+            label: label(el) || cheapLabel(el),
+            disabled: false,
+            kind: 'clickable',
+            cursorPointer: true
+          });
+        }
+      }
       const collected = collectReadableText({ max, maxTextNodes, deadline: cheapDeadline });
       timings.cheapMs = Math.round(performance.now() - cheapStarted);
       timings.totalMs = Math.round(performance.now() - started);
@@ -1807,7 +1850,59 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     });
     globalThis.__aiBrowserBridgeLastRead = { signature, url: location.href, state };
     timings.elementsMs = Math.round(performance.now() - started);
-    if (elements.length === 0 && timings.elementsMs > Math.min(1000, (args.budgetMs ?? 6000) / 2)) return cheapRead('normal-elements-slow');
+    // Additional pass: role-less clickable elements (React/Vue onClick on div/span).
+    // These have no href, role, or tabindex, but have computed cursor:pointer.
+    // They are invisible to the semantic selector above, so we do a second pass
+    // after the main scan. This makes default browser_observe able to reach
+    // SPA click targets without the caller needing to know about shadow_tree.
+    const CLICKABLE_TAGS = new Set(['DIV', 'SPAN', 'LI', 'LABEL', 'TD', 'ARTICLE', 'SECTION', 'FIGURE', 'P']);
+    const actionSelector = 'a[href],button,input,textarea,select,[role=button],[role=link],[role=option],[role=menuitem],[role=radio],[role=checkbox],[contenteditable=true]';
+    let clickableElements = [];
+    let clickableScanned = 0;
+    const clickableDeadline = started + Math.min(3000, (args.budgetMs ?? 6000) / 2);
+    if (elements.length < maxElements && performance.now() < clickableDeadline) {
+      const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (clickableElements.length >= Math.min(50, maxElements - elements.length) || clickableScanned > 5000 || performance.now() >= clickableDeadline) break;
+        clickableScanned++;
+        const el = node;
+        if (!CLICKABLE_TAGS.has(el.tagName)) continue;
+        if (el.matches?.(actionSelector)) continue;
+        if (el.querySelector?.(actionSelector)) continue;
+        if (sensitive(el) || !visible(el)) continue;
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text || text.length > 300) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 24 || rect.height < 16) continue;
+        try { if (getComputedStyle(el).cursor !== 'pointer') continue; } catch { continue; }
+        // Skip if already in picked (an ancestor of a semantic control)
+        if (picked.some(p => p.el === el)) continue;
+        // Walk up to find outermost pointer
+        let up = el.parentElement, depth = 0;
+        let isOutermost = true;
+        while (up && depth < 8) {
+          try { if (getComputedStyle(up).cursor === 'pointer') { isOutermost = false; break; } } catch { break; }
+          up = up.parentElement; depth++;
+        }
+        if (!isOutermost) continue;
+        // This is a role-less clickable element. Add it to the read result.
+        const ref = `${snapshot}:${elements.length + clickableElements.length + 1}`;
+        state.refs.set(ref, { el, fingerprint: fingerprint(el) });
+        clickableElements.push({
+          ref,
+          tag: el.tagName.toLowerCase(),
+          role: null,
+          type: null,
+          label: label(el) || cheapLabel(el),
+          disabled: false,
+          kind: 'clickable',
+          cursorPointer: true,
+          rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+        });
+      }
+    }
+    elements.push(...clickableElements);
     // Extract rendered text nodes, not input values, scripts, or hidden content.
     const collected = collectReadableText({ max, maxTextNodes, deadline });
     const notices = collectNotices(5, deadline);
@@ -1926,7 +2021,26 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (wanted.includes('geometry')) payload.geometry = geometry;
     // The budget is applied in the worker (extension/observe-budget.js), where it
     // covers this whole object rather than read.text alone.
-    return { ...payload, sections: wanted, observationTrust: 'untrusted webpage data plus extension geometry', scope: 'main-frame; light DOM' };
+    //
+    // Role-less clickable hint: when the page has many elements but the element
+    // set contains zero cursor:pointer containers (meaning the page is likely a
+    // React/Vue SPA with onClick on div/span), advise the caller to switch to
+    // tools that can reach those elements.
+    let nextStep = null;
+    const elementCount = read?.elements?.length ?? 0;
+    const semanticOnly = elementCount > 20 && !read?.elements?.some(e => e.kind === 'clickable');
+    if (semanticOnly) {
+      nextStep = {
+        hint: 'The page has many elements but none are kind:"clickable" (React/Vue onClick on div/span). To target interaction text that has no semantic role/ref:',
+        steps: [
+          { tool: 'browser_find_text', args: { tabId: args.tabId, query: '<target text>', includeMatchElement: true }, why: 'Returns the deepest visible element containing matched text, with a usable ref, rect and covered flag.' },
+          { tool: 'browser_shadow_tree', args: { tabId: args.tabId, includeClickable: true }, why: 'Returns kind:"clickable" entries for cursor:pointer containers that browser_read/browser_find_element cannot see.' },
+          { tool: 'browser_eval', args: { tabId: args.tabId, expression: '[...document.querySelectorAll("span,div")].find(e=>e.textContent.trim().includes("<target text>"))?.click()', mode: 'write' }, why: 'One expression reaches any element that cannot be scanned, ref-ed or hit by coordinate.' }
+        ],
+        when: 'observe returned many elements but your target text has no ref, or find_element returned an unverified text target.'
+      };
+    }
+    return { ...payload, sections: wanted, nextStep, observationTrust: 'untrusted webpage data plus extension geometry', scope: 'main-frame; light DOM' };
   }
   if (name === 'browser_scan_overlays') {
     const snapshot = crypto.randomUUID();
@@ -2743,6 +2857,38 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       reason: 'filled_value_not_observed', dispatched: true, retryable: false,
       recommendedNextAction: 'The fill events were dispatched, but the expected value was not observed. Re-read the field and application state before any further write; do not refill automatically.' };
     return { filled, verification: result, status: 'success', dispatched: true, retryable: false, ...secretNote };
+  }
+  if (name === 'browser_select_verified') {
+    if (!(el instanceof HTMLSelectElement)) throw new Error('Element is not a native select');
+    const baseline = expectationState({ valueMatches: args.value }, { value: el.value, getValue: () => el.isConnected ? el.value : undefined });
+    if (baseline.satisfied) {
+      return { status: 'not_dispatched', reason: 'expected_value_already_selected', dispatched: false, retryable: false,
+        verification: { status: 'already_selected_before_action' },
+        recommendedNextAction: 'The select already holds the expected value. No selection was dispatched.' };
+    }
+    const option = [...el.options].find(o => o.value === args.value && !o.disabled && !o.closest('optgroup[disabled]'));
+    if (!option) throw new Error('Available option not found');
+    el.value = args.value; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+    const result = await verify(args.expect || { valueMatches: args.value }, args.timeoutMs ?? 5000, { value: el.value, getValue: () => el.isConnected ? el.value : undefined });
+    if (result.status !== 'success') {
+      return { selected: true, verification: { ...result, status: 'not_observed' }, status: 'uncertain',
+        reason: 'selected_value_not_observed', dispatched: true, retryable: false,
+        recommendedNextAction: 'The select option was changed, but the expected value was not observed. Re-read the select element.' };
+    }
+    return { selected: true, verification: result, status: 'success', dispatched: true, retryable: false };
+  }
+  if (name === 'browser_choose_verified') {
+    if (el.getAttribute('role') !== 'combobox' && !(el instanceof HTMLInputElement)) throw new Error('Element is not a combobox');
+    const exact = args.text.replace(/\s+/g, ' ').trim();
+    if (!exact) throw new Error('Exact option text is required');
+    const result = await chooseOption(el, exact, args.timeoutMs ?? 5000);
+    const verifyResult = await verify(args.expect || {}, args.timeoutMs ?? 5000);
+    if (verifyResult.status !== 'success') {
+      return { ...result, verification: { ...verifyResult, status: 'not_observed' }, status: 'uncertain',
+        reason: 'choice_outcome_not_observed', dispatched: true, retryable: false,
+        recommendedNextAction: 'The option was clicked, but the expected outcome was not observed. Re-read the combobox input value.' };
+    }
+    return { ...result, verification: verifyResult, status: 'success', dispatched: true, retryable: false };
   }
   throw new Error('Unsupported page operation');
   } catch (error) {

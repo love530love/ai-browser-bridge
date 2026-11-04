@@ -28,6 +28,7 @@ Do not start Playwright, Puppeteer, Selenium, CDP, or a second browser-control b
 ## Action rules
 
 - Use `browser_prepare_action` and `browser_find_element` before clicks, fills, selections, uploads, or downloads.
+- For role-less clickable elements (React/Vue onClick on span/div with no href, role or tabindex): first try `browser_find_text({query:"<text>", includeMatchElement:true})` to get the deepest visible element containing matched text with a usable ref; if still no ref, use `browser_shadow_tree({includeClickable:true})` to enumerate cursor:pointer containers; as a last resort, use `browser_eval` with a direct expression like `[...document.querySelectorAll("span,div")].find(e=>e.textContent.trim().includes("<text>"))?.click()`.
 - For overlays, ads, dialogs, and floating assistants, use `browser_scan_overlays` and dismiss or move only the obstructing element.
 - For iframes, call `browser_frames`; route later actions to the returned frame reference.
 - For custom elements or assistants whose focus lands on a custom element (for example `doubao-ai-csui`), treat the control as Shadow DOM until `browser_shadow_tree`/ShadowRoot refs are available; never fill the page's unrelated main textarea.

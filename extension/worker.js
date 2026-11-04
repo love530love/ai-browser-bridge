@@ -385,7 +385,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       modes: [
         { name: 'health', tools: ['browser_health'], useFor: 'connection, permission, content-script and page-state diagnosis', retrySafe: true },
         { name: 'observe', tools: ['browser_observe', 'browser_read', 'browser_find_text', 'browser_debug'], useFor: 'state acquisition, geometry, visible text search, controls, occlusion hints', retrySafe: true },
-        { name: 'dom-transaction', tools: ['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified'], useFor: 'preferred writes with explicit expected outcome', retrySafe: false },
+        { name: 'dom-transaction', tools: ['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_navigate_verified', 'browser_select_verified', 'browser_choose_verified', 'browser_action_verified'], useFor: 'preferred writes with explicit expected outcome', retrySafe: false },
         { name: 'picker-upload-bridge', tools: ['browser_pick', 'browser_choose', 'browser_upload'], useFor: 'custom selects, portal options, hidden file inputs without OS dialog', retrySafe: false },
         { name: 'cdp-input', tools: ['browser_key', 'browser_hover', 'browser_screenshot'], useFor: 'trusted browser keyboard/pointer/screenshot when DOM events are insufficient', retrySafe: false },
         { name: 'cdp-capture', tools: ['browser_devtools_capture'], useFor: 'read-only console/network/script/metrics capture inside one bounded window; not a DevTools write path', retrySafe: true },
@@ -1089,6 +1089,79 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
     await chrome.tabs.update(tab.id, { url: checkedUrl(args.url, config) });
     return { navigating: true };
+  }
+  if (name === 'browser_navigate_verified') {
+    if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
+    const urlBefore = tab.url;
+    if (urlBefore.includes(args.expectUrlContains)) {
+      return { status: 'not_dispatched', reason: 'expected_url_already_loaded', dispatched: false, retryable: false,
+        verification: { status: 'already_loaded_before_navigate' },
+        recommendedNextAction: 'The page is already at the target URL. No navigation was dispatched.' };
+    }
+    await chrome.tabs.update(tab.id, { url: checkedUrl(args.url, config) });
+    const urlAfter = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null;
+    if (!urlAfter || !urlAfter.includes(args.expectUrlContains)) {
+      return { navigating: true, verification: { status: 'not_observed', checks: { urlContains: false }, elapsedMs: 0 }, status: 'uncertain',
+        reason: 'navigation_url_not_observed', dispatched: true, retryable: false,
+        recommendedNextAction: 'The navigation was dispatched but the expected URL was not observed. Re-observe the tab to see where it landed.' };
+    }
+    return { navigating: true, verification: { status: 'success', checks: { urlContains: true }, elapsedMs: 0 }, status: 'success', dispatched: true, retryable: false };
+  }
+  if (name === 'browser_action_verified') {
+    if (args.expectedUrl !== tab.url) throw new Error('Observation URL is stale. Read page again.');
+    // Check baseline
+    const baselineText = await chrome.tabs.executeScript(tab.id, {
+      code: 'document.body?.innerText || ""',
+      matchAboutBlank: true,
+      runAt: 'document_idle'
+    }).catch(() => ['']);
+    const baselineUrl = tab.url;
+    const baselineLabel = await chrome.tabs.executeScript(tab.id, {
+      code: '[...document.querySelectorAll("a,button,input,textarea,select,[role=button],[role=option],[role=combobox],[contenteditable=true]")].map(el => el.textContent || el.value || "").join(" ")',
+      matchAboutBlank: true,
+      runAt: 'document_idle'
+    }).catch(() => ['']);
+    const baselineSatisfied = (() => {
+      if (args.expect?.textAppears && !(baselineText[0] || '').includes(args.expect.textAppears)) return false;
+      if (args.expect?.urlContains && !baselineUrl.includes(args.expect.urlContains)) return false;
+      if (args.expect?.elementLabelAppears && !(baselineLabel[0] || '').includes(args.expect.elementLabelAppears)) return false;
+      return true;
+    })();
+    if (baselineSatisfied) {
+      return { status: 'not_dispatched', reason: 'expected_condition_already_satisfied', dispatched: false, retryable: false,
+        verification: { status: 'already_satisfied_before_action' },
+        recommendedNextAction: 'The expected condition already holds. No action was dispatched.' };
+    }
+    if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
+    const baseResult = await page('browser_action', args);
+    if (baseResult?.__aibError) throw new Error(baseResult.__aibError);
+    if (baseResult?.status === 'waiting') return baseResult;
+    if (baseResult?.dispatched === false || baseResult?.dispatched === undefined) {
+      return { ...baseResult, status: 'not_dispatched', verification: { status: 'action_not_dispatched' } };
+    }
+    // Verify outcome
+    const verifyText = await chrome.tabs.executeScript(tab.id, {
+      code: 'document.body?.innerText || ""',
+      matchAboutBlank: true,
+      runAt: 'document_idle'
+    }).catch(() => ['']);
+    const verifyUrl = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? '';
+    const verifyLabel = await chrome.tabs.executeScript(tab.id, {
+      code: '[...document.querySelectorAll("a,button,input,textarea,select,[role=button],[role=option],[role=combobox],[contenteditable=true]")].map(el => el.textContent || el.value || "").join(" ")',
+      matchAboutBlank: true,
+      runAt: 'document_idle'
+    }).catch(() => ['']);
+    const checks = {};
+    if (args.expect?.textAppears) checks.textAppears = (verifyText[0] || '').includes(args.expect.textAppears);
+    if (args.expect?.urlContains) checks.urlContains = verifyUrl.includes(args.expect.urlContains);
+    if (args.expect?.elementLabelAppears) checks.elementLabelAppears = (verifyLabel[0] || '').includes(args.expect.elementLabelAppears);
+    const allPassed = Object.keys(checks).length > 0 && Object.values(checks).every(Boolean);
+    if (!allPassed) {
+      return { ...baseResult, verification: { status: 'not_observed', checks, elapsedMs: 0 }, status: 'uncertain',
+        reason: 'action_outcome_not_observed', dispatched: true, retryable: false,
+        recommendedNextAction: 'The action was dispatched, but the expected outcome was not observed. Re-observe and verify independently.' };
+    }
+    return { ...baseResult, verification: { status: 'success', checks, elapsedMs: 0 }, status: 'success', dispatched: true, retryable: false };
   }
   if (name === 'browser_close') {
     if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
