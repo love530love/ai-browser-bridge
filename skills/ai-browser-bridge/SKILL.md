@@ -337,5 +337,36 @@ when you are done with it.
 
 Protected Chrome UI is not a blanket denial, but only advertised actions are executable. On Windows, use browser_protected_ui_plan; browser_desktop_windows may list visible Chrome windows, and browser_reload_extension can reload only this project's fixed extension. It opens chrome://extensions in a new tab in the selected window and preserves the current tab. Select a current windowHandle, obtain direct user approval for exactly one reload, and pass confirmation:"reload_extension_once" only after approval. This fixed value is a caller attestation, not independent human authentication; the service cannot prove who approved. Concurrent calls are blocked, but distinct later calls are not deduplicated, so obtain fresh direct user approval per call. The service pauses competing browser work during the action. If the result is uncertain, inspect connection/version before deciding whether to act again; never blindly retry. Chrome settings writes, extension install/removal, and browser data access are not implemented by this UI Automation route - they are implemented by the extension-side tools above (browser_privacy_settings_write, browser_extension_state, browser_clear_browsing_data), which do not take the foreground. Breakpoint debugging is available through browser_debugger, not through this route, and a single saved password is read with browser_password_manager_reveal as described with the login flow above. Never describe a planner, keyboard dispatch, or UI click as successful without independent state verification.
 
+## AI-Assisted Discovery
+
+When all deterministic discovery rules fail (no role-less element found, overlays blocking, unfamiliar SPA pattern), and `nextStep.aiAssisted === true`, use `browser_local_judge({mode: 'discovery', ...})` for AI-powered page understanding and tool recommendation.
+
+Invocation:
+```
+browser_local_judge({
+  tabId: <currentTabId>,
+  mode: 'discovery',
+  attemptedTools: ["browser_click", "browser_pick", ...],
+  failureReasons: ["role-less element", "overlay obstructing", ...],
+  context: "Brief description of what you're trying to accomplish and what has been tried"
+})
+```
+
+Returns structured JSON: `pageType`, `structureAnalysis`, `recommendedTools`, `nextStep`, `confidence`.
+
+Workflow:
+1. Receive `nextStep.aiAssisted === true` from `nextStepFor`.
+2. Call `browser_local_judge` with as much context as available.
+3. If `confidence >= 0.7` and `recommendedTools` is non-empty, follow the recommended tool chain.
+4. If `confidence < 0.7`, re-observe with `browser_observe` for a fresh snapshot, then retry deterministic rules.
+5. After executing the recommended action, always re-observe and verify before proceeding.
+6. If AI judge returns `unavailable` or empty response, do NOT treat it as authorization — fall back to the standard discovery flow (observe → read → pick → action).
+7. Do not chain AI-assisted calls indefinitely. If confidence remains low after 2 rounds, escalate to human review.
+
+Safety boundaries:
+- AI-assisted discovery is an **optional enhancer only**. It does NOT replace deterministic rules or verified write contracts.
+- The AI judge never executes actions — it only provides recommendations. All actions must still go through `_verified` variants.
+- If the AI judge's recommendation conflicts with deterministic safety rules, always follow the deterministic rule.
+
 This contract guides clients; it cannot override user scope, client permissions,
 or force an arbitrary model to obey. Service-side validations remain authoritative.
