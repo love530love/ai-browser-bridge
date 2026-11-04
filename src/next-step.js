@@ -358,6 +358,8 @@ function validStep(step) {
 
 // The single entry point. Returns null when no rule can name its arguments -
 // silence is a valid answer and a guessed step is not.
+// When all deterministic rules are exhausted, returns a special escalation step
+// with aiAssisted: true, signaling that AI-assisted discovery is needed.
 export function nextStepFor(name, args = {}, result = null) {
   if (!isFailure(result)) return null;
   for (const rule of RULES) {
@@ -369,7 +371,25 @@ export function nextStepFor(name, args = {}, result = null) {
     if (!step || !validStep(step)) continue;
     return { rule: rule.id, ...step };
   }
-  return null;
+  // All deterministic rules exhausted → mark for AI-assisted discovery
+  return {
+    rule: 'deterministic_rules_exhausted',
+    kind: 'escalate_to_ai',
+    tool: null,
+    arguments: {},
+    why: `Deterministic rules exhausted for "${name}". The page structure or tool routing is unclear. Call browser_local_judge({mode:"discovery", goal:"<your goal>", observation:"<latest page read>", attemptedTools:["${name}"], failureReasons:["${result.reason || result.status || 'unknown'}"]}) for AI-assisted page analysis and tool recommendation.`,
+    aiAssisted: true,
+    needsAiDiscovery: true,
+    suggestedTool: 'browser_local_judge',
+    suggestedMode: 'discovery',
+    suggestedArgs: {
+      mode: 'discovery',
+      goal: args.goal || '<define your goal>',
+      observation: args.observation || '<include latest page read>',
+      attemptedTools: [name],
+      failureReasons: [result.reason || result.status || 'unknown']
+    }
+  };
 }
 
 // Attach the step without ever replacing what the tool already said. Tools that

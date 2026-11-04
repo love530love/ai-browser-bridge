@@ -244,6 +244,94 @@ npm run test:bench
 - **修复**：Windows 命令用 `ping -n 4 127.0.0.1 >nul` 等待，PowerShell 用 `Start-Sleep`
 - **预防**：写脚本时不要假定同名工具是 Windows 版
 
+## AI 辅助发现能力（方案 A：扩展 browser_local_judge）
+
+### 核心架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    发现阶段增强架构                          │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Layer 1: 确定性规则引擎 (nextStep)                         │
+│  └─ 命中 → 直接返回可执行下一步 (0ms AI 开销)               │
+│                                                             │
+│  Layer 2: AI 辅助发现 (browser_local_judge mode="discovery")│
+│  └─ 确定性规则未命中 → Agent 自动降级到本地模型              │
+│     ├─ 输入：DOM 快照 + Agent 意图 + 失败上下文             │
+│     ├─ 输出：①页面语义解析 ②推荐工具链 ③操作教学            │
+│     └─ 模型不可用 → 回退到 Layer 1 的通用建议                │
+│                                                             │
+│  Layer 3: 写操作风险裁决 (browser_local_judge mode="risk")  │
+│  └─ 写操作前 → AI 风险评估 (allow/warn/block)              │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 改动清单
+
+1. **`src/tools.js`** — 扩展 `browser_local_judge` schema：
+   - 新增 `mode` 参数：`['risk', 'discovery']`
+   - 新增 `attemptedTools`, `failureReasons`, `context` 参数
+   - `risk` 模式（默认）：保持向后兼容，评估写操作风险
+   - `discovery` 模式：分析页面结构，推荐工具链
+
+2. **`extension/worker.js`** — 扩展 `localJudge` 函数：
+   - 支持 `mode: 'discovery'` 分支
+   - systemPrompt 改为"发现引导器"，输出结构化 JSON
+   - 返回字段：`pageType`, `structureAnalysis`, `recommendedTools`, `nextStep`, `confidence`
+
+3. **`src/next-step.js`** — 扩展规则引擎：
+   - 当所有确定性规则未命中时，返回 `aiAssisted: true` 的 nextStep
+   - 包含 `suggestedArgs` 引导 Agent 调用 `browser_local_judge({mode:"discovery", ...})`
+
+### 使用流程
+
+Agent 收到 `nextStep.aiAssisted === true` 时，应自动执行：
+
+```javascript
+// Agent 收到 nextStep 标记
+const step = result.nextStep;
+if (step?.aiAssisted) {
+  // 调用 AI 辅助发现
+  const guide = await browser_local_judge({
+    mode: 'discovery',
+    goal: '<用户目标>',
+    observation: '<最新页面读取结果>',
+    attemptedTools: ['browser_find_element', 'browser_find_text'],
+    failureReasons: ['found: false', 'ambiguous: true'],
+    context: 'React SPA 页面，大量 cursor:pointer 容器'
+  });
+  // 根据 guide 推荐的工具链重试
+}
+```
+
+### AI 辅助发现输出示例
+
+```json
+{
+  "mode": "discovery",
+  "verdict": "guide",
+  "pageType": "React SPA",
+  "structureAnalysis": "页面包含 13 个元素，其中 6 个为 role-less cursor:pointer 容器（React onClick），常规 find_element 无法识别。目标按钮为文本'提交订单'，位于外层 div.container 内。",
+  "recommendedTools": [
+    "browser_find_text({includeMatchElement:true})",
+    "browser_read({mode:'cheap'})",
+    "browser_observe({sections:['read']})"
+  ],
+  "nextStep": "使用 browser_find_text({query:'提交订单', includeMatchElement:true}) 搜索纯文本 onClick 元素。如果仍然找不到，调用 browser_read({mode:'cheap'}) 获取完整元素列表，然后从 textContent 中定位目标。",
+  "confidence": "high",
+  "status": "success"
+}
+```
+
+### 安全性边界
+
+- AI 模型仅作为**可选增强器**，绝不影响离线可用性
+- 模型不可用时，系统仍然完全可用（现有 `optionalEnhancers` 机制）
+- AI 输出是**指导性建议**，不是执行指令——Agent 仍需要判断是否执行
+- AI 辅助发现**不替代**确定性规则引擎，仅在规则引擎无法提供明确下一步时介入
+
 ## 版本历史
 
 | 版本 | 日期 | 说明 | 提交 |
@@ -252,6 +340,7 @@ npm run test:bench
 | 0.32.0 | 2026-11-04 | 下载工具路由修复 | 3db6868 |
 | 0.33.0 | 2026-11-04 | Agent 失败 containment | 1fefe5c |
 | 0.34.0 | 2026-11-04 | Verified Write Contract | f8323e1 |
+| 0.35.0 | 2026-11-04 | AI 辅助发现能力（方案 A） | pending |
 
 ## 与既有文档的关系
 

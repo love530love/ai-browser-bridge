@@ -280,13 +280,17 @@ export const TOOLS = [
   }, ['tabId', 'attemptedAction', 'error'], true),
   tool('browser_observe', 'Unified observation: browser_read + browser_debug + basic element geometry/occlusion signals from the allowed page. Prefer this before choosing actions on complex pages. maxChars is a budget for the WHOLE payload, not just the text: when it is exceeded, geometry is dropped first, then the bulky debug lists, then elements, then text, and `trimmed` names exactly what went. Pass sections to ask for less - ["read"] is usually enough, because geometry repeats read.elements and debug repeats the active element. browser_read already reports `notices` (visible alerts, toasts and form errors) and `refsReusable`, so a second observe is often unnecessary.', { tabId, maxChars: { type: 'integer', minimum: 100, maximum: 50000 }, sections: { type: 'array', items: { type: 'string', enum: ['read', 'debug', 'geometry'] }, minItems: 1, maxItems: 3 }, agent }, ['tabId'], true),
   tool('browser_ai_status', 'Read-only check for Chrome built-in AI availability in the extension context. Does not create a model session or download a model.', { agent }, [], true),
-  tool('browser_local_judge', 'Optional local Chrome AI judge. If Chrome built-in AI is available, asks it to classify a proposed browser action as allow, warn, block, or unsure. If unavailable, returns verdict unavailable. Never executes the action.', {
+  tool('browser_local_judge', 'Optional local Chrome AI judge. Two modes: (1) risk (default): asks Chrome AI to classify a proposed browser action as allow, warn, block, or unsure. Requires goal, observation, proposedAction, and optional riskLevel. (2) discovery: when deterministic rules (nextStep) cannot provide a clear next step, analyzes page structure, recommends optimal tool chain, and provides operation guidance. Requires goal, observation, and optional attemptedTools/failureReasons/context. If Chrome AI unavailable in either mode, returns verdict unavailable. Never executes the action.', {
     goal: text(4000),
     observation: text(12000),
     proposedAction: text(4000),
     riskLevel: { type: 'string', enum: ['low', 'medium', 'high'] },
+    attemptedTools: { type: 'array', items: { type: 'string' } },
+    failureReasons: { type: 'array', items: { type: 'string' } },
+    context: text(8000),
+    mode: { type: 'string', enum: ['risk', 'discovery'] },
     agent,
-  }, ['goal', 'observation', 'proposedAction'], true),
+  }, ['goal', 'observation'], true),
   tool('browser_click', 'Click a current element ref from browser_read. May submit or publish; caller must have user authorization. Never retry an uncertain result automatically. If the tab is leased, pass the matching agent.', { tabId, ref, agent }, ['tabId', 'ref']),
   // A password field is the one input the bridge protects everywhere else, so
   // writing it needs an explicit opt-in rather than being silently impossible.

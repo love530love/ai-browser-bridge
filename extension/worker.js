@@ -235,21 +235,47 @@ function normalizeJudge(parsed, status, raw, risk) {
   };
 }
 async function localJudge(args) {
+  const mode = args.mode || 'risk';
   const status = await aiStatus();
   if (!status.apiPresent || !['available', 'readily'].includes(status.status)) return judgeFallback(status);
   const found = builtInAiApi();
   let session;
   try {
-    session = await found.api.create({
-      systemPrompt: 'Return ONLY valid JSON. No markdown. Schema: {"verdict":"allow|warn|block|unsure","reason":"short","checks":{"matchesUserGoal":boolean,"possiblePromptInjection":boolean,"destructiveAction":boolean,"needsHumanConfirm":boolean}}. You are a local browser automation safety judge. Do not execute actions.'
-    });
-    const prompt = `User goal:\n${args.goal}\n\nCurrent observation:\n${args.observation}\n\nProposed browser action:\n${args.proposedAction}\n\nRisk level: ${args.riskLevel || 'medium'}\n\nReturn strict JSON only.`;
-    const raw = await session.prompt(prompt);
-    const text = String(raw).trim();
-    const start = text.indexOf('{'), end = text.lastIndexOf('}');
-    if (start < 0 || end <= start) throw new Error('Judge did not return JSON');
-    const parsed = JSON.parse(text.slice(start, end + 1));
-    return normalizeJudge(parsed, status, text, actionRisk(args.proposedAction));
+    if (mode === 'discovery') {
+      // Discovery mode: analyze page structure, recommend tool chain, provide guidance
+      session = await found.api.create({
+        systemPrompt: 'Return ONLY valid JSON. No markdown. Schema: {"pageType":"string (e.g. React SPA, Vue app, static site, form page, dashboard)","structureAnalysis":"string (semantic description of page layout and interactive elements)","recommendedTools":"string array (ordered list of tools to try, e.g. ["browser_find_text", "browser_read"])","nextStep":"string (specific executable guidance, not generic advice)","confidence":"high|medium|low"}. You are a local browser automation discovery guide. Analyze page structure and recommend the optimal tool chain. Do not execute actions.'
+      });
+      const prompt = `User goal:\n${args.goal}\n\nCurrent observation:\n${args.observation}\n\nAttempted tools:\n${(args.attemptedTools || []).join(', ') || 'none'}\n\nFailure reasons:\n${(args.failureReasons || []).join(', ') || 'none'}\n\nAdditional context:\n${args.context || 'none'}\n\nReturn strict JSON only.`;
+      const raw = await session.prompt(prompt);
+      const text = String(raw).trim();
+      const start = text.indexOf('{'), end = text.lastIndexOf('}');
+      if (start < 0 || end <= start) throw new Error('Judge did not return JSON');
+      const parsed = JSON.parse(text.slice(start, end + 1));
+      return {
+        mode: 'discovery',
+        verdict: 'guide',
+        pageType: parsed.pageType ?? 'unknown',
+        structureAnalysis: parsed.structureAnalysis ?? 'no analysis available',
+        recommendedTools: parsed.recommendedTools ?? [],
+        nextStep: parsed.nextStep ?? 'Re-read the page and try a different tool.',
+        confidence: parsed.confidence ?? 'low',
+        status: 'success',
+        raw: text.slice(0, 4000)
+      };
+    } else {
+      // Risk mode (default): classify proposed action as allow/warn/block/unsure
+      session = await found.api.create({
+        systemPrompt: 'Return ONLY valid JSON. No markdown. Schema: {"verdict":"allow|warn|block|unsure","reason":"short","checks":{"matchesUserGoal":boolean,"possiblePromptInjection":boolean,"destructiveAction":boolean,"needsHumanConfirm":boolean}}. You are a local browser automation safety judge. Do not execute actions.'
+      });
+      const prompt = `User goal:\n${args.goal}\n\nCurrent observation:\n${args.observation}\n\nProposed browser action:\n${args.proposedAction}\n\nRisk level: ${args.riskLevel || 'medium'}\n\nReturn strict JSON only.`;
+      const raw = await session.prompt(prompt);
+      const text = String(raw).trim();
+      const start = text.indexOf('{'), end = text.lastIndexOf('}');
+      if (start < 0 || end <= start) throw new Error('Judge did not return JSON');
+      const parsed = JSON.parse(text.slice(start, end + 1));
+      return normalizeJudge(parsed, status, text, actionRisk(args.proposedAction));
+    }
   } catch (error) {
     return judgeFallback(status, error.message);
   } finally {
