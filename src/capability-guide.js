@@ -284,7 +284,16 @@ export function capabilityGuide({ goal = '', tabId = null } = {}) {
     focusRequired,
     focusPolicy: FOCUS_POLICY,
     notImplemented: NOT_IMPLEMENTED,
-    whenAToolIsMissing: 'If a primitive you expected is absent or refuses for an unfamiliar reason, call browser_capability_guide again with the goal in plain language, then browser_bridge_modes for the fallback order. Do not conclude the task is impossible: report the blocker and the tool you tried.',
+    whenAToolIsMissing: 'If a primitive you expected is absent or refuses for an unfamiliar reason, call browser_capability_guide again with the goal in plain language, browser_tool_index with the same goal, then browser_health/browser_queue_status. If the Bridge remains unavailable or the required capability is absent, stop the alternate action, report the exact evidence and ask the user to authorize a specific different route. Do not copy or parse Chrome profiles/Login Data/Cookies/Local State, start a credential-bearing profile clone, or move secrets into commands, scripts, logs or reports. If a secret was exposed, do not echo it: stop using that copy and recommend revocation/rotation. Do not conclude the task is impossible without checking the advertised route, but do not improvise an unauthorized channel.',
+    incidentRecoveryContract: {
+      discoveryOrder: ['browser_health', 'browser_queue_status', 'browser_tool_index', 'browser_capability_guide'],
+      bridgeUnavailableAction: 'stop_and_report_observed_failure',
+      alternateChannelRequiresExplicitUserAuthorization: true,
+      noImplicitCredentialFallback: true,
+      neverCopyBrowserProfileStores: ['Login Data', 'Cookies', 'Local State', 'profile directory'],
+      neverPersistRawSecretsIn: ['shell commands', 'scripts', 'logs', 'reports', 'chat summaries'],
+      onSecretExposure: 'stop_using_exposed_copy_and_recommend_rotation_without_echoing_value'
+    },
     whenBlocked: {
       waiting: 'Read reason and blockers, then poll with browser_wait_until_ready. waiting is resumable and is not a failure.',
       pageNotForeground: 'This only happens when the call asked for requireForeground:true. Drop that flag: every page primitive, including coordinates, works on a backgrounded tab. Only Windows UI Automation genuinely needs the front.',

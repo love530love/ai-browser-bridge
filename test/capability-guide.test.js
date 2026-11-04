@@ -53,6 +53,12 @@ test('an unknown goal still returns a usable chain instead of nothing', () => {
   assert.ok(guide.chain.includes('browser_click'));
   assert.ok(guide.fallbacks.length > 0);
   assert.match(guide.whenAToolIsMissing, /Do not conclude the task is impossible/);
+  assert.equal(guide.incidentRecoveryContract.bridgeUnavailableAction, 'stop_and_report_observed_failure');
+  assert.equal(guide.incidentRecoveryContract.alternateChannelRequiresExplicitUserAuthorization, true);
+  assert.equal(guide.incidentRecoveryContract.noImplicitCredentialFallback, true);
+  assert.ok(guide.incidentRecoveryContract.neverCopyBrowserProfileStores.includes('Login Data'));
+  assert.match(guide.whenAToolIsMissing, /Do not copy or parse Chrome profiles/);
+  assert.match(guide.whenAToolIsMissing, /recommend revocation\/rotation/);
 });
 
 test('capability gaps are stated instead of being hidden behind a refusal', () => {

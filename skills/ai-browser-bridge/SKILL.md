@@ -64,6 +64,16 @@ and smallest missing prerequisite. Do not report the entire toolchain unavailabl
 because one locator, API call, or optional model failed. Do not keep retrying
 without new evidence; preserve resumable progress if the client must end its turn.
 
+If the Bridge is disconnected or the needed tool is missing, diagnose with
+browser_health, browser_queue_status, browser_tool_index and
+browser_capability_guide. A failure is not permission to change channels: stop
+and ask before using a different browser, account, profile, external service or
+host-level route. Never copy/clone a Chrome profile or its Login Data, Cookies or
+Local State to regain access; never mine browser stores for credentials. Keep
+passwords, SSH credentials, tokens, cookies and private keys out of commands,
+temporary scripts, logs and reports. If one was already exposed, do not repeat
+it: tell the user to revoke/rotate it and do not claim cleanup unless verified.
+
 For breakpoint debugging use browser_debugger: open a session on the tab, find the script URL with action:"scripts" plus urlFilter (an unfiltered list is a tail and can hide the page's own script), set a 1-based breakpoint, then trigger it asynchronously (evaluate "setTimeout(fn, N)") because a synchronous trigger pauses inside the call that made it and that call never returns. Poll action:"status" until paused, inspect with action:"frames", evaluate on a frame, then step or resume, and always finish with action:"close". While the tab is paused every other page tool returns status:"waiting" with reason:"tab_paused_by_debugger" instead of hanging; browser_health still answers and reports the pause. The session shows a debugging banner on that tab and blocks a manually opened DevTools from attaching meanwhile; a paused session nobody touches is resumed automatically after session.paused.autoResumeInMs, but close it explicitly when done.
 
 Changing what a running script does is done with action:"evaluate" (redefine the function or the global), not with action:"set_script_source". That action is wired up and correctly validated, but the browser refuses it: current Chrome answers Debugger.setScriptSource with the ServerError "setScriptSource functionality no longer available", returned from an unconditional stub in V8 before any argument is read. It replies reason:"script_edit_removed_by_v8" with blockedBy:"v8_inspector" and a list of alternatives, applied is always false, and it is never retried - do not send it again with a different scriptId, a different source or without dryRun, because the outcome cannot change. Use evaluate instead, and describe what it did accurately: it changes behaviour immediately without a reload, but the script text, its line numbers and its source map stay exactly as they were.

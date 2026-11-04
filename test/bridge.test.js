@@ -283,6 +283,12 @@ test('queue status and ready waits are served locally while a command is active'
   const guide = await b.call('browser_agent_guide', {});
   assert.equal(guide.defaults.waitingIsNotFailure, true);
   assert.equal(guide.waitingContract.nextPollTool, 'browser_wait_until_ready');
+  assert.equal(guide.incidentRecoveryContract.bridgeUnavailableAction, 'stop_and_report_observed_failure');
+  assert.equal(guide.incidentRecoveryContract.alternateChannelRequiresExplicitUserAuthorization, true);
+  assert.equal(guide.incidentRecoveryContract.noImplicitCredentialFallback, true);
+  assert.ok(guide.incidentRecoveryContract.neverCopyBrowserProfileStores.includes('Cookies'));
+  assert.match(guide.firstSteps.join('\n'), /Never copy, clone, archive, start with, parse, upload/);
+  assert.match(guide.firstSteps.join('\n'), /If a password, SSH credential/);
   const status = await b.call('browser_queue_status', {});
   assert.equal(status.connected, true);
   assert.equal(status.active.tool, 'browser_read');
