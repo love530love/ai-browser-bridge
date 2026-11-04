@@ -81,6 +81,28 @@ readyState、焦点、滚动位置、可见 option、combobox、file input、dia
 `browser_local_judge`。裁判只返回建议，不执行动作；返回 `unavailable` 时不得把它
 当作同意，应回到普通确认流程。
 
+**AI 辅助发现（AI-Assisted Discovery）**：当 `nextStepFor` 返回 `nextStep.aiAssisted === true`
+（所有确定性规则失效），或 Agent 在 role-less SPA 元素、遮挡页面、陌生 UI 前卡住时，
+调用 `browser_local_judge({mode: 'discovery', ...})` 获取 AI 页面理解、工具推荐和操作引导。
+
+调用格式：
+```
+browser_local_judge({
+  tabId: <当前标签页 ID>,
+  mode: 'discovery',
+  attemptedTools: ["browser_click", "browser_pick", ...],
+  failureReasons: ["role-less element", "overlay obstructing", ...],
+  context: "简要描述 Agent 正在尝试完成的任务和已尝试的路径"
+})
+```
+
+AI 裁判返回结构化 JSON（`pageType`, `structureAnalysis`, `recommendedTools`, `nextStep`, `confidence`）。
+- 若 `confidence >= 0.7` 且 `recommendedTools` 非空，按推荐工具链执行。
+- 若 `confidence < 0.7`，先 `browser_observe` 获取新页面快照，再重试确定性规则。
+- AI 辅助发现是**可选增强器**，绝不替代确定性规则或 verified 写契约。
+- 若 AI 裁判返回 `unavailable` 或空响应，不要当作授权——退回标准发现流程（observe → read → pick → action）。
+- 不要无限链式调用 AI。若连续 2 轮 confidence 仍低，升级给人工审查。
+
 ## 有 MCP 能力
 
 将同目录 `.local/mcp-config.json` 中的服务器条目注册到 Agent 客户端。该文件不含密钥。MCP stdio 入口是 `src/mcp.js`，与上述 CLI 使用同一个已连接浏览器。MCP 注册属于工具接入，并非模型配置；不同宿主不能由一个扩展自动注册。

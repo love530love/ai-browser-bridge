@@ -39,6 +39,60 @@ Do not start Playwright, Puppeteer, Selenium, CDP, or a second browser-control b
 - Keep polling in the background. Never open the extension settings page as part of a retry or health check.
 - For multiple agents, always pass a stable agent identity and respect service leases.
 
+## AI-Assisted Discovery
+
+When `nextStep.aiAssisted === true` (returned by `nextStepFor` after all deterministic rules fail), use `browser_local_judge({mode: 'discovery', ...})` to obtain AI-powered page understanding, tool recommendation, and action guidance.
+
+### Trigger condition
+
+Call `browser_local_judge` with `mode: 'discovery'` when:
+- All deterministic rules in `nextStepFor` return no match.
+- The agent is stuck on a role-less SPA element, overlay-obfuscated page, or unfamiliar UI pattern.
+- A tool invocation fails with a reason not covered by the deterministic engine.
+
+### Invocation format
+
+```
+browser_local_judge({
+  tabId: <currentTabId>,
+  mode: 'discovery',
+  pageType: <optional: e.g. "spa-roleless", "overlay-heavy", "form-heavy">,
+  structureAnalysis: <optional: brief DOM/structure observations>,
+  recommendedTools: <optional: tools that seem relevant>,
+  nextStep: <optional: the next step the agent wants to take>,
+  confidence: <optional: numeric 0-1, agent's confidence in the next step>,
+  attemptedTools: ["tool1", "tool2", ...],
+  failureReasons: ["reason1", "reason2", ...],
+  context: "Brief description of what the agent is trying to accomplish and what has been tried"
+})
+```
+
+### Output parsing
+
+The AI judge returns a structured JSON with:
+- `pageType`: Classification of the current page (e.g., "spa-react", "single-page-app", "form-page").
+- `structureAnalysis`: Analysis of the page structure, including role-less elements, overlay presence, and iframe count.
+- `recommendedTools`: Ordered list of recommended tools to use next, with brief rationale.
+- `nextStep`: A concrete, actionable next step with specific tool call suggestion.
+- `confidence`: Numeric confidence score (0-1) for the recommendation.
+
+### Workflow
+
+1. Receive `nextStep.aiAssisted === true` from `nextStepFor`.
+2. Call `browser_local_judge({mode: 'discovery', ...})` with as much context as available.
+3. Parse the AI judge's response:
+   - If `confidence >= 0.7` and `recommendedTools` is non-empty, follow the recommended tool chain.
+   - If `confidence < 0.7`, fall back to `browser_observe` or `browser_read` for a fresh page snapshot, then retry deterministic rules.
+4. After executing the recommended action, always re-observe the page and verify the outcome before proceeding.
+5. If the AI judge returns `unavailable` or empty response, do NOT treat it as authorization — fall back to the standard discovery flow (observe → read → pick → action).
+
+### Safety boundaries
+
+- AI-assisted discovery is an **optional enhancer only**. It does NOT replace deterministic rules or verified write contracts.
+- The AI judge never executes actions — it only provides recommendations. All actions must still go through `_verified` variants.
+- If the AI judge's recommendation conflicts with deterministic safety rules (e.g., writing to a wrong element), always follow the deterministic rule.
+- Do not chain AI-assisted calls indefinitely. If confidence remains low after 2 rounds, escalate to human review.
+
 ## Incoming agent handoff
 
 Before starting or resuming browser-platform work:
