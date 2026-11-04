@@ -1,3 +1,49 @@
+## 0.35.0 — 2026-11-04（**AI 辅助发现能力：确定性规则失效时自动降级到本地模型**）
+
+0.34.0 修了写操作的可验证闭环；这一版解决的是发现阶段的一个盲区：**当所有确定性规则都找不到目标时，Agent 会陷入时滞、迷路甚至乱操作**。
+
+### P0：AI 辅助发现（AI-Assisted Discovery）
+
+- **扩展 `browser_local_judge`**（`src/tools.js` + `extension/worker.js`）：新增 `mode: 'discovery'`，当确定性规则引擎（`nextStepFor`）返回 `nextStep.aiAssisted === true` 时，Agent 自动调用 `browser_local_judge({mode: 'discovery', ...})` 获取页面语义解析、工具推荐和操作引导。
+  - 输入：DOM 快照、Agent 意图、失败上下文（`attemptedTools`、`failureReasons`、`context`）
+  - 输出：`pageType`、`structureAnalysis`、`recommendedTools`、`nextStep`、`confidence`
+  - 模型不出本机、不执行动作，仅返回指导性建议
+
+- **扩展 `nextStepFor` 规则引擎**（`src/next-step.js`）：新增 `aiAssisted: true` 标记，当所有确定性规则未命中时返回，并附带 `suggestedArgs` 引导 Agent 调用 AI。
+  - 修复：`browser_ai_status` 返回 `status: 'available'` 被误判为失败 → 添加 `'available'` 到 `SUCCESS_STATUSES`
+
+### 三层递进架构
+
+```
+Layer 1: 确定性规则引擎 (nextStep) — 零开销，命中直接返回可执行下一步
+Layer 2: AI 辅助发现 (browser_local_judge mode="discovery") — 确定性规则未命中时触发
+Layer 3: 写操作风险裁决 (browser_local_judge mode="risk") — 写操作前 AI 风险评估
+```
+
+### 文档更新
+
+- **`AGENTS.md`**：新增 "AI-Assisted Discovery" 章节，包含触发条件、调用格式、输出解析、5 步工作流、安全边界
+- **`AGENT-QUICKSTART.md`**：扩展现有 `browser_local_judge` 段落，增加 AI 发现流程与置信度阈值
+- **`skills/ai-browser-bridge/SKILL.md`**：在契约末尾新增 AI 辅助发现指引
+- **`README.md`**：更新版本号 0.25.0 → 0.35.0，增加 AI 辅助发现能力说明
+- **`docs/DEVELOPMENT-GUIDE.md`**：新增 AI 辅助发现能力架构图、使用流程、输出示例及版本历史 0.35.0
+
+### 安全性边界
+
+- AI 辅助发现是**可选增强器**，绝不影响离线可用性与基础控制权
+- 模型不可用时，系统仍然完全可用（现有 `optionalEnhancers` 机制）
+- AI 输出是指导性建议，不是执行指令——Agent 仍需要判断是否执行
+- AI 辅助发现不替代确定性规则引擎，仅在规则引擎无法提供明确下一步时介入
+
+### 验证
+
+- 语法检查通过（所有文件）
+- 服务版本 = 0.35.0
+- 扩展版本 = 0.35.0
+- `browser_ai_status` 不再触发 `aiAssisted`
+- 推送远程成功
+- GitHub Release v0.35.0 已创建
+
 ## 0.32.0 — 2026-11-03（**下载不再误路由到上传，已知 downloadId 可等到终态**）
 
 0.31.0 修了「找到目标 ref 后怎么交接」。这一版修更早的一步：**Agent 说“下载”，能力指南却把它路由到上传**；即使调用方找到正确下载工具，也只能反复查列表猜状态。
