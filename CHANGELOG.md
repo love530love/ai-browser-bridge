@@ -1,3 +1,50 @@
+## 0.35.1 — 2026-11-06（**修复扩展错误列表「假清除」+ 扩展占用者可见**）
+
+一次真机复核发现的**误报 clean** 缺陷：`browser_reload_extension` 返回 `errorListCleared: true`，但用户看到红色错误列表仍在、占用状态也没变。审计结果里其实早有矛盾信号（`attempt 1 = failed / clear_extension_errors_timeout`、`reloaded: false`、`reloadMethod: none`），被当成成功引用了一整轮。
+
+### 根因（四层叠加）
+
+1. **地址栏验证只在「页面无 Document」分支里**：`clear-extension-errors.ps1` 仅当 walk 找不到 `ControlType.Document` 时才检查前台是不是 `chrome://extensions`。前台是普通网页（实测 CSDN）时有 Document，检查被整段跳过。
+2. **按「唯一可见窗口」猜目标**：脚本用 `Get-Process chrome` 枚举，取唯一可见窗口即认定为目标。实测该窗口属于**系统 Chrome**（pid 14900，CSDN 页），而扩展 WebSocket 的对端是 **ChatGPT.exe / Codex 内置浏览器**（pid 74800）。两个完全不同的浏览器实例。
+3. **结果自证**：在无关页面上找不到 `Clear all` 按钮 → `nothing_to_clear` → `describeErrorList()` 无条件把它算作 clean，且投影白名单丢掉了所有可复核证据。
+4. **按钮名只匹配英文**：`Clear all` / `Error *` 没有中文别名，而 Reload 早已有 `重新加载` 别名 —— 同一文件里两套标准。
+
+### 修复
+
+- **无条件目标验证**：无论 Document 是否存在，先验证地址栏以 `chrome://extensions` 开头（`addressVerified`）。不满足即 `errors_page_not_front`，**不读列表、不点击、不报 clean**。
+- **保留真实地址**：旧循环只在地址栏前缀匹配时才赋值，否则留 `address: null`，让「读不到」和「读到了别的页面」无法区分。现在保存首个地址值，并把候选窗口清单随失败结果返回。
+- **中英文按钮兼容**：`Clear all` / `全部清除` / `清除全部` / `全部清空`；错误条目匹配 `Error *` / `错误 *` / `错误*`。
+- **证据化结论**：`describeErrorList()` 现在要求 `addressVerified === true` **且** `documentVisible === true`；`cleared` 还要 `controlGone === true`。`nothing_to_clear` 额外返回 `observedButtonNames`（页面实际按钮名），使「假 clean」可被一眼识破。白名单同步补齐 `addressVerified` / `errorsQueryVisible` / `address` / `observedButtonNames` / `candidates` 等字段。
+- **扩展占用者可见**：新增 `src/extension-owner.js`，从扩展 WebSocket 的 (客户端端口, 服务端口) 对经 `netstat -ano` 反查持有进程 PID，再用 `Get-Process` 取进程名。`/status` 与 `browser_queue_status` 新增 `extensionOwner { pid, processName, localPort, remotePort, observedAt, nonChromeHost }`。未知进程名返回 `null`，绝不塌缩成「是 chrome.exe」。
+- **非 Chrome 宿主精确绑定（不是一律拒绝）**：确认扩展属于 `ChatGPT.exe` 等非 chrome 进程时，`clearExtensionErrorsViaUia()` 把 `extensionOwner.pid` 作为 `processId` 传给 UIA 脚本，脚本按该 PID 枚举窗口（`BridgeChromeWindows::Visible(pid)`），地址栏验证仍无条件执行，所以精确绑定不会退化成盲点。实测该宿主 `pid 74800` **没有任何可见窗口**，返回 `no_chrome_window`；结果携带 `extensionOwner` / `hostBinding { processName, pid, visibleWindow:false, reason }`，并把「Bring a Chrome window up」这种会误导到另一个浏览器的通用提示换成指明宿主名与 PID 的明确指引。两次重启服务后占用者稳定为 ChatGPT，证据充分，不再靠反复重启去赌系统 Chrome 抢到连接。
+- **本机适配**：`tasklist.exe` 单 PID 查询实测 15 秒硬超时不可用，改用 `Get-Process`；缓存 5 秒。
+
+### 验证（2026-11-06 21:33 GMT+8）
+
+修复前：`targetResolution: single_window`、`address: null`、`attempt 1 = failed/timeout`、`reloaded: false`。
+修复后：`targetResolution: address_bar_match`、`addressVerified: true`、`address: "chrome://extensions"`、`documentVisible: true`、`observedButtonNames` 含 `Developer mode` / `Extensions` 等该页专属控件且无 `Clear all`、`errorEntries: 0`、`attempts` 仅 1 次成功读取。
+服务重启后 `extensionOwner.processName = "chrome"`（pid 15944），浏览器版本由 157 → 156，占用者由 Codex 内置浏览器切回系统 Chrome；`tabLeases` / `taskLease` / `desktopOperation` / `maintenance` 全为空。扩展端重载至 0.35.1。
+
+### 追加：智能调度器运行时回归（同一 0.35.1 内）
+
+0.35.0 的调度器只做过 `browser_queue_status` 级验证。本次补跑真实调用路径，发现并修复 5 个「单测自己构造结果对象」永远查不出来的缺陷：
+
+- `scheduler-integration.js` 的 `detectConflicts` 调用 `aiScheduler.detectConflicts(...)`，但 `AIScheduler` 类没有该方法 → 首次冲突检查必抛 `TypeError`。改为直接引用模块级 `detectConflicts`。
+- `PriorityQueue.tryPreemption()` 对 `find()` 返回的对象调用 `.reverse()` → 必抛；且 `reverse()` 原地反转会打乱优先级顺序。改为从尾部倒序扫描、不改动数组。
+- 抢占成功后 `enqueue()` 提前 return，**触发抢占的高优先级任务被静默丢弃**。现在抢占只腾位置，新任务照常入队并返回 `preemptedTask`。
+- `decomposeTask()` 把原任务自己也放进 subTasks，`scheduler-integration.enqueue()` 又把这些子任务真的入队 → 同一个 navigate/click 被排两次，且凭空生成没人请求的浏览器命令。现在分解**只作建议**（`subTaskSuggestions`），绝不进入可执行队列。
+- `load-balancer.js`：把工具名 `browser_queue_status` 当 HTTP 路由；用 `instanceId.port`（字符串取属性）拼出 `http://127.0.0.1:undefined/...`；`/status` 与 `/call` 都不带 `Bearer` token → 401 被误判为实例死亡/路由失败；健康检查只看 `.local/pids/<id>.pid`，而默认实例由看门狗用 `.local/server.pid` 启动，永远被判「未运行」。现改为 `GET /status`（带 token）读 `queued`、`POST /call` 带 `{name, arguments}`，401 视为「端口在监听」，实例存活以端口探测为准。
+
+工具描述同步：`browser_reload_extension` 不再承诺「`nothing_to_clear` 即列表已清空」，改为明确要求 `addressVerified` + `documentVisible`（`cleared` 另需 `controlGone`）。
+
+新增 `test/scheduler-runtime.test.js`（11 条，全部通过）：用临时 state dir + HTTP 边界 stub，覆盖冲突检测、优先级顺序、抢占/拒绝、分解建议、超时清理、批量建议、端口解析、token 注入、401 语义与 `/call` 契约。
+
+### 版本同步修正
+
+`package-lock.json` 顶层与 `packages[""]` 此前停在 **0.32.0**（0.35.0 升版时遗漏），本次一并同步至 0.35.1。
+
+---
+
 ## 0.35.0 — 2026-11-04（**AI 辅助发现能力：确定性规则失效时自动降级到本地模型**）
 
 0.34.0 修了写操作的可验证闭环；这一版解决的是发现阶段的一个盲区：**当所有确定性规则都找不到目标时，Agent 会陷入时滞、迷路甚至乱操作**。

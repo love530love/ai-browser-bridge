@@ -11,7 +11,25 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './instance-config.js';
 import { listInstances } from './instance-config.js';
-import { isInstanceRunning } from './instance-manager.js';
+import { loadConfig } from './config.js';
+
+// Every HTTP route on this service requires `Bearer <agentToken>`. Health
+// probes and task routing are calls like any other, so they carry the token
+// too; without it a healthy instance was reported as dead (401 -> false).
+function agentHeaders() {
+  try {
+    return { Authorization: `Bearer ${loadConfig().agentToken}` };
+  } catch {
+    // A fresh instance or a unit test may have no config.json yet. Send the
+    // request unauthenticated rather than inventing a token; a 401 then proves
+    // the port is listening even though the caller cannot use it.
+    return {};
+  }
+}
+
+function portFor(instanceId) {
+  return listInstances().find(i => i.id === instanceId)?.port ?? 19387;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Instance Health Monitor
@@ -31,17 +49,20 @@ async function checkInstanceHealth(instanceId) {
     return { healthy: false, healthScore: 0, reason: 'instance_disabled' };
   }
   
-  if (!isInstanceRunning(instanceId)) {
-    return { healthy: false, healthScore: 0, reason: 'instance_not_running' };
-  }
-  
+  // A pid file exists only for instances launched through instance-manager.
+  // The default service is started by the watchdog with .local/server.pid, so
+  // the absence of <instanceId>.pid proves nothing. Whether a service is alive
+  // is decided by the port probe below, not by a bookkeeping file.
   // Attempt HTTP health check
   let portHealthy = false;
   try {
     const response = await fetch(`http://127.0.0.1:${instance.port}/status`, {
+      headers: agentHeaders(),
       signal: AbortSignal.timeout(3000)
     });
-    portHealthy = response.ok;
+    // A 401 still proves a service is listening and answering on this port;
+    // it means the token does not match, not that the instance is dead.
+    portHealthy = response.ok || response.status === 401;
   } catch {
     portHealthy = false;
   }
@@ -69,21 +90,26 @@ async function getInstanceLoad(instanceId) {
   }
   
   try {
-    // Query queue status from instance
-    const response = await fetch(`http://127.0.0.1:${instanceId === 'default' ? 19387 : instanceId === 'profile1' ? 19388 : instanceId === 'profile2' ? 19389 : instanceId.port}/browser_queue_status`, {
+    // /browser_queue_status is a TOOL name, not an HTTP route. The queue
+    // snapshot travels in GET /status as `queued`. Resolve the port from the
+    // instance registry instead of reading `.port` off an instance-id string
+    // (which produced http://127.0.0.1:undefined/...).
+    const response = await fetch(`http://127.0.0.1:${portFor(instanceId)}/status`, {
+      headers: agentHeaders(),
       signal: AbortSignal.timeout(3000)
     });
-    
+
     if (!response.ok) {
-      return { instanceId, healthy: true, load: 90, metrics: {}, reason: 'queue_status_unavailable' };
+      return { instanceId, healthy: true, load: 90, metrics: {},
+        reason: response.status === 401 ? 'unauthorized' : 'status_unavailable' };
     }
-    
+
     const queueStatus = await response.json();
-    
+
     return {
       instanceId,
       healthy: true,
-      load: queueStatus.queueLength || 0,
+      load: Number(queueStatus.queued ?? 0),
       metrics: queueStatus
     };
   } catch {
@@ -115,19 +141,24 @@ class LoadBalancer {
  * Returns: { instanceId, score, reason }
    */
   async selectBestInstance(task) {
-    const instances = listInstances().filter(i => i.enabled && isInstanceRunning(i.id));
-    
+    const instances = listInstances().filter(i => i.enabled);
+
     if (instances.length === 0) {
       return { instanceId: null, score: 0, reason: 'no_available_instances' };
     }
-    
-    // Health check all instances
+
+    // Probe every enabled instance and keep only the ones that answer. Pid
+    // bookkeeping is not used as a filter (see checkInstanceHealth).
     const instanceLoads = [];
     for (const instance of instances) {
       const load = await getInstanceLoad(instance.id);
-      instanceLoads.push(load);
+      if (load.healthy) instanceLoads.push(load);
     }
-    
+
+    if (instanceLoads.length === 0) {
+      return { instanceId: null, score: 0, reason: 'no_healthy_instances' };
+    }
+
     // Score instances based on load and health
     const scored = instanceLoads.map(load => {
       let score = load.load; // Lower load = better score
@@ -177,11 +208,10 @@ class LoadBalancer {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/call`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...agentHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: task.name,
-          arguments: task.args || {},
-          metadata: task.metadata
+          arguments: task.args || {}
         }),
         signal: AbortSignal.timeout(5000)
       });
@@ -201,8 +231,7 @@ class LoadBalancer {
    * Get instance port by ID
    */
   getInstancePort(instanceId) {
-    const instance = listInstances().find(i => i.id === instanceId);
-    return instance?.port || 19387;
+    return portFor(instanceId);
   }
   
   /**

@@ -159,20 +159,22 @@ class PriorityQueue {
    */
   enqueue(task) {
     // Calculate priority
-    const { score, name: priorityName } = calculatePriority(task);
-    
-    // Check queue capacity
+    const { score, name: priorityName, breakdown } = calculatePriority(task);
+
+    // Check queue capacity. A successful preemption only makes ROOM; the new
+    // task still has to be inserted below. The old early return reported a
+    // preemption and silently dropped the high-priority task that caused it.
+    let preemptedTaskId = null;
     if (this.queue.length >= this.maxSize) {
-      // Try to preempt lowest priority task
       const preempted = this.tryPreemption(task);
-      if (preempted) {
-        this.stats.totalPreempted++;
-        return { status: 'preempted', taskId: task.id, priority: priorityName, preemptedTask: preempted.id };
+      if (!preempted) {
+        this.stats.totalTimedOut++;
+        return { status: 'rejected', reason: 'queue_full', queueLength: this.queue.length };
       }
-      this.stats.totalTimedOut++;
-      return { status: 'rejected', reason: 'queue_full', queueLength: this.queue.length };
+      this.stats.totalPreempted++;
+      preemptedTaskId = preempted.id;
     }
-    
+
     // Add to queue with priority ordering
     const entry = {
       ...task,
@@ -194,33 +196,34 @@ class PriorityQueue {
     this.stats.totalEnqueued++;
     
     return {
-      status: 'queued',
+      status: preemptedTaskId ? 'preempted' : 'queued',
       taskId: task.id,
       priority: priorityName,
       position: this.queue.indexOf(entry) + 1,
-      breakdown: calculatePriority(task).breakdown
+      ...(preemptedTaskId ? { preemptedTask: preemptedTaskId } : {}),
+      breakdown
     };
   }
-  
+
   /**
    * Try to preempt a lower-priority task to make room
    */
   tryPreemption(newTask) {
     const newPriority = calculatePriority(newTask).score;
-    
-    // Find lowest priority task that can be preempted
-    const preemptible = this.queue.reverse().find(item => {
-      return item.priority > newPriority && item.status === 'queued';
-    }).reverse();
-    
-    if (!preemptible) return null;
-    
-    // Remove and mark as preempted
-    const idx = this.queue.findIndex(i => i.id === preemptible.id);
-    this.queue.splice(idx, 1);
-    preemptible.status = 'preempted';
-    
-    return preemptible;
+
+    // The queue is kept sorted ascending by score, so the lowest-priority
+    // queued entry is the last qualifying one. Walk backwards WITHOUT mutating
+    // the array: reverse() is in-place, and calling .reverse() on the object
+    // returned by find() used to throw TypeError on every preemption attempt.
+    for (let i = this.queue.length - 1; i >= 0; i -= 1) {
+      const candidate = this.queue[i];
+      if (candidate.priority > newPriority && candidate.status === 'queued') {
+        this.queue.splice(i, 1);
+        candidate.status = 'preempted';
+        return candidate;
+      }
+    }
+    return null;
   }
   
   /**
@@ -316,7 +319,9 @@ function decomposeTask(task) {
   
   // Heuristic decomposition based on task type
   if (name === 'browser_navigate' && args?.url) {
-    // Navigate task: can add pre-check and post-verify sub-tasks
+    // Advisory pre-check and post-verify steps. The original task is NOT one of
+    // its own sub-tasks: including it made the caller enqueue the same navigate
+    // twice. These are suggestions, never dispatched commands.
     return {
       original: task,
       subTasks: [
@@ -324,13 +329,14 @@ function decomposeTask(task) {
           id: randomUUID(),
           name: 'browser_page_info',
           args: {},
+          parentTaskId: task.id,
           metadata: { phase: 'pre-check', complexity: 'simple', urgency: 'high' }
         },
-        task,
         {
           id: randomUUID(),
           name: 'browser_observe',
           args: {},
+          parentTaskId: task.id,
           metadata: { phase: 'post-verify', complexity: 'moderate', urgency: 'medium' }
         }
       ],
@@ -339,7 +345,7 @@ function decomposeTask(task) {
   }
   
   if (name === 'browser_click' && args?.elementId) {
-    // Click task: can add element verification
+    // Same rule as navigate: advisory checks only, never a duplicate write.
     return {
       original: task,
       subTasks: [
@@ -347,13 +353,14 @@ function decomposeTask(task) {
           id: randomUUID(),
           name: 'browser_find_element',
           args: { selector: args.selector, timeout: 3000 },
+          parentTaskId: task.id,
           metadata: { phase: 'pre-check', complexity: 'simple', urgency: 'high' }
         },
-        task,
         {
           id: randomUUID(),
           name: 'browser_observe',
           args: {},
+          parentTaskId: task.id,
           metadata: { phase: 'post-verify', complexity: 'moderate', urgency: 'medium' }
         }
       ],

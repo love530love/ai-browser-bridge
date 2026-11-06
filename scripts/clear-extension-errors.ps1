@@ -120,7 +120,13 @@ if ($candidates.Count -eq 0) {
 }
 
 foreach ($candidate in $candidates) {
-  foreach ($value in (Get-AddressValues $candidate.Handle)) {
+  # Keep the FIRST address value even when it is not chrome://extensions. The
+  # old loop only assigned on a prefix match, so a window on an ordinary web
+  # page reported address:null and nobody could tell "address bar unreadable"
+  # from "wrong page in front".
+  $values = @(Get-AddressValues $candidate.Handle)
+  if ($values.Count -gt 0) { $candidate.Address = $values[0] }
+  foreach ($value in $values) {
     if ($value.StartsWith($ExpectedUrlPrefix)) { $candidate.Address = $value; break }
   }
 }
@@ -131,7 +137,7 @@ if ($ChromeWindowHandle -gt 0) {
   $target = $candidates | Select-Object -First 1
   $resolution = 'explicit_window_handle'
 } else {
-  $showingErrors = @($candidates | Where-Object { $_.Address -and $_.Address.Contains($RequireUrlContains) })
+  $showingErrors = @($candidates | Where-Object { $_.Address -and $_.Address.StartsWith($ExpectedUrlPrefix) })
   if ($showingErrors.Count -eq 1) {
     $target = $showingErrors[0]
     $resolution = 'address_bar_match'
@@ -213,8 +219,29 @@ function Find-Button($rows, [string]$name) {
   return $null
 }
 
+# "Clear all" is localised. Chrome's toolbar Reload control already needed a
+# zh-CN alias, and leaving the clear button English-only made a non-empty error
+# list invisible on a Chinese UI: the walk found no button and reported an empty
+# list. Both names are tried so the result can say what was actually matched.
+$CLEAR_ALL_NAMES = @('Clear all', '全部清除', '清除全部', '全部清空')
+function Find-ClearAllButton($rows) {
+  foreach ($name in $CLEAR_ALL_NAMES) {
+    $found = Find-Button $rows $name
+    if ($found) { return $found }
+  }
+  return $null
+}
+
+$ERROR_ENTRY_PATTERNS = @('Error *', '错误 *', '错误*')
 function Count-ErrorEntries($rows) {
-  return @($rows | Where-Object { $_.role -eq 'ControlType.Button' -and $_.name -like 'Error *' }).Count
+  $count = 0
+  foreach ($row in $rows) {
+    if ($row.role -ne 'ControlType.Button') { continue }
+    foreach ($pattern in $ERROR_ENTRY_PATTERNS) {
+      if ($row.name -like $pattern) { $count++; break }
+    }
+  }
+  return $count
 }
 
 function Invoke-Btn($row) {
@@ -229,6 +256,36 @@ function Has-Document($rows) {
   return @($rows | Where-Object { $_.role -eq 'ControlType.Document' }).Count -gt 0
 }
 
+# ---------------------------------------------------------------------------
+# Unconditional target verification.
+#
+# This used to live INSIDE the "no document node" branch. That was a silent
+# false-clean: when the front tab was an ordinary web page (CSDN, mail, ...),
+# the walk found a Document, the address-bar check was skipped entirely, and
+# the absence of a "Clear all" button on that unrelated page was reported as
+# nothing_to_clear. Downstream describeErrorList() treats that as clean, so a
+# red error list survived while the caller was told it had been cleared.
+#
+# The page identity is now proved before ANY read of the error list, and it is
+# carried into the result so no layer has to trust an unverified "empty" verdict.
+# chrome://extensions/?errors=<id> is sometimes shortened by the omnibox, so
+# the prefix is required and the errors= part is recorded but not demanded.
+# ---------------------------------------------------------------------------
+$addressVerified = $false
+if ($target.Address -and $target.Address.StartsWith($ExpectedUrlPrefix)) { $addressVerified = $true }
+if (-not $addressVerified) {
+  Emit @{
+    status = 'failed'; retryable = $false; reason = 'errors_page_not_front'; cleared = 0; dispatched = $false
+    documentVisible = $false; clearedState = 'unknown'; scanned = 0
+    processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
+    address = $target.Address; addressVerified = $false
+    candidates = (Show-Candidates $candidates)
+    nextStep = 'The front tab of the selected window is not chrome://extensions, so this is not the extension error list. Nothing was read and nothing was clicked. Call browser_extension_errors to put the error list in front, then repeat. Do NOT report the panel as clean. If the connected extension belongs to a different browser host, this page belongs to the wrong browser entirely.'
+  }
+}
+$errorsQueryVisible = $false
+if ($target.Address -and $target.Address.Contains($RequireUrlContains)) { $errorsQueryVisible = $true }
+
 $reloadMethod = 'none'
 $rows = Walk
 if (-not (Has-Document $rows)) {
@@ -236,27 +293,8 @@ if (-not (Has-Document $rows)) {
   # assistive-technology client is attached. A page that was already loaded has
   # no document node, so the page has to be reloaded - and the reload, the read
   # and the click all have to happen inside ONE process, because the engine is
-  # already off again by the time a second process connects.
-  #
-  # Reloading the wrong tab would discard whatever the user has in it, so this
-  # only happens after the address bar proved the front tab is the error list.
-  if (-not $target.Address) {
-    Emit @{
-      status = 'failed'; retryable = $false; reason = 'address_unreadable'; cleared = 0; dispatched = $false
-      documentVisible = $false; clearedState = 'unknown'; scanned = $rows.Count
-      processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
-      nextStep = 'The address bar of the Chrome window could not be read, so no page could be identified and nothing was reloaded or clicked. Call browser_extension_errors to put the error list in front, then repeat.'
-    }
-  }
-  if (-not $target.Address.Contains($RequireUrlContains)) {
-    Emit @{
-      status = 'failed'; retryable = $false; reason = 'errors_page_not_front'; cleared = 0; dispatched = $false
-      documentVisible = $false; clearedState = 'unknown'; scanned = $rows.Count
-      processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
-      address = $target.Address
-      nextStep = 'The front tab of that window is not the extension error list, so reloading it would discard the user''s page and nothing was done. Call browser_extension_errors first, then repeat.'
-    }
-  }
+  # already off again by the time a second process connects. The address bar
+  # was already verified above, so reloading cannot discard a user page here.
   $reload = Find-Button $rows 'Reload'
   if (-not $reload) { $reload = Find-Button $rows '重新加载' }
   if (-not $reload) {
@@ -301,11 +339,11 @@ if (-not (Has-Document $rows)) {
 # The document is readable now. The list is rendered asynchronously inside it, so
 # "no Clear all button" is only meaningful once it has had a moment to appear.
 $clearDeadline = [Diagnostics.Stopwatch]::StartNew()
-$clearAll = Find-Button $rows 'Clear all'
+$clearAll = Find-ClearAllButton $rows
 while (-not $clearAll -and $clearDeadline.ElapsedMilliseconds -lt $ClearAllTimeoutMs) {
   Start-Sleep -Milliseconds 250
   $rows = Walk
-  $clearAll = Find-Button $rows 'Clear all'
+  $clearAll = Find-ClearAllButton $rows
 }
 $documentVisible = Has-Document $rows
 $errorEntries = Count-ErrorEntries $rows
@@ -321,14 +359,22 @@ if (-not $documentVisible) {
 }
 
 if (-not $clearAll) {
+  # Raw evidence, not a verdict. A "no button found" conclusion is only as
+  # trustworthy as the tree it came from, so the caller gets the button names
+  # that WERE present. This is what makes a false clean auditable: if the walk
+  # saw a CSDN page's buttons, the list is obviously not the extension's.
+  $buttonNames = @($rows | Where-Object { $_.role -eq 'ControlType.Button' -and $_.name } |
+    ForEach-Object { [string]$_.name } | Select-Object -Unique | Select-Object -First 40)
   Emit @{
     status = 'nothing_to_clear'; cleared = 0; dispatched = $false; retryable = $false
     reloaded = ($reloadMethod -ne 'none'); reloadMethod = $reloadMethod
     documentVisible = $true; clearedState = 'empty'; errorEntries = $errorEntries
+    addressVerified = $addressVerified; errorsQueryVisible = $errorsQueryVisible; address = $target.Address
+    clearButtonNames = $CLEAR_ALL_NAMES; observedButtonNames = $buttonNames
     waitedMs = $clearDeadline.ElapsedMilliseconds; scanned = $rows.Count
     processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
     restoredFromMinimized = $restoredFromMinimized
-    note = 'The error list was read successfully and has no "Clear all" control, which is what the page shows when the list is empty.'
+    note = 'The address bar was verified as chrome://extensions and the document was readable; no localised "Clear all" control appeared, which is what the page shows when the list is empty.'
   }
 }
 
@@ -349,9 +395,9 @@ $after = $null
 while ($settle.ElapsedMilliseconds -lt $SettleTimeoutMs) {
   Start-Sleep -Milliseconds 250
   $after = Walk
-  if (-not (Find-Button $after 'Clear all')) { break }
+  if (-not (Find-ClearAllButton $after)) { break }
 }
-$stillThere = $null -ne (Find-Button $after 'Clear all')
+$stillThere = $null -ne (Find-ClearAllButton $after)
 $remaining = Count-ErrorEntries $after
 
 Emit @{
@@ -367,10 +413,11 @@ Emit @{
   errorEntriesAfter = $remaining
   settleMs = $settle.ElapsedMilliseconds
   controlGone = (-not $stillThere)
+  addressVerified = $addressVerified; errorsQueryVisible = $errorsQueryVisible; address = $target.Address
+  clearButtonName = [string]$clearAll.name
   scanned = $after.Count
   processId = $target.ProcessId
   windowHandle = $target.Handle.ToInt64()
   targetResolution = $resolution
   restoredFromMinimized = $restoredFromMinimized
-  address = $target.Address
 }

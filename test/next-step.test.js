@@ -148,14 +148,32 @@ test('taking the foreground is escalated, never decided by the caller', () => {
   assert.match(step.why, /their decision/);
 });
 
-test('a step that cannot name its arguments is not emitted at all', () => {
-  // No tabId anywhere in the call or the result: every useful step needs one,
-  // so the honest answer is silence rather than a call that would be refused.
-  assert.equal(nextStepFor('browser_click', {}, { status: 'covered', reason: 'element_covered' }), null);
+test('an unmatched failure escalates to AI discovery without inventing an executable call', () => {
+  // 0.35.0 changed "silence" into an advisory escalation. The safety property
+  // is unchanged: tool stays null when no deterministic rule can name a real
+  // call's arguments, so nothing the caller could execute by mistake is emitted.
+  const step = nextStepFor('browser_click', {}, { status: 'covered', reason: 'element_covered' });
+  assert.equal(step.rule, 'deterministic_rules_exhausted');
+  assert.equal(step.kind, 'escalate_to_ai');
+  assert.equal(step.tool, null);
+  assert.equal(step.aiAssisted, true);
+  assert.equal(step.needsAiDiscovery, true);
+  assert.equal(step.suggestedTool, 'browser_local_judge');
+  assert.equal(step.suggestedMode, 'discovery');
+  assert.equal(step.suggestedArgs.mode, 'discovery');
+  assert.deepEqual(step.suggestedArgs.attemptedTools, ['browser_click']);
+  assert.deepEqual(step.suggestedArgs.failureReasons, ['element_covered']);
 });
 
-test('a failure with no rule stays silent instead of inventing advice', () => {
-  assert.equal(nextStepFor('browser_bookmarks', { action: 'list' }, { status: 'failed', reason: 'bookmark_store_unreadable' }), null);
+test('a failure with no rule escalates to AI discovery instead of inventing advice', () => {
+  const step = nextStepFor('browser_bookmarks', { action: 'list' },
+    { status: 'failed', reason: 'bookmark_store_unreadable' });
+  assert.equal(step.kind, 'escalate_to_ai');
+  assert.equal(step.tool, null);
+  assert.equal(step.aiAssisted, true);
+  assert.equal(step.suggestedTool, 'browser_local_judge');
+  assert.deepEqual(step.suggestedArgs.attemptedTools, ['browser_bookmarks']);
+  assert.deepEqual(step.suggestedArgs.failureReasons, ['bookmark_store_unreadable']);
 });
 
 test('isFailure does not treat a legitimate empty answer as a failure', () => {

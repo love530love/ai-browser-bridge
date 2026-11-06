@@ -287,7 +287,7 @@ test('queue status and ready waits are served locally while a command is active'
   assert.equal(guide.incidentRecoveryContract.alternateChannelRequiresExplicitUserAuthorization, true);
   assert.equal(guide.incidentRecoveryContract.noImplicitCredentialFallback, true);
   assert.ok(guide.incidentRecoveryContract.neverCopyBrowserProfileStores.includes('Cookies'));
-  assert.match(guide.firstSteps.join('\n'), /Never copy, clone, archive, start with, parse, upload/);
+  assert.match(guide.firstSteps.join('\n'), /Do not copy, clone, archive, launch with, parse or upload a Chrome profile/);
   assert.match(guide.firstSteps.join('\n'), /If a password, SSH credential/);
   assert.ok(guide.defaults.verifiedWriteContract);
   assert.ok(guide.defaults.verifiedWriteContract.tools.includes('browser_navigate_verified'));

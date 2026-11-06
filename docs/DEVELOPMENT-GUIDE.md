@@ -27,6 +27,39 @@ node -e "const m=JSON.parse(require('fs').readFileSync('extension/manifest.json'
 
 **两处输出必须一致。**
 
+## 维护操作的目标绑定（0.35.1 血泪教训）
+
+凡是「通过桌面 UI Automation 操作某个浏览器页面」的维护动作（典型：`clear-extension-errors.ps1`），必须遵守：
+
+1. **先证明目标页面身份，再读内容。** 地址栏以 `chrome://extensions` 开头是硬前提，且验证必须**无条件**执行，不能放在「页面没有 Document 节点」的分支里。普通网页也有 Document，那里跳过验证就会在 CSDN 页面上找 `Clear all`，找不到就误报「列表为空」。
+2. **不要按「唯一可见窗口」猜目标。** 系统里可能同时有系统 Chrome、Codex/ChatGPT 内置浏览器、Canary，各自独立的扩展与错误列表。`Get-Process chrome` 枚举到的窗口**可能属于另一个浏览器实例**。用扩展 WebSocket 的 (客户端端口, 服务端口) 对反查持有进程 PID，`/status` 的 `extensionOwner` 就是这么来的；再把这个 pid 作为 `processId` 传给清错脚本，脚本按 PID 枚举该进程的窗口。**不要因为宿主不是 chrome.exe 就一律拒绝**：那会让它的错误列表永远清不掉；也不要靠反复重启服务去赌系统 Chrome 抢到连接（实测两次重启占用者稳定是 ChatGPT）。宿主确实没有可见窗口时，返回 `hostBinding` 指明进程，别用「Bring a Chrome window up」把人引到另一个浏览器。
+3. **「没找到按钮」不等于「列表为空」。** 结论必须携带原始证据：`addressVerified`、`documentVisible`、`address`、`targetResolution`、`observedButtonNames`。`nothing_to_clear` 只有在地址栏已验证 + 文档可读时才算 clean。
+4. **新增证据字段要同时加进投影白名单**（`src/extension-errors.js` 的 `describeErrorList`）。读侧过滤 + 写侧白名单会同时挡掉同一条路径，字段丢了调用方就无法复核。
+5. **UI 控件名要考虑本地化**：同一文件里 Reload 有 `重新加载` 别名而 `Clear all` 没有，是造成误判的直接原因之一。
+
+### 本机环境事实
+
+- `tasklist.exe` 单 PID 查询实测 **15 秒硬超时**不可用；查进程名用 `Get-Process -Id <pid>`（秒级）。
+- PowerShell 参数/局部变量**永不叫 `$pid` / `$Pid`**（保留变量，赋值直接报 ParserError）。
+- Windows 保留设备名文件（如 `nul`）删不掉：常规 `rm` / 回收站 API 报 `0x800704B0`。本轮实测 `[System.IO.File]::Delete('\\?\<绝对路径>')` → Access denied；`Remove-Item` 报成功但文件仍在（**假成功**）；Node `fs.unlinkSync('\\?\...')` 被 safe-delete shim 转成 trash 后同样失败，关掉 shim 则是 `EPERM`；`Add-Type` 编译 P/Invoke 被沙箱拦截。**本机唯一可行解是加进 `.gitignore`**，不要重复尝试删除，也不要把「报 ok」当删除成功。
+- `chrome://` 页面的 Document 子树只对**同一进程内**的 UIA 客户端可见；跨进程 `browser_native_snapshot` 读不到是预期行为，不是「页面不存在」。所以 reload + read + click 必须在**一个 PowerShell 进程**里完成。
+
+## 调度器运行时回归（0.35.1 血泪教训）
+
+`browser_queue_status` 全绿**不等于调度器能用**：服务实际只调用 `assessAndSchedule` 与 `cleanupTimeouts`，
+`enqueue` / `detectConflicts` / `routeTask` 从来没被走到过。新增模块必须打到真实调用路径：
+
+1. **类方法与模块级函数别混用**：`AIScheduler` 没有 `detectConflicts` 方法，实例调用必抛 `TypeError`。
+2. **不要在 `find()` 的结果上继续调数组方法**：`queue.reverse().find(...).reverse()` 对对象取 `.reverse()` 必抛，
+   且 `reverse()` 原地反转会打乱优先级顺序。
+3. **早退路径要检查副作用是否完成**：抢占成功后直接 return，把「触发抢占的高优先级任务」静默丢了。
+4. **建议 ≠ 可调度命令**：任务分解产物绝不能进可执行队列，否则凭空多出浏览器写操作、同一命令被排两次。
+5. **HTTP 契约逐字对齐**：`/status` 与 `/call` 都强制 `Bearer <agentToken>`；`browser_queue_status` 是**工具名不是路由**；
+   端口从实例注册表取，不要 `instanceId.port`；401 是「服务在监听」，不是「实例死了」。
+6. **存活判据别只信记账文件**：默认实例由看门狗用 `.local/server.pid` 启动，没有 `.local/pids/default.pid`。以端口探测为准。
+7. **测试要打到边界**：用临时 `AIB_STATE_DIR` + stub `globalThis.fetch` 断言真实 URL / header / body，
+   而不是自己构造一个「看起来对」的结果对象。范例：`test/scheduler-runtime.test.js`。
+
 ## 发布流程（固定动作）
 
 ### 1. 代码提交

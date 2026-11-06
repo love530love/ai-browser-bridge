@@ -29,6 +29,7 @@ import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMA
 import { runCertificateStore, CERTIFICATE_STORES } from './certificate-store.js';
 import { runNativeHostTool, NATIVE_HOST_NAME } from './native-host.js';
 import { createScheduler } from './scheduler-integration.js';
+import { resolveExtensionOwner, isNonChromeHost } from './extension-owner.js';
 import {
   STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION, RECIPE_RUN_CONFIRMATION,
   BOOKMARKS_WRITE_CONFIRMATION, HISTORY_DELETE_CONFIRMATION, DOWNLOADS_CONTROL_CONFIRMATION,
@@ -370,6 +371,15 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     browserIdentitySource: extensionBrowser?.source ?? null,
     browserBrands: extensionBrowser?.brands ?? null,
     extensionSessionId,
+    // Which browser process actually holds the single extension socket. This is
+    // the "who is occupying the bridge" answer: a second Chrome, or the Codex
+    // built-in browser, can own the connection while the human's Chrome does
+    // nothing. Never inferred from window titles; derived from the socket pair.
+    extensionOwner: (() => {
+      const remotePort = extension?._socket?.remotePort ?? null;
+      const owner = resolveExtensionOwner(remotePort, config.port);
+      return owner ? { ...owner, nonChromeHost: isNonChromeHost(owner) } : null;
+    })(),
     maintenance: maintenanceState(),
     tabLeases: leases.list(),
     connected: extension?.readyState === WebSocket.OPEN,
@@ -1026,11 +1036,22 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // exposes no document; requiring "exactly one Chrome window" made an ordinary
   // second window a silent skip that the reload result then reported as success.
   async function clearExtensionErrorsViaUia() {
+    // UIA walks the windows of ONE process. When the connected extension lives
+    // in a non-chrome.exe host (the Codex/ChatGPT built-in browser, for
+    // example), the old default enumeration inspected a DIFFERENT browser's
+    // windows, found no "Clear all" on an ordinary web page and reported a
+    // clean list. Refusing outright was the first fix, but it left that host's
+    // error list uncleared. The script accepts an exact process id, so bind the
+    // walk to the process that actually holds the extension connection. The
+    // script still verifies the address bar before reading or clicking, so an
+    // explicit PID cannot become a blind click on an unrelated page.
+    const owner = resolveExtensionOwner(extension?._socket?.remotePort ?? null, config.port);
+    const boundTarget = Number.isSafeInteger(owner?.pid) && owner.pid > 0 ? { processId: owner.pid } : {};
     const attempts = [];
     let entry;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       desktopOperation = { tool: 'browser_reload_extension:clear-errors', startedAt: Date.now() };
-      try { entry = await clearExtensionErrors(); }
+      try { entry = await clearExtensionErrors(boundTarget); }
       catch (error) {
         entry = { status: 'failed', retryable: false, reason: 'clear_extension_errors_threw',
           message: String(error?.message ?? error).slice(0, 200) };
@@ -1042,7 +1063,19 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       if (entry?.status !== 'failed' || entry.retryable !== true || attempt === 2) break;
       await new Promise(resolve => setTimeout(resolve, 1200));
     }
-    return { ...entry, attempts };
+    const result = { ...entry, attempts, ...(owner ? { extensionOwner: owner } : {}) };
+    // A non-chrome host can have no reachable window at all (measured with the
+    // Codex/ChatGPT built-in browser: no_chrome_window for pid 74800 even after
+    // binding the UIA walk to exactly that pid). The script's generic advice
+    // says "bring a Chrome window up", which would open a window in a DIFFERENT
+    // browser. Replace it with the name of the host that actually holds the
+    // connection so the caller can act on the right one.
+    if (owner && isNonChromeHost(owner) === true &&
+        result.status !== 'cleared' && result.status !== 'nothing_to_clear') {
+      result.hostBinding = { processName: owner.processName, pid: owner.pid, visibleWindow: false, reason: result.reason };
+      result.nextStep = `The extension connection belongs to ${owner.processName} (pid ${owner.pid}), which exposed no reachable window for UI Automation (${result.reason}). Its error list was NOT cleared. Open chrome://extensions inside that browser and clear the list there, or pair this service with the Chrome instance you want to maintain.`;
+    }
+    return result;
   }
 
   function waitForReload({ previousSession }) {

@@ -62,13 +62,17 @@ export async function clearExtensionErrors(target = {}, { platform = process.pla
 }
 
 // What the caller is told about the error list, decided in one place so that
-// "the reload succeeded" and "the red list is gone" can never be confused. The
-// only two statuses that count as clean are the ones backed by a page read:
-// cleared (the button was clicked and left the tree) and nothing_to_clear (the
-// page was read and had no button). Anything else keeps cleared:false and has
-// to carry a reason.
-const CLEAN_STATUSES = new Set(['cleared', 'nothing_to_clear']);
-
+// "the reload succeeded" and "the red list is gone" can never be confused.
+//
+// A version of this treated nothing_to_clear as unconditionally clean. The
+// clear script only proved the front tab was chrome://extensions INSIDE its
+// "no document" branch, so an ordinary web page with a readable document was
+// never identified: no "Clear all" button there was reported as an empty error
+// list. The caller then told the user a red list had been cleared.
+//
+// Now a clean verdict needs evidence attached to it: the address bar must have
+// been verified as chrome://extensions (addressVerified), and the document must
+// have been readable (documentVisible). A bare status string is no longer enough.
 export function describeErrorList(entry) {
   if (!entry || typeof entry !== 'object' || typeof entry.status !== 'string') {
     return {
@@ -81,20 +85,34 @@ export function describeErrorList(entry) {
     };
   }
   const status = entry.status;
-  const cleared = CLEAN_STATUSES.has(status);
-  const errorList = { status, cleared };
-  for (const key of ['reason', 'reloaded', 'reloadMethod', 'documentVisible', 'errorEntries', 'errorEntriesBefore', 'errorEntriesAfter', 'controlGone', 'settleMs', 'scanned', 'waitedMs', 'targetResolution', 'restoredFromMinimized', 'attempts', 'nextStep']) {
+  // Projection whitelist. Evidence fields must be forwarded or they vanish and
+  // the caller cannot tell a verified read from an unverified one.
+  const errorList = { status, cleared: false };
+  for (const key of ['reason', 'reloaded', 'reloadMethod', 'documentVisible', 'errorEntries', 'errorEntriesBefore', 'errorEntriesAfter',
+    'controlGone', 'settleMs', 'scanned', 'waitedMs', 'targetResolution', 'restoredFromMinimized', 'attempts', 'nextStep',
+    'addressVerified', 'errorsQueryVisible', 'address', 'clearButtonNames', 'clearButtonName',
+    'observedButtonNames', 'candidates', 'note', 'extensionOwner', 'hostBinding']) {
     if (entry[key] !== undefined) errorList[key] = entry[key];
   }
+  const verifiedPage = entry.addressVerified === true && entry.documentVisible === true;
+  const cleanByClick = status === 'cleared' && entry.controlGone === true && verifiedPage;
+  const cleanByEmpty = status === 'nothing_to_clear' && verifiedPage;
+  const cleared = cleanByClick || cleanByEmpty;
+  errorList.cleared = cleared;
   if (cleared) return { errorListCleared: true, errorList };
+  // We are in the !cleared branch. Any clean-sounding status that got here is
+  // an incomplete verdict, whether the missing piece was the page identity or
+  // controlGone - both must be reported the same way instead of falling through
+  // to a bare reason of "cleared".
+  const unverified = status === 'cleared' || status === 'nothing_to_clear';
   return {
     errorListCleared: false,
     errorList,
     errorListClearStep: {
-      reason: entry.reason ?? status,
+      reason: unverified ? 'clean_verdict_without_page_evidence' : (entry.reason ?? status),
       howToRetry: typeof entry.nextStep === 'string'
         ? entry.nextStep
-        : 'The error list was not read to a verdict. Call browser_extension_errors to put the page in front, then read it before reporting the panel as clean.'
+        : 'The error list was not read from a verified chrome://extensions page. Call browser_extension_errors to put the page in front, then read it before reporting the panel as clean.'
     }
   };
 }

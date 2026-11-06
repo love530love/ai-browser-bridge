@@ -24,14 +24,39 @@ const serverSource = readFileSync(new URL('../src/server.js', import.meta.url), 
 const workerSource = readFileSync(new URL('../extension/worker.js', import.meta.url), 'utf8');
 
 test('only a page read that found the list empty counts as clean', () => {
-  const cleared = describeErrorList({ status: 'cleared', controlGone: true, errorEntriesAfter: 0 });
+  // 0.35.1: a clean verdict is worthless unless the script proved WHICH page
+  // it read. These are the fields the real PowerShell result carries.
+  const pageEvidence = {
+    addressVerified: true,
+    documentVisible: true,
+    address: 'chrome://extensions',
+    targetResolution: 'address_bar_match'
+  };
+
+  const cleared = describeErrorList({ status: 'cleared', controlGone: true, errorEntriesAfter: 0, ...pageEvidence });
   assert.equal(cleared.errorListCleared, true);
   assert.equal(cleared.errorList.cleared, true);
   assert.equal(cleared.errorList.controlGone, true);
+  assert.equal(cleared.errorList.addressVerified, true);
   assert.equal(cleared.errorListClearStep, undefined, 'a clean result needs no follow-up step');
 
-  const empty = describeErrorList({ status: 'nothing_to_clear', documentVisible: true });
+  const empty = describeErrorList({ status: 'nothing_to_clear', ...pageEvidence });
   assert.equal(empty.errorListCleared, true);
+
+  // A bare status string - or a verdict with only half the evidence - must
+  // never read as clean. This is the exact shape that caused the false clear.
+  for (const incomplete of [
+    { status: 'nothing_to_clear' },
+    { status: 'nothing_to_clear', documentVisible: true },
+    { status: 'nothing_to_clear', addressVerified: true },
+    { status: 'cleared', controlGone: true },
+    { status: 'cleared', controlGone: true, documentVisible: true },
+    { status: 'cleared', ...pageEvidence }
+  ]) {
+    const described = describeErrorList(incomplete);
+    assert.equal(described.errorListCleared, false, JSON.stringify(incomplete));
+    assert.equal(described.errorListClearStep.reason, 'clean_verdict_without_page_evidence');
+  }
 
   // Every other status keeps cleared:false and must carry a way forward.
   for (const status of ['failed', 'uncertain', 'unavailable', 'skipped', 'anything_else']) {
@@ -59,6 +84,15 @@ test('an explicit target is validated instead of silently widened', async () => 
   const unsupported = await clearExtensionErrors({}, { platform: 'linux' });
   assert.equal(unsupported.status, 'unavailable');
   assert.equal(unsupported.retryable, false);
+});
+
+test('error-list clearing binds UIA to the process that holds the extension', () => {
+  const body = serverSource.slice(serverSource.indexOf('async function clearExtensionErrorsViaUia')).slice(0, 4200);
+  assert.match(body, /processId: owner\.pid/, 'the UIA walk must be bound to extensionOwner.pid');
+  assert.match(body, /clearExtensionErrors\(boundTarget\)/);
+  assert.doesNotMatch(body, /extension_host_not_chrome_ui/,
+    'a non-chrome host must not be a blanket refusal; bind by pid and let page evidence decide');
+  assert.match(body, /hostBinding/, 'an unreachable host must be reported with its own identity');
 });
 
 test('the clear step is not gated on there being exactly one Chrome window', () => {

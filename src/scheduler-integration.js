@@ -12,7 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import { PriorityQueue, calculatePriority, decomposeTask } from './priority-engine.js';
 import { LoadBalancer } from './load-balancer.js';
-import { AIScheduler } from './ai-scheduler.js';
+import { AIScheduler, detectConflicts as detectTaskConflicts } from './ai-scheduler.js';
 
 /**
  * Create an enhanced scheduler that wraps the existing queue
@@ -38,7 +38,12 @@ function createScheduler(config = {}) {
       assessment = aiScheduler.assessAndSchedule(taskData, priorityQueue.queue.length);
     }
     
-    // 2. Task decomposition (if enabled)
+    // 2. Decomposition is ADVISORY ONLY. Its sub-tasks are synthetic browser
+    // commands (browser_page_info / browser_observe / the original write).
+    // Enqueueing them would put commands nobody asked for into an executable
+    // queue, and enqueueing the original twice would double a write. This
+    // scheduler scores and advises; the service's own queue dispatches real
+    // commands. Return the suggestion as data, never materialise it.
     let subTasks = [];
     if (config.taskDecompositionEnabled !== false) {
       const decomposed = decomposeTask(taskData);
@@ -46,19 +51,15 @@ function createScheduler(config = {}) {
         subTasks = decomposed.subTasks;
       }
     }
-    
-    // 3. Enqueue main task
+
+    // 3. Enqueue the one task the caller actually submitted.
     const result = priorityQueue.enqueue(taskData);
-    
-    // 4. Enqueue sub-tasks if decomposed
-    for (const subTask of subTasks) {
-      priorityQueue.enqueue({ ...subTask, parentTaskId: taskId });
-    }
-    
+
     return {
       ...result,
       assessment,
       subTasks: subTasks.map(st => st.id),
+      subTaskSuggestions: subTasks.map(st => ({ name: st.name, phase: st.metadata?.phase })),
       stats: priorityQueue.getStatus()
     };
   }
@@ -103,7 +104,10 @@ function createScheduler(config = {}) {
    * Detect conflicts between tasks
    */
   function detectConflicts(taskA, taskB) {
-    return aiScheduler.detectConflicts(taskA, taskB);
+    // AIScheduler has no detectConflicts method; the detector is a module-level
+    // function. Calling it through the instance used to throw TypeError on the
+    // first conflict check, which no queue-status smoke test ever exercised.
+    return detectTaskConflicts(taskA, taskB);
   }
   
   /**
