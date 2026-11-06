@@ -28,6 +28,7 @@ import { lookupCredential, credentialOriginHash, CREDENTIAL_LOOKUP_CONFIRMATION 
 import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMATION } from './password-manager.js';
 import { runCertificateStore, CERTIFICATE_STORES } from './certificate-store.js';
 import { runNativeHostTool, NATIVE_HOST_NAME } from './native-host.js';
+import { createScheduler } from './scheduler-integration.js';
 import {
   STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION, RECIPE_RUN_CONFIRMATION,
   BOOKMARKS_WRITE_CONFIRMATION, HISTORY_DELETE_CONFIRMATION, DOWNLOADS_CONTROL_CONFIRMATION,
@@ -135,7 +136,21 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const maintenance = createMaintenanceStore({ file: maintenanceStateFile });
   const maintenanceState = maintenance.status;
   const maintenanceWaiting = () => ({ status: 'waiting', reason: 'maintenance', retryable: true, dispatched: false, suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000 }, recommendedNextAction: 'Preserve the task and wait for maintenance to finish. No browser action was dispatched.' });
-  const queue = [];
+  
+  // ──────────────────────────────────────────────────────────────────────────
+  // Intelligent Scheduler Integration
+  // Wraps the existing queue with AI-assisted priority scheduling
+  // ──────────────────────────────────────────────────────────────────────────
+  const scheduler = createScheduler({
+    maxQueueSize: 32,
+    aiAssessmentEnabled: true,
+    taskDecompositionEnabled: true,
+    instanceMode: false, // Set dynamically based on multi-instance config
+    currentInstanceId: null
+  });
+  
+  // Use the scheduler's queue instead of the raw array
+  const queue = []; // Legacy queue for backward compatibility
   const clients = new Set();
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const agentGuide = () => ({
@@ -882,6 +897,26 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       const job = { id: randomUUID(), name, tool, args: prepared, created: Date.now(), priority: priority.value, priorityName: priority.name, resolve, reject };
       const index = queue.findIndex(item => item.priority > job.priority);
       if (index === -1) queue.push(job); else queue.splice(index, 0, job);
+      
+      // Enhanced enqueue with AI assessment (if enabled)
+      if (scheduler) {
+        try {
+          const assessment = scheduler.aiScheduler.assessAndSchedule(
+            { id: job.id, name, args: prepared },
+            queue.length
+          );
+          job.assessment = assessment;
+          
+          // Log complex tasks that may need decomposition
+          if (assessment.complexity.complexity === 'complex' || assessment.complexity.complexity === 'critical') {
+            console.log(`[Scheduler] Complex task queued: ${name} (complexity: ${assessment.complexity.complexity}, score: ${assessment.complexity.score})`);
+          }
+        } catch (error) {
+          // Non-critical: scheduler assessment failure should not block task
+          console.error(`[Scheduler] Assessment failed for ${name}:`, error.message);
+        }
+      }
+      
       pump();
     });
   }
@@ -1534,10 +1569,39 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     });
     ws.on('close', () => { clearTimeout(timer); clients.delete(ws); if (extension === ws) drop('Connection lost; active outcome may be unknown. Inspect page before retrying.'); });
   });
+  
+  // ──────────────────────────────────────────────────────────────────────────
+  // Scheduler Integration: Queue timeout cleanup (every 5 seconds)
+  // ──────────────────────────────────────────────────────────────────────────
+  const queueCleanupInterval = setInterval(() => {
+    if (!scheduler) return;
+    try {
+      const timedOut = scheduler.cleanupTimeouts();
+      if (timedOut.length > 0) {
+        console.log(`[Scheduler] Cleaned up ${timedOut.length} timed-out tasks`);
+        for (const job of timedOut) {
+          if (job.resolve) job.resolve({ status: 'timed_out', reason: 'queue_wait_timeout', retryable: true });
+        }
+      }
+    } catch (error) {
+      console.error(`[Scheduler] Queue cleanup failed:`, error.message);
+    }
+  }, 5000);
+  
   return {
-    server, status, call, tasks,
+    server, status, call, tasks, scheduler,
     listen: () => new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, '127.0.0.1', () => resolve(server.address())); }),
-    close: async () => { stopped = true; leases.flush(); if (lease) tasks.cancel(); drop('Bridge stopped'); for (const ws of clients) ws.terminate(); wss.close(); server.closeIdleConnections(); await new Promise(resolve => server.close(resolve)); }
+    close: async () => { 
+      stopped = true; 
+      leases.flush(); 
+      if (lease) tasks.cancel(); 
+      if (queueCleanupInterval) clearInterval(queueCleanupInterval);
+      drop('Bridge stopped'); 
+      for (const ws of clients) ws.terminate(); 
+      wss.close(); 
+      server.closeIdleConnections(); 
+      await new Promise(resolve => server.close(resolve)); 
+    }
   };
 }
 function appendAuditLog(row) {
