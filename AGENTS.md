@@ -33,6 +33,12 @@ Pass optional `hostId` on **any** tool to bind that command and its tab lease to
 
 If a named host disconnects, the result is `waiting` with `reason:"host_not_connected"` and a `browser_hosts` next step. Do not silently retry against a different browser. Capability flags (`features`, `hostKind`, `hostKindObserved`) are hints for choosing a route; they are never a refusal, and no tool closes a connection because the host is not chrome.exe. Report what you observed; the agent decides what is safe.
 
+## Continuous health inspection (0.37.0)
+
+Run `node src/cli.js heartbeat` for a single inspection cycle, or read the latest `.local/heartbeat/incidents/*.md` when a scheduler reports a non-zero exit. A `clean` verdict requires build identity, version, connection and zero findings to all be evidenced; anything else is `uncertain`, never healthy. Findings are debounced across three cycles and host changes are compared by `hostId`, not through the primary mirror.
+
+Only two remediations are automated: restarting a service whose source build identity is stale (through the watchdog), and reloading an extension that is behind (per `hostId`). Both require a completely idle service, cooldown, a single-instance lock and a re-check. Everything else - a lost host, a stuck in-flight command, a stale lease, an unreadable extension error list - is reported with evidence and left to you: the bridge will not replay an unknown write, launch a GUI, steal focus, or move an explicitly routed task to another browser. Never describe an `uncertain` result as clean or fixed.
+
 ## Action rules
 
 - Use `browser_prepare_action` and `browser_find_element` before clicks, fills, selections, uploads, or downloads.

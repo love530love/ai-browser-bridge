@@ -44,6 +44,17 @@ node -e "const m=JSON.parse(require('fs').readFileSync('extension/manifest.json'
 - Windows 保留设备名文件（如 `nul`）删不掉：常规 `rm` / 回收站 API 报 `0x800704B0`。本轮实测 `[System.IO.File]::Delete('\\?\<绝对路径>')` → Access denied；`Remove-Item` 报成功但文件仍在（**假成功**）；Node `fs.unlinkSync('\\?\...')` 被 safe-delete shim 转成 trash 后同样失败，关掉 shim 则是 `EPERM`；`Add-Type` 编译 P/Invoke 被沙箱拦截。**本机唯一可行解是加进 `.gitignore`**，不要重复尝试删除，也不要把「报 ok」当删除成功。
 - `chrome://` 页面的 Document 子树只对**同一进程内**的 UIA 客户端可见；跨进程 `browser_native_snapshot` 读不到是预期行为，不是「页面不存在」。所以 reload + read + click 必须在**一个 PowerShell 进程**里完成。
 
+## 心跳巡检（0.37.0 硬规则）
+
+1. **clean 必须有证据**：`status.buildId === computeBuildIdentity(ROOT)`、版本一致、`connected`、schema 完整、零 findings，缺一即 `uncertain`。「没发现问题」不是「健康」。
+2. **单样本不是结论**：所有 finding 连续 3 轮才从 warn 升 critical；宿主增减按 `hostId` 做前后双快照对比，不能读 primary 兼容镜像。丢失的宿主必须记进 `missingHostIds`，否则第二轮的空快照会让去抖永远凑不满（本轮实测踩过）。
+3. **时钟/采集间隔跳变的那一轮冻结所有 critical 升级**：去抖窗口本身失效时，任何升级都不可信。
+4. **自动排障白名单只有两项**：`build_restart`（buildId 不一致 → 杀 `.local/server.pid` 交看门狗，**不用 `stop.ps1`**）与 `extension_reload`（buildId 一致但扩展落后 → 按 `hostId` 逐个）。服务不可达、宿主丢失、卡住的 in-flight、租约沉淀、错误率尖峰、无窗口清错一律只报告——因为重启会截断在途写、启动 GUI 越权、清错 unknown 不能当成功。
+5. **动作前置缺一不可**：无 in-flight、无排队、无 taskLease / desktopOperation / maintenance、无 tabLeases、connected；外加冷却 3 周期、actionId 幂等、单实例锁、动作后 recheck。restart 是异步的，下一轮才确认，绝不在本轮写「已修复」。
+6. **心跳自身 fail-closed**：采集超时、payload 非法（例如 auth 错误页被当成 status）、状态文件损坏、磁盘满、双实例、连续失败 ≥3 时冻结外部排障并输出 `uncertain`。watch 模式的 interval timer **不能 `unref()`**，否则事件循环排空、守护在第一轮后静默退出（本轮实测踩过）。
+7. **只读元数据**：审计日志只取 `time / outcome / tool / errorCategory`，不读页面内容、不碰凭据；doctor 的 profile 扫描与 launch dry-run 不要重复实现。
+8. **非零退出码是契约**：`critical / uncertain / skipped` 必须让调度器看见，不能因为「没崩」就返回 0。
+
 ## 多宿主并发（0.36.0 血泪教训）
 
 1. **「第二个连接被 4003 拒绝」不是限流，是所有权 bug**。多个装了扩展的浏览器（系统 Chrome / Canary / Agent 内置浏览器）应该是**对等宿主**，谁先连上都不该决定哪些 agent 能工作。多实例架构只是把「一个独占」复制成「多个独占」，不解决归属。

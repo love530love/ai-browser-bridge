@@ -1,3 +1,33 @@
+## 0.37.0 — 2026-11-06（**心跳巡检：定时体检、有证据的排障、受限自愈**）
+
+用户要求「设置心跳程序，定时监控浏览器项目的使用情况，如遇异常就开始排障和持续升级」。
+
+### 设计原则（承接项目硬规则）
+
+- **clean 是断言，不是默认值**：只有 `status.buildId === computeBuildIdentity(ROOT)`、版本一致、`connected`、schema 完整且零 findings 才判 `clean`；否则一律 `uncertain`。「状态端点全绿」从来不等于新模块能用。
+- **单样本不是事实**：所有 finding 去抖（warn→critical 需连续 3 轮），宿主增减按 `hostId` 做前后双快照对比，绝不读 primary 兼容镜像；时钟/采集间隔跳变的那一轮冻结全部 critical 升级。宿主丢失会在 state 里保留 `missingHostIds`，否则第二轮快照记下空集合后，去抖永远凑不满。
+- **只白名单两个动作**：`build_restart`（源码 buildId 与运行不一致 → 杀 `.local/server.pid` 交看门狗，不用 `stop.ps1`）与 `extension_reload`（buildId 已一致但扩展落后 → 按各 `hostId` 逐个重载）。其余全部**只报告不动作**：宿主丢失、卡住的 in-flight、租约沉淀、错误率尖峰、无可见窗口的清错、服务不可达。理由是不重放未知写、不启动 GUI、不抢前台、不切 browserTarget。
+- **动作安全前置**：`activeCount=0 && queued=0 && 所有宿主无 inFlight && 无 taskLease/desktopOperation/maintenance && tabLeases 空 && connected`；外加 3 周期冷却、`actionId` 幂等、单实例锁、动作后强制 recheck（restart 异步，下一轮才确认）。
+- **心跳自身也要被监控**：采集超时、payload 非法、状态文件损坏、磁盘写满、双实例、连续失败 ≥3 都 fail-closed，冻结外部排障并输出 `uncertain`，绝不写成 clean。
+
+### 交付
+
+- 新增 `src/heartbeat.js`：采集 / 14 类异常规则 / 去抖 / 证据落盘 / 白名单排障 / recheck / watch runner。
+- `src/cli.js` 新增 `heartbeat` 命令：`--watch`（由用户自行常驻）、`--interval-ms`、`--timeout-ms`、`--max-cycles`、`--remediate` / `--no-remediate`、`--dry-run`。默认单次巡检并允许白名单排障；`critical` / `uncertain` / `skipped` 返回非零退出码给调度器。
+- 落盘 `.local/heartbeat/`：`state.json`（去抖计数 / 冷却 / 上轮快照 / missingHostIds）、`YYYY-MM-DD.jsonl`（每轮摘要）、`evidence.jsonl`（observe / classify / act / recheck 全链证据）、`incidents/*.md`（异常排障报告）、`lock`（单实例，超时可接管）。
+- 只读 `GET /status` 与审计日志 `.local/logs/audit.jsonl` 的**元数据**（不看页面内容、不碰凭据）；不重复实现 doctor 的 profile 扫描与 launch dry-run。
+- 新增 `test/heartbeat.test.js` **13 条** hermetic 测试：探针注入 / 非法 payload / 审计双窗口 / clean 证据 / 去抖 / 宿主丢失双快照 / 时钟冻结 / idle 前置 / 白名单 / dry-run / 全流程落盘 / 单实例锁 / watch 退出。全部注入，不真杀进程、不连真服务。
+- 新增**定时巡检自动化**（每小时）：跑心跳 → 读趋势与 incident → 按证据排障 → 必要时走完整发布流程升级；所有改动都必须过 `npm test` / `doctor` / 版本同步 / 扩展重载 / push / Release，不确定就只出报告并请求人工决策。
+
+### 真机复核
+
+- 服务仍运行 0.36.0 进程、源码已含新模块时，`node src/cli.js heartbeat --no-remediate` 准确报出 `build_stale`（`runningBuildId ≠ diskBuildId`、`pid 80140`、`hostCount 2`），生成 incident 报告，`remediation: []`，退出码 1，且没有动服务。
+- **自愈闭环真机通过**：改动源码后跑一次正常巡检，心跳检出 `build_stale`、执行白名单动作 `build_restart`（`SIGTERM pid 13900`，交给看门狗）、recheck 诚实返回 `uncertain`（异步重启未完成，明确写「下一轮才确认」）；看门狗拉起后再跑，得到 `clean` / `provenClean:true` / `runningBuildId === diskBuildId` / `hostCount 2`。全程没有假装成功。
+- **单次调度误报的修复**：一次性巡检被按小时调用时实际间隔 5.9 分钟 ≠ 默认 60 秒，原本每轮都误报 `clock_drift` 并冻结 critical 升级。现改为只有常驻 `--watch` 才强校验固定周期（`intervalEnforced`），单次模式只记录 `observedIntervalMs` 并检查时间倒退。
+- **扩展报错清理真机成功**：按 `hostId` 把 `chrome://extensions` 错误页前置到正确的浏览器宿主后，清错脚本返回 `nothing_to_clear`，且带 `addressVerified:true` / `documentVisible:true` / `errorEntries:0` / `errorsQueryVisible:false` / `clearedState:"empty"` / `observedButtonNames` 中无 `Clear all`——是页面证据支持的空列表，不是「听起来干净」。此前几次 `no_chrome_window` / `page_not_ready` / `errors_page_not_front`（前台是 FlagOS 网页）都如实报 `unknown`、未点击任何东西。
+- 两个宿主（`h-b76b…` ChatGPT 内置浏览器、`h-0b47…` 系统 Chrome）均重载至 0.37.0，第一轮重载的 `staleHosts` 精确点出另一个仍落后；`npm test` **730/730 全绿**，`doctor ok:true`，service / manifest / extension 全 0.37.0，运行 buildId 与源码一致。
+- 已创建**定时巡检自动化**（每小时一次，ACTIVE）：跑心跳 → 读趋势与 incident → 按证据排障 → 必要时走完整测试 / 版本同步 / 扩展重载 / push / Release 流程升级；证据不足时只出报告并请求人工决策。需分钟级采样时由用户自行运行 `node src/cli.js heartbeat --watch --interval-ms 60000`，项目不替用户启动常驻 GUI 进程。
+
 ## 0.36.0 — 2026-11-06（**多宿主并发基座：多个装了扩展的浏览器互不抢占**）
 
 用户目标：系统 Chrome、Canary/Dev、Codex/ChatGPT 等 Agent 内置浏览器、不同版本扩展同时使用时，任何一方都不被阻止或抢占；多个 Agent 各自操作各自浏览器或同一页面都能把任务做完；不设能力禁区，安全性由 agent 判断，项目只提升能力、强化兜底并诚实返回。

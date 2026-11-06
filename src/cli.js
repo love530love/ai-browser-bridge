@@ -239,6 +239,25 @@ try {
     } else {
       throw new Error('Usage: node src/cli.js instance list | add [NAME] | remove NAME | start NAME | stop NAME | start-all | stop-all | status NAME');
     }
+  } else if (cmd === 'heartbeat') {
+    // Continuous inspection is a separate command so an operator or a scheduler
+    // can run one cycle without starting a daemon. --watch is opt-in and is
+    // meant to be started by the user, never launched implicitly by an agent.
+    const { parseHeartbeatArgs, runHeartbeat, createHeartbeatRunner } = await import('./heartbeat.js');
+    const opts = parseHeartbeatArgs(rest.slice(1));
+    if (!opts.watch) {
+      const result = await runHeartbeat(opts);
+      console.log(JSON.stringify(result, null, 2));
+      // An uncertain verdict is not a pass. Schedulers need a non-zero exit to
+      // know that a cycle did not produce evidence of health.
+      if (result.status === 'skipped' || result.verdict === 'critical' || result.verdict === 'uncertain') process.exitCode = 1;
+    } else {
+      const runner = await createHeartbeatRunner({ ...opts, onCycle: (result, cycle) => console.log(JSON.stringify({ cycle, ...result }, null, 2)) });
+      const finish = () => runner.stop();
+      process.on('SIGINT', finish);
+      process.on('SIGTERM', finish);
+      await runner.loop;
+    }
   } else if (cmd === 'status') console.log(JSON.stringify(await request('/status'), null, 2));
   else if (cmd === 'diagnose-upgrade') console.log(JSON.stringify(upgradeDiagnosis(), null, 2));
   else if (cmd === 'doctor') console.log(JSON.stringify(await doctor(), null, 2));
@@ -255,6 +274,6 @@ try {
       ? await raw()
       : await callWithWaitingRecovery({ name, args: parsed, rawCall: rawToolCall, maxWaitMs: Number(process.env.AIB_AUTO_WAIT_MS || 120000) });
     console.log(JSON.stringify(result, null, 2));
-  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin]');
+  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run]');
 } catch (e) { console.error(e.message); process.exitCode = 1; }
 
