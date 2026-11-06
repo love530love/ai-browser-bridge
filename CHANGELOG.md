@@ -1,3 +1,39 @@
+## 0.36.0 — 2026-11-06（**多宿主并发基座：多个装了扩展的浏览器互不抢占**）
+
+用户目标：系统 Chrome、Canary/Dev、Codex/ChatGPT 等 Agent 内置浏览器、不同版本扩展同时使用时，任何一方都不被阻止或抢占；多个 Agent 各自操作各自浏览器或同一页面都能把任务做完；不设能力禁区，安全性由 agent 判断，项目只提升能力、强化兜底并诚实返回。
+
+### 根因（实测，非推断）
+
+`src/server.js` 的 `if (extension) ws.close(4003, 'Another Chrome profile is already connected')` 把「先连上的浏览器赢」写成协议；`current` / `queue` / `extensionVersion` / `extensionBrowser` 全是单值，一个宿主卡 20 秒所有 agent 一起等；`leases.js` 的键是裸 `tabId`，而 Chrome tab id 只在单个浏览器进程内唯一。0.35.0 的多实例架构只是把「一个独占」复制成「多个独占」。
+
+### 交付
+
+- 新增 `src/host-registry.js`：`HostRegistry`（对等宿主登记/同 hostId 重连替换/primary 提升/公开投影）、`negotiateHandshake`（protocol v2，缺字段落 baseline 且**永不因版本错配拒绝**）、`featureFlagsFor`（WebMCP Origin Trial 149+、`outputSchema` 159.0.8140.0+、无窗口宿主的 UIA hints）、`scopeKey`、`pickDispatchable`（跳过忙宿主 + aging + agent 轮转）、`CommandLedger`（幂等账本）。
+- `src/server.js`：删除 4003 独占拒绝（clients 上限 8→64）；`inFlight: Map<hostId, job>` 实现**每宿主一个 in-flight 槽位**；`pump()` 按宿主并发派发；结果按 `(hostId, command id)` 双匹配，跨宿主伪造回包不结算他人任务；`drop()` 在有同伴时只隔离该宿主并保留其排队任务等待重连；`queueLimit = max(16, 16 × 宿主数)`；主要宿主断开时提升新 primary，并把未显式路由的任务重新绑定过去。
+- **所有工具**新增两个可选路由参数：`hostId`（绑定命令与 tab 租约到指定浏览器）、`commandId`（重发只回放账本结果、绝不二次派发写操作）。两者由服务消费，不转发给页面；`validateCall` 拒绝含 `:` / `/` 的伪造 hostId。
+- `src/leases.js`：租约键支持可选 `hostId` 维度（`hostId:tabId`），持久化格式向后兼容；未提供 hostId 的旧调用继续使用裸 tabId 键，行为逐字不变。
+- 新工具 `browser_hosts`（意图索引新增 `fleet` 组）：列出全部宿主的 hostId、协议/扩展/Chrome 版本、hostKind、能力 hints、socket 占用进程、in-flight 命令；`hostKindObserved` 由 socket owner 推导 non-chrome.exe 的 agent 内置浏览器。状态端点新增 `hostCount` / `hosts[]` / `activeCount` / `activeByHost`。
+- `extension/worker.js`：hostId 持久化在该浏览器自己的 `chrome.storage.local`（不同渠道天然不同、重连身份稳定）；hello 带 `protocolVersion` / `hostId` / `hostKind` / `extensionId`；result 与 tab-removed 带 hostId；4003 文案改为「服务仍是单宿主旧版本」而不是让用户关掉另一个浏览器；新增 4004（同一浏览器新连接接管）。
+- 明确不做的：显式指定 `hostId` 的任务在宿主掉线时返回 `waiting` + `browser_hosts`，**绝不静默改派**；能力 hints 从不作为拒绝理由；不为非 chrome.exe 宿主设禁区。
+
+### 验证
+
+- 新增 `test/multi-host.test.js` **17/17**：3 宿主并发无拒绝、3 个命令同时派发、跨宿主伪造 result 不结算、断一宿主其余继续工作、未知 hostId 不静默改路由、commandId 只派发一次、4004 接管、旧扩展 baseline 握手、tabId 跨宿主租约隔离。
+- `test/bridge.test.js` **29/29** 全绿：单宿主路径（连接/重连/版本上报/串行/超时/断开/队列满/launch）逐字保持旧行为。旧的「第二个 Chrome 应被 4003 关闭」断言改为「第二个浏览器应被接纳为对等宿主」。
+- 全量 `npm test` 由 699 增至 **716**（一条陈旧参数列表断言已按 0.36.0 契约更新）。
+- 新增 [docs/HIGH-CONCURRENCY-ROADMAP.md](docs/HIGH-CONCURRENCY-ROADMAP.md)：五个并行视角产出的 S01–S16 / F01–F28 / C1–C14 / D1–D16 极端场景库、L1/L2/L3 现实性等级、P0–P5 分期排期、SLO 与故障注入、依赖演进路径；刻意收录 L3 前瞻构想。
+
+### 追加：多宿主下的扩展重载判定与清错边界（同一 0.36.0 内）
+
+- 真机首次 `browser_reload_extension` 返回 `extension_reload_not_observed`，而 `observedSessionId` 是**另一个宿主**的会话。根因：`waitForReload` 用全局 `extensionSessionId`（primary 镜像）判断重载；目标宿主断开后 `promotePrimary` 把镜像切到同伴，同伴的旧 session 被误当成新 session，但版本仍是 0.35.1。
+- 修复：等待条件改为「sessionId 不在重载前快照中 + 扩展版本 == VERSION + 连接时间晚于重载开始」；结果携带 `hostId` / `requestedHostId` / `staleHosts` / `partialHosts` / 超时时的 `hosts` 快照；`errorsPage` 透传 `hostId`；`clearExtensionErrorsViaUia(hostId)` 绑定重载宿主。新增静态源码断言防回归。
+- 真机复核：`browser_reload_extension {hostId:"legacy-31c0…", confirmation:"reload_extension_once"}` → `status:success` / `verified:true` / `hostId:"h-0b47…"` / `hostCount:2`；`doctor ok:true`，service / manifest / extension 全为 0.36.0，运行 buildId 与源码一致；`browser_hosts` 显示 **ChatGPT 内置浏览器（Chrome 157.0.8103.39 / pid 74800 / agent_embedded）与系统 Chrome（156.0.8078.49 / pid 15944）同时在线**，两者均 0.36.0 / protocol 2 / 持久 hostId，0 次 4003。
+- **清错边界（不粉饰）**：`errorListCleared:false`。服务按 `extensionOwner.pid=15944` 精确绑定 UIA 时该进程报 `no_chrome_window`；不绑定 PID 直接复核时脚本确实找到 `chrome://extensions` 窗口（pid 14900、windowHandle 66568、地址栏验证通过），但页面重载后 Document 在 9 秒内不可读，两次均为 `page_not_ready` / `dispatched:false` / `clearedState:"unknown"`，按设计**没有点击任何东西**。因此扩展错误列表**未被清除**，状态是「未知」而不是「已清空」。需把该 Chrome 窗口显示到前台后重试，或在各浏览器内手动点 Clear all；项目不替用户启动 GUI、不抢前台、不把 unknown 写成成功。
+
+### 已知边界（诚实说明）
+
+跨实例共享租约、持久化结果账本、epoch/fencing、docEpoch 栅栏、半开连接主动探测、坐标按 windowId 绑定、模型驱动调度、WebMCP 原生工具统一能力面、影子页与联邦均**未实现**，落在 P1 及以后。不带 `hostId` 的默认调用仍落 primary 且租约用裸 tabId 键——多 Agent 场景必须显式传 `hostId` 才完全隔离。旧扩展（无 hostId）重连会换 `legacy-*` id。
+
 ## 0.35.1 — 2026-11-06（**修复扩展错误列表「假清除」+ 扩展占用者可见**）
 
 一次真机复核发现的**误报 clean** 缺陷：`browser_reload_extension` 返回 `errorListCleared: true`，但用户看到红色错误列表仍在、占用状态也没变。审计结果里其实早有矛盾信号（`attempt 1 = failed / clear_extension_errors_timeout`、`reloaded: false`、`reloadMethod: none`），被当成成功引用了一整轮。

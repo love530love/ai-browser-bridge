@@ -1,3 +1,4 @@
+import { isValidHostId } from './host-registry.js';
 import { RECIPE_STEP_TOOLS } from './recipes.js';
 import {
   RECIPE_RUN_CONFIRMATION, BOOKMARKS_WRITE_CONFIRMATION, HISTORY_DELETE_CONFIRMATION,
@@ -25,8 +26,23 @@ const uploadExpectation = {
 const agent = text(120);
 const wait = { type: 'boolean' };
 const timeoutMs = (maximum = 60000) => ({ type: 'integer', minimum: 100, maximum });
+// Every tool accepts the same two routing arguments. They are optional and
+// never required, so a caller that knows nothing about multi-host operation
+// behaves exactly as before and lands on the primary host. `hostId` scopes a
+// command (and its tab lease) to one specific browser; `commandId` makes a
+// resend idempotent instead of dispatching an unprovable second write.
+const ROUTING_ARGS = {
+  hostId: {
+    type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$',
+    description: 'Optional. Route this command to one connected browser host; see browser_hosts. Omit it to use the primary host. Tab ids are only unique within one browser, so a hostId also scopes tab leases.'
+  },
+  commandId: {
+    type: 'string', minLength: 1, maxLength: 120,
+    description: 'Optional. Caller-supplied idempotency key. Resending the same commandId replays the recorded outcome instead of dispatching a second write.'
+  }
+};
 const schema = (properties, required = Object.keys(properties)) => ({
-  type: 'object', properties, required, additionalProperties: false
+  type: 'object', properties: { ...properties, ...ROUTING_ARGS }, required, additionalProperties: false
 });
 const tool = (name, description, properties = {}, required, readOnly = false) => ({
   name, description, inputSchema: schema(properties, required),
@@ -92,6 +108,7 @@ export const TOOLS = [
   tool('browser_launch', 'Start the user\'s own Chrome when nothing is running. This is normally automatic: any call that needs the extension starts the browser and then runs itself, so "the browser is not open" is not a dead end. Call it explicitly only to warm the browser up before a batch of work. Refuses with status=not_dispatched/reason=chrome_already_running when any chrome process exists, because a second instance means a second profile and that loses cookies and logins. Refuses with reason=no_used_profile_available when no installed Chrome channel has a profile with history in it, because opening an empty profile looks like a wiped session. The binary is chosen by which user-data directory actually holds a used profile, so a Canary/SxS/Beta install is not used just because the registry resolves to it first. Passes no --user-data-dir, no --profile-directory and no --incognito, so Chrome opens with the same profile a human double-clicking the icon gets. The window is created with SW_SHOWNOACTIVATE, so a background task does not pull the screen away from the user; activated:false is measured before/after, not promised. Returns extensionConnected:true only after the bridge extension actually dials back in; if the browser started but the extension did not connect, the result is uncertain rather than success. Never use this to "reset" a browser that is already running.', { url: text(8000), agent }, []),
   tool('browser_execution_profile', 'Read the deterministic browser execution profile and offline fallback order. This is answered locally by the bridge and does not depend on GPT, Chrome built-in AI, or an extension round trip.', { tabId, agent }, [], true),
   tool('browser_queue_status', 'Read service queue, active command, connected extension, and scheduling guidance. Use when coordinating multiple agents or after a waiting result.', { agent }, [], true),
+  tool('browser_hosts', 'List every browser extension host connected to this service: system Chrome, Canary/Dev, and agent-embedded browsers alike. Each entry carries its hostId, protocol/extension/Chrome version, hostKind, capability hints, socket owner and in-flight command. Call this before routing work to a specific browser, then pass hostId on any tool to bind that command AND its tab lease to that host. Hosts are peers: none is refused, none is preferred by policy, and an omitted hostId uses the primary host only for backward compatibility. Capability flags are observations, never a denial - the agent decides what to attempt.', { agent }, [], true),
   tool('browser_wait_until_ready', 'Wait locally until the extension is connected and, by default, the service queue is idle. Use after status=waiting or temporary disconnects so unattended agents keep their task alive.', {
     timeoutMs: timeoutMs(),
     idle: { type: 'boolean' },
@@ -916,6 +933,9 @@ export function validateCall(name, args) {
     const p = s.properties[key];
     const detail = constraints(p);
     const fail = why => { throw new Error(`Invalid ${key}: ${JSON.stringify(value)}${why ? ` (${why})` : ''}. ${detail}`); };
+    // hostId becomes part of the tab-lease key. A colon or a slash here would
+    // let one host forge another host's scope, so validate it at the funnel.
+    if (key === 'hostId' && !isValidHostId(value)) fail('must match [A-Za-z0-9_-]{1,64}');
     if (p.enum && !p.enum.includes(value)) fail();
     if (p.type === 'number' && (typeof value !== 'number' || !Number.isFinite(value) || value < p.minimum || value > p.maximum)) fail();
     if (p.type === 'integer' && (!Number.isInteger(value) || value < p.minimum || value > (p.maximum ?? Number.MAX_SAFE_INTEGER))) fail();

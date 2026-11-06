@@ -42,6 +42,8 @@
 是否需要人类确认。服务端队列会优先处理只读诊断，其次处理事务型写入，再处理普通写入和导航，
 减少多 Agent 互相阻塞；但同一 tab 的写入仍应使用 tab lease 明确所有权。
 
+**0.36.0 起：多浏览器 / 多 Agent 并发**。多个装了扩展的浏览器（系统 Chrome、Canary/Dev、Agent 内置浏览器）可以同时连接且互不抢占，任一宿主卡住或断线不影响其他宿主。先调用 `browser_hosts` 取得各宿主的 `hostId`、版本、能力 hints 与 socket 占用者；随后**每个工具都传 `hostId`**，把命令及其 tab 租约绑定到那一个浏览器——不同浏览器的 tabId 会撞号。省略 `hostId` 会落到 primary（兼容旧调用）。写操作建议带 `commandId`，重发同一 id 只回放已记录结果，不会二次派发。指定宿主掉线时返回 `waiting` + `browser_hosts` 下一步，**不要静默改派到别的浏览器**。能力 hints 只帮助选路，绝不是拒绝；项目不设能力禁区，安全性由你判断并如实回报用户。
+
 文件上传使用 `browser_upload` 或 `browser_upload_verified`，不得再用历史屏幕坐标点击系统文件对话框。管理员先运行一次：
 
 ```powershell

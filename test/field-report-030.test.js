@@ -25,8 +25,14 @@ const worker = readFileSync(new URL('../extension/worker.js', import.meta.url), 
 test('browser_eval exists as a first-class tool, not a mode of another one', () => {
   const entry = tool('browser_eval');
   assert.ok(entry, 'the escape hatch must be discoverable by name');
-  assert.deepEqual(Object.keys(entry.inputSchema.properties).sort(), ['agent', 'expression', 'maxChars', 'mode', 'tabId']);
+  // 0.36.0 gives every tool two optional routing arguments. They are consumed
+  // by the service and never forwarded to the page, so they must not become
+  // required and must not change the tool's own contract.
+  assert.deepEqual(Object.keys(entry.inputSchema.properties).sort(),
+    ['agent', 'commandId', 'expression', 'hostId', 'maxChars', 'mode', 'tabId']);
   assert.deepEqual(entry.inputSchema.required, ['tabId', 'expression']);
+  assert.ok(!entry.inputSchema.required.includes('hostId'));
+  assert.ok(!entry.inputSchema.required.includes('commandId'));
   // Read mode is the default, so the schema has to name both values.
   assert.deepEqual(entry.inputSchema.properties.mode.enum, ['read', 'write']);
   // It can write, so policy must not treat it as a read.

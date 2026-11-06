@@ -30,8 +30,8 @@ export const WRITE_TOOLS = new Set([
   'browser_dialog', 'browser_drag', 'browser_emulation', 'browser_init_script',
   'browser_network_rules',
   // A recipe run is a sequence of writes on one tab. Treating it as a read
-  // because it is one call would let two agents replay into the same page at the
-  // same time.
+  // because it is one call would let two agents replay into the same page at
+  // the same time.
   'browser_recipe_run',
   // browser_popup is governed as a whole even though probe and reveal are
   // reads, because its open and choose actions click a trigger and then a
@@ -54,6 +54,12 @@ const clampTtl = value => {
   if (!Number.isFinite(ttl)) return DEFAULT_LEASE_TTL_MS;
   return Math.min(600000, Math.max(1000, Math.trunc(ttl)));
 };
+
+// Chrome tab ids are unique only inside one browser process. Two browsers both
+// have a tab 7, so a bare-number key lets one host lock the other host's tab.
+// hostId stays optional: callers that do not supply it (every pre-0.36 caller
+// and the whole existing test suite) keep the exact old key and record shape.
+const keyOf = (tabId, hostId) => hostId ? `${hostId}:${tabId}` : String(tabId);
 
 export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_MS, now = () => Date.now(), delay = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   const leases = new Map();
@@ -88,7 +94,7 @@ export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_M
       for (const record of raw?.leases ?? []) {
         if (!record || !Number.isInteger(record.tabId) || typeof record.agent !== 'string' || typeof record.leaseId !== 'string') continue;
         if (!(record.expiresAt > now())) continue;
-        leases.set(String(record.tabId), { ...record, ttlMs: clampTtl(record.ttlMs) });
+        leases.set(keyOf(record.tabId, record.hostId ?? null), { ...record, ttlMs: clampTtl(record.ttlMs) });
       }
     } catch {
       // Missing or corrupt file simply starts empty.
@@ -107,11 +113,12 @@ export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_M
     expiresAt: record.expiresAt,
     expiresInMs: Math.max(0, record.expiresAt - now()),
     // Backward-compatible name used by older MCP clients and e2e fixtures.
-    remainingMs: Math.max(0, record.expiresAt - now())
+    remainingMs: Math.max(0, record.expiresAt - now()),
+    ...(record.hostId ? { hostId: record.hostId } : {})
   } : null;
 
-  function live(tabId) {
-    const key = String(tabId);
+  function live(tabId, hostId = null) {
+    const key = keyOf(tabId, hostId);
     const record = leases.get(key);
     if (!record) return null;
     if (record.expiresAt <= now()) { leases.delete(key); schedulePersist(); return null; }
@@ -125,7 +132,7 @@ export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_M
     return removed;
   }
 
-  function conflict(record, { tabId, agent, tool } = {}) {
+  function conflict(record, { tabId, hostId = null, agent, tool } = {}) {
     const remaining = Math.max(0, record.expiresAt - now());
     return {
       status: 'waiting',
@@ -133,6 +140,7 @@ export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_M
       reason: 'tab_write_lease_conflict',
       ...(tool ? { tool } : {}),
       tabId,
+      ...(hostId ? { hostId } : {}),
       requestedAgent: agent ?? null,
       holder: record.agent,
       holderLeaseId: record.leaseId,
@@ -142,90 +150,92 @@ export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_M
       // operation: retrying claim/renew here is what previously spun the
       // auto-recovery loop into a 20s job timeout and a disconnected extension.
       nextPollTool: 'browser_tab_lease',
-      nextPollArgs: { tabId },
+      nextPollArgs: { tabId, ...(hostId ? { hostId } : {}) },
       recommendedNextAction: 'Keep the task alive. Poll browser_tab_lease until the holder releases or the lease expires, then retry with the same agent.',
       lease: normalize(record)
     };
   }
 
-  function missing(tabId, agent, tool) {
+  function missing(tabId, agent, tool, hostId = null) {
     return {
       status: 'waiting',
       retryable: true,
       reason: 'tab_write_lease_missing',
       ...(tool ? { tool } : {}),
       tabId,
+      ...(hostId ? { hostId } : {}),
       requestedAgent: agent ?? null,
       suggestedDelayMs: 1000,
       nextPollTool: 'browser_claim_tab',
-      nextPollArgs: { tabId, agent, wait: false },
+      nextPollArgs: { tabId, agent, wait: false, ...(hostId ? { hostId } : {}) },
       recommendedNextAction: 'Acquire the tab lease with browser_claim_tab before continuing writes.'
     };
   }
 
-  async function waitForRelease(tabId, agent, budgetMs) {
+  async function waitForRelease(tabId, agent, budgetMs, hostId = null) {
     const started = now();
     while (now() - started < budgetMs) {
-      const held = live(tabId);
+      const held = live(tabId, hostId);
       if (!held || held.agent === agent) return held;
       await delay(Math.min(500, Math.max(50, Math.min(held.expiresAt - now(), budgetMs - (now() - started)))));
     }
-    return live(tabId);
+    return live(tabId, hostId);
   }
 
-  function claim({ tabId, agent, ttlMs: requested, wait = false } = {}) {
+  function claim({ tabId, hostId = null, agent, ttlMs: requested, wait = false } = {}) {
     const ttl = clampTtl(requested ?? ttlMs);
-    if (wait) return claimWaiting({ tabId, agent, ttl });
-    const existing = live(tabId);
-    if (existing && existing.agent !== agent) return conflict(existing, { tabId, agent });
-    return acquire(tabId, agent, ttl, existing);
+    if (wait) return claimWaiting({ tabId, hostId, agent, ttl });
+    const existing = live(tabId, hostId);
+    if (existing && existing.agent !== agent) return conflict(existing, { tabId, hostId, agent });
+    return acquire(tabId, agent, ttl, existing, hostId);
   }
 
-  async function claimWaiting({ tabId, agent, ttl }) {
+  async function claimWaiting({ tabId, hostId = null, agent, ttl }) {
     const budget = Math.min(ttl, MAX_LEASE_WAIT_MS);
-    const existing = await waitForRelease(tabId, agent, budget);
-    if (existing && existing.agent !== agent) return conflict(existing, { tabId, agent });
-    return acquire(tabId, agent, ttl, existing);
+    const existing = await waitForRelease(tabId, agent, budget, hostId);
+    if (existing && existing.agent !== agent) return conflict(existing, { tabId, hostId, agent });
+    return acquire(tabId, agent, ttl, existing, hostId);
   }
 
-  function acquire(tabId, agent, ttl, existing) {
+  function acquire(tabId, agent, ttl, existing, hostId = null) {
+    const key = keyOf(tabId, hostId);
     const stamp = now();
     if (existing && existing.agent === agent) {
       const renewed = { ...existing, ttlMs: ttl, lastActiveAt: stamp, lastTool: 'browser_claim_tab', renewCount: (existing.renewCount ?? 0) + 1, expiresAt: stamp + ttl };
-      leases.set(String(tabId), renewed);
+      leases.set(key, renewed);
       persist();
       return normalize(renewed);
     }
-    const record = { tabId, agent, leaseId: randomUUID(), acquiredAt: stamp, lastActiveAt: stamp, lastTool: 'browser_claim_tab', renewCount: 0, ttlMs: ttl, expiresAt: stamp + ttl };
-    leases.set(String(tabId), record);
+    const record = { tabId, ...(hostId ? { hostId } : {}), agent, leaseId: randomUUID(), acquiredAt: stamp, lastActiveAt: stamp, lastTool: 'browser_claim_tab', renewCount: 0, ttlMs: ttl, expiresAt: stamp + ttl };
+    leases.set(key, record);
     persist();
     return normalize(record);
   }
 
-  function renew({ tabId, agent, ttlMs: requested } = {}) {
-    const existing = live(tabId);
-    if (!existing) return missing(tabId, agent, 'browser_renew_tab');
-    if (existing.agent !== agent) return conflict(existing, { tabId, agent, tool: 'browser_renew_tab' });
+  function renew({ tabId, hostId = null, agent, ttlMs: requested } = {}) {
+    const existing = live(tabId, hostId);
+    if (!existing) return missing(tabId, agent, 'browser_renew_tab', hostId);
+    if (existing.agent !== agent) return conflict(existing, { tabId, hostId, agent, tool: 'browser_renew_tab' });
     const ttl = clampTtl(requested ?? existing.ttlMs);
     const stamp = now();
     const renewed = { ...existing, ttlMs: ttl, lastActiveAt: stamp, lastTool: 'browser_renew_tab', renewCount: (existing.renewCount ?? 0) + 1, expiresAt: stamp + ttl };
-    leases.set(String(tabId), renewed);
+    leases.set(keyOf(tabId, hostId), renewed);
     persist();
     return normalize(renewed);
   }
 
-  function release({ tabId, agent } = {}) {
-    const existing = live(tabId);
+  function release({ tabId, hostId = null, agent } = {}) {
+    const existing = live(tabId, hostId);
     if (existing && existing.agent !== agent) throw new Error(`Tab is leased by ${existing.agent}`);
-    leases.delete(String(tabId));
+    leases.delete(keyOf(tabId, hostId));
     persist();
-    return { released: true, tabId, previousHolder: existing?.agent ?? null, previousLeaseId: existing?.leaseId ?? null };
+    return { released: true, tabId, ...(hostId ? { hostId } : {}), previousHolder: existing?.agent ?? null, previousLeaseId: existing?.leaseId ?? null };
   }
 
   // Internal cleanup: a closed tab can never be written again, so holding a
   // lease on it would only block the next agent.
-  function releaseTab(tabId) {
-    const key = String(tabId);
+  function releaseTab(tabId, hostId = null) {
+    const key = keyOf(tabId, hostId);
     if (!leases.delete(key)) return false;
     persist();
     return true;
@@ -234,31 +244,31 @@ export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_M
   // Called before a governed write is dispatched. Returns null when the write
   // may proceed, otherwise a waiting payload. Owning writes renew the lease so a
   // long task is not evicted by its own heartbeat gap.
-  function guard(tabId, agent, tool) {
+  function guard(tabId, agent, tool, hostId = null) {
     // Enforced here as well as at the call site so the invariant "reads are
     // never blocked by a lease" cannot be broken by a new call site.
     if (!WRITE_TOOLS.has(tool)) return null;
-    const existing = live(tabId);
+    const existing = live(tabId, hostId);
     if (!existing) return null;
     if (agent && existing.agent === agent) {
       const stamp = now();
       const renewed = { ...existing, lastActiveAt: stamp, lastTool: tool, renewCount: (existing.renewCount ?? 0) + 1, expiresAt: stamp + (existing.ttlMs ?? ttlMs) };
-      leases.set(String(tabId), renewed);
+      leases.set(keyOf(tabId, hostId), renewed);
       schedulePersist();
       return null;
     }
-    return conflict(existing, { tabId, agent, tool });
+    return conflict(existing, { tabId, hostId, agent, tool });
   }
 
   // Reads remain unblocked for every agent, but a holder's own reads are a
   // useful heartbeat during long unattended workflows. This prevents a slow
   // heavy-page inspection from expiring the lease before the next write.
-  function heartbeat(tabId, agent, tool = 'read') {
+  function heartbeat(tabId, agent, tool = 'read', hostId = null) {
     if (!agent) return false;
-    const existing = live(tabId);
+    const existing = live(tabId, hostId);
     if (!existing || existing.agent !== agent) return false;
     const stamp = now();
-    leases.set(String(tabId), { ...existing, lastActiveAt: stamp, lastTool: tool, expiresAt: stamp + (existing.ttlMs ?? ttlMs) });
+    leases.set(keyOf(tabId, hostId), { ...existing, lastActiveAt: stamp, lastTool: tool, expiresAt: stamp + (existing.ttlMs ?? ttlMs) });
     schedulePersist();
     return true;
   }
@@ -267,7 +277,7 @@ export function createLeaseStore({ stateFile = null, ttlMs = DEFAULT_LEASE_TTL_M
   sweep();
 
   return {
-    get: tabId => normalize(live(tabId)),
+    get: (tabId, hostId = null) => normalize(live(tabId, hostId)),
     list: () => { sweep(); return [...leases.values()].sort((a, b) => a.tabId - b.tabId).map(normalize); },
     claim,
     renew,

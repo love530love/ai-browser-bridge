@@ -49,6 +49,9 @@ export const TOOL_GROUPS = [
     'browser_downloads', 'browser_download_wait', 'browser_downloads_control'
   ] },
 
+  { id: 'fleet', purpose: '多浏览器宿主', tools: [
+    'browser_hosts'
+  ] },
   { id: 'debug', purpose: '诊断、队列、能力查询', tools: [
     'browser_health', 'browser_debug', 'browser_failure_help', 'browser_queue_status',
     'browser_wait_until_ready', 'browser_capability_guide', 'browser_bridge_modes',

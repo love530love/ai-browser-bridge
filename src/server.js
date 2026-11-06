@@ -11,6 +11,10 @@ import { TOOLS, validateCall } from './tools.js';
 import { createTasks } from './tasks.js';
 import { errorCategory } from './diagnostics.js';
 import { createLeaseStore, LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
+import {
+  HostRegistry, CommandLedger, negotiateHandshake, pickDispatchable,
+  SERVICE_PROTOCOL_VERSION
+} from './host-registry.js';
 import { createAgentPolicy } from './policy.js';
 import { protectedUiPlan } from './protected-ui.js';
 import { createMaintenanceStore } from './maintenance.js';
@@ -115,6 +119,14 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   config = { ...config, uploadRoots: config.uploadRoots ?? [] };
   let extension = null;
   let current = null;
+  // `extension` and the version fields are mirrors of the primary host so that
+  // every pre-0.36 status consumer keeps working. The registry is the source of
+  // truth: all connected browsers are peers, each with its own in-flight slot.
+  const hosts = new HostRegistry({ serviceVersion: VERSION });
+  const inFlight = new Map();
+  const commandLedger = new CommandLedger();
+  const hostGrace = new Map();
+  let lastAgent = null;
   let requeueGrace = null;
   let extensionPaused = false;
   let extensionSessionId = null;
@@ -380,6 +392,21 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       const owner = resolveExtensionOwner(remotePort, config.port);
       return owner ? { ...owner, nonChromeHost: isNonChromeHost(owner) } : null;
     })(),
+    // Every connected browser is a peer. A caller picks one with `hostId`; it
+    // no longer has to win a race for the only socket. Kept lightweight here
+    // (no netstat per host); browser_hosts adds the process-owner details.
+    hostCount: hosts.size(),
+    hosts: hosts.snapshot().map(host => ({
+      ...host,
+      inFlight: inFlight.has(host.hostId),
+      activeCommand: inFlight.has(host.hostId) ? {
+        id: inFlight.get(host.hostId).id,
+        tool: inFlight.get(host.hostId).name,
+        ageMs: Date.now() - inFlight.get(host.hostId).created
+      } : null
+    })),
+    activeCount: inFlight.size,
+    activeByHost: [...inFlight.entries()].map(([hostId, job]) => ({ hostId, id: job.id, tool: job.name, ageMs: Date.now() - job.created })),
     maintenance: maintenanceState(),
     tabLeases: leases.list(),
     connected: extension?.readyState === WebSocket.OPEN,
@@ -466,32 +493,90 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     // An agent may be capped to a shorter lease than it asked for.
     const candidates = [args.ttlMs, decision?.maxLeaseMs].filter(value => Number.isFinite(value));
     const ttlMs = candidates.length ? Math.min(...candidates) : undefined;
-    if (name === 'browser_tab_lease') return { tabId, lease: leases.get(tabId) };
-    if (name === 'browser_release_tab') return leases.release({ tabId, agent: args.agent });
-    if (name === 'browser_renew_tab') return leases.renew({ tabId, agent: args.agent, ttlMs });
-    return leases.claim({ tabId, agent: args.agent, ttlMs, wait: args.wait === true });
+    const hostId = args.hostId ?? null;
+    if (name === 'browser_tab_lease') return { tabId, lease: leases.get(tabId, hostId) };
+    if (name === 'browser_release_tab') return leases.release({ tabId, hostId, agent: args.agent });
+    if (name === 'browser_renew_tab') return leases.renew({ tabId, hostId, agent: args.agent, ttlMs });
+    return leases.claim({ tabId, hostId, agent: args.agent, ttlMs, wait: args.wait === true });
   }
   function finish(job, error, result) {
     clearTimeout(job.timer);
+    if (inFlight.get(job.hostId) === job) inFlight.delete(job.hostId);
+    // `current` is the legacy single-active-job mirror. With several hosts it
+    // must represent *any* live job: finishing the newest command must not
+    // leave a stale pointer that makes the service look permanently busy.
+    current = inFlight.values().next().value ?? null;
+    if (job.commandId) commandLedger.record(job.commandId, {
+      hostId: job.hostId, tool: job.name,
+      outcome: error ? 'error' : result?.status ?? 'unknown',
+      dispatched: result?.dispatched ?? null
+    });
     const status = ['success', 'uncertain', 'failed', 'waiting', 'ready', 'denied', 'not_dispatched'].includes(result?.status) ? result.status : null;
     audit({ time: new Date().toISOString(), id: job.id, tool: job.name, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : status === 'uncertain' ? 'uncertain' : status === 'duplicate_suppressed' ? 'denied' : 'ok', resultStatus: status, dispatched: typeof result?.dispatched === 'boolean' ? result.dispatched : null, errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
     if (error) job.reject(new Error(error)); else job.resolve(result);
   }
-  function drop(reason, { keepQueued = false } = {}) {
-    extension = null;
-    extensionVersion = null;
-    extensionBrowser = null;
-    // Kept on purpose: a native host registration outlives the connection, so
-    // remembering the id lets a later status call explain a stale manifest
-    // instead of reporting "unknown extension".
-    extensionSessionId = null;
-    if (current) {
+  function syncPrimaryMirrors() {
+    const primary = hosts.primary();
+    extension = primary?.ws ?? null;
+    extensionVersion = primary?.extensionVersion ?? null;
+    extensionBrowser = primary?.browser ?? null;
+    extensionId = primary?.extensionId ?? null;
+    extensionSessionId = primary?.sessionId ?? null;
+    if (primary) extensionPaused = false;
+  }
+
+  // A host that still has peers must not take their work down with it. Only this
+  // host's in-flight job is resolved; its queued jobs keep their place in line
+  // for a bounded reconnect window instead of being failed for someone else's
+  // network problem.
+  function dropHostOnly(hostId, reason) {
+    const active = inFlight.get(hostId);
+    if (active) {
+      const possiblyDispatchedWrite = !active.tool.annotations?.readOnlyHint;
+      finish(active, reason, possiblyDispatchedWrite ? { status: 'uncertain' } : undefined);
+      inFlight.delete(hostId);
+    }
+    clearTimeout(hostGrace.get(hostId));
+    const grace = setTimeout(() => {
+      hostGrace.delete(hostId);
+      for (let i = queue.length - 1; i >= 0; i -= 1) if (queue[i].hostId === hostId) {
+        const [job] = queue.splice(i, 1);
+        finish(job, `Not executed: host ${hostId} did not reconnect within ${RECONNECT_GRACE_MS}ms.`);
+      }
+      pump();
+    }, RECONNECT_GRACE_MS);
+    grace.unref?.();
+    hostGrace.set(hostId, grace);
+    pump();
+  }
+
+  // Callers that did not name a host follow the live primary. A caller that did
+  // name one stays bound to that browser and waits for it to come back.
+  function promotePrimary() {
+    syncPrimaryMirrors();
+    const next = hosts.primaryHostId;
+    if (!next) return;
+    for (const job of queue) if (!job.explicitHost && job.hostId !== next) job.hostId = next;
+  }
+
+  function drop(reason, { keepQueued = false, hostId = null } = {}) {
+    const peers = hosts.list().filter(host => host.hostId !== hostId);
+    if (hostId && peers.length > 0) { dropHostOnly(hostId, reason); return; }
+    const active = hostId ? inFlight.get(hostId) : current;
+    if (active) {
       // A disconnected or stopped extension may have accepted a write before its
       // result was lost. Preserve the transport error while separately recording
       // the action outcome as uncertain; never infer a safe retry from rejection.
-      const possiblyDispatchedWrite = !current.tool.annotations?.readOnlyHint;
-      finish(current, reason, possiblyDispatchedWrite ? { status: 'uncertain' } : undefined);
-      current = null;
+      const possiblyDispatchedWrite = !active.tool.annotations?.readOnlyHint;
+      finish(active, reason, possiblyDispatchedWrite ? { status: 'uncertain' } : undefined);
+      inFlight.delete(active.hostId);
+    }
+    if (peers.length === 0) {
+      extension = null;
+      extensionVersion = null;
+      extensionBrowser = null;
+      // extensionId stays: a native host registration outlives the connection.
+      extensionSessionId = null;
     }
     clearTimeout(requeueGrace); requeueGrace = null;
     // One uncertain write must not fail everyone else's queued work. Keep the
@@ -502,27 +587,54 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         requeueGrace = null;
         for (const job of queue.splice(0)) finish(job, `Not executed: extension did not reconnect within ${RECONNECT_GRACE_MS}ms.`);
       }, RECONNECT_GRACE_MS);
+      requeueGrace.unref?.();
       return;
     }
     for (const job of queue.splice(0)) finish(job, 'Not executed: extension disconnected');
   }
-  function pump() {
-    if (stopped || current || !extension || queue.length === 0) return;
-    current = queue.shift();
-    const job = current;
+
+  // Routing arguments are consumed by the service, never forwarded as page
+  // arguments. An older extension sees exactly the args it always saw.
+  const dispatchArgs = job => {
+    const { hostId, commandId, ...rest } = job.args ?? {};
+    return rest;
+  };
+
+  function dispatchJob(job, host) {
+    inFlight.set(job.hostId, job);
+    current = job;
+    lastAgent = job.args?.agent ?? null;
+    host.commandsDispatched += 1;
     job.timer = setTimeout(() => {
       const readOnly = !!job.tool.annotations?.readOnlyHint;
       if (readOnly) {
-        current = null;
-        finish(job, null, { status: 'waiting', retryable: true, reason: 'read_timeout', tool: job.name, suggestedDelayMs: 1000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 5000, idle: true }, recommendedNextAction: 'Keep the task alive. Retry the read with mode:"cheap" or smaller budgets; do not treat this as bridge failure.' });
+        finish(job, null, { status: 'waiting', retryable: true, reason: 'read_timeout', tool: job.name, hostId: job.hostId, suggestedDelayMs: 1000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 5000, idle: true }, recommendedNextAction: 'Keep the task alive. Retry the read with mode:"cheap" or smaller budgets; do not treat this as bridge failure.' });
         pump();
         return;
       }
-      const socket = extension;
-      drop(`${job.name} timed out after ${jobTimeoutMs(job.name, job.args)}ms; outcome may be unknown. Inspect page before retrying.`, { keepQueued: true });
-      socket?.close(4000, 'Task timeout');
+      // An unobserved write is uncertain and non-retryable. Only this host is
+      // affected; every peer keeps executing.
+      drop(`${job.name} timed out after ${jobTimeoutMs(job.name, job.args)}ms; outcome may be unknown. Inspect page before retrying.`, { keepQueued: true, hostId: job.hostId });
+      try { host.ws.close(4000, 'Task timeout'); } catch { /* already closed */ }
     }, jobTimeoutMs(job.name, job.args));
-    extension.send(JSON.stringify({ type: 'command', id: job.id, name: job.name, args: job.args }));
+    host.ws.send(JSON.stringify({ type: 'command', id: job.id, name: job.name, args: dispatchArgs(job), hostId: job.hostId }));
+  }
+
+  function pump() {
+    if (stopped || queue.length === 0) return;
+    const available = new Set(hosts.list()
+      .filter(host => host.ws.readyState === WebSocket.OPEN && !host.paused)
+      .map(host => host.hostId));
+    // One in-flight command per host, not one for the whole service. A browser
+    // that stalls can no longer hold every other browser's work hostage.
+    while (true) {
+      const pick = pickDispatchable(queue, inFlight, { now: Date.now(), lastAgent, availableHostIds: available });
+      if (!pick) break;
+      const [job] = queue.splice(pick.index, 1);
+      const host = hosts.byId(job.hostId);
+      if (!host) { queue.push(job); break; }
+      dispatchJob(job, host);
+    }
   }
   function priorityFor(tool, name) {
     if (tool.annotations?.readOnlyHint) return { value: 10, name: 'read' };
@@ -901,10 +1013,27 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // Single place where a job enters the queue. Extracted so a capability that
   // needs to talk to the extension outside the normal call path (the self-reload)
   // goes through the same priority ordering and timeout handling.
-  function enqueueJob(name, tool, prepared) {
+  function enqueueJob(name, tool, prepared, routeArgs = prepared) {
+    // An agent that lost a response may resend the same commandId. Replaying
+    // the recorded outcome is the only honest answer: dispatching again could
+    // perform an unprovable second write.
+    const commandId = typeof routeArgs?.commandId === 'string' ? routeArgs.commandId : null;
+    const previous = commandLedger.check(commandId);
+    if (previous) return Promise.resolve({
+      status: 'duplicate_suppressed', replayed: true, commandId,
+      hostId: previous.hostId, tool: previous.tool, previousOutcome: previous.outcome,
+      dispatched: false,
+      recommendedNextAction: 'This commandId is already in the ledger. Nothing was dispatched again; re-observe the page before deciding whether to act.'
+    });
     return new Promise((resolve, reject) => {
       const priority = priorityFor(tool, name);
-      const job = { id: randomUUID(), name, tool, args: prepared, created: Date.now(), priority: priority.value, priorityName: priority.name, resolve, reject };
+      const explicitHost = typeof routeArgs?.hostId === 'string';
+      const job = {
+        id: randomUUID(), name, tool, args: prepared,
+        hostId: explicitHost ? routeArgs.hostId : (hosts.primaryHostId ?? 'primary'),
+        explicitHost, commandId,
+        created: Date.now(), priority: priority.value, priorityName: priority.name, resolve, reject
+      };
       const index = queue.findIndex(item => item.priority > job.priority);
       if (index === -1) queue.push(job); else queue.splice(index, 0, job);
       
@@ -981,8 +1110,16 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     // otherwise leaves the previous build's failures on screen and the panel
     // keeps saying the bridge is broken. This is best effort on purpose: a
     // failure to open the page must never turn a successful reload into an error.
-    const errorsPage = await call('browser_extension_errors', { action: 'open', ...(typeof args.agent === 'string' && args.agent ? { agent: args.agent } : {}) })
+    const errorsPage = await call('browser_extension_errors', {
+      action: 'open',
+      ...(typeof args.hostId === 'string' ? { hostId: args.hostId } : {}),
+      ...(typeof args.agent === 'string' && args.agent ? { agent: args.agent } : {})
+    })
       .catch(error => ({ status: 'failed', reason: 'extension_errors_page_unavailable', message: String(error?.message ?? error).slice(0, 200) }));
+    // A reload belongs to one host. Snapshot every connected session so a
+    // different browser being promoted to primary cannot be mistaken for the
+    // worker we just reloaded.
+    const previousSessions = new Set(hosts.list().map(host => host.sessionId));
     const previousSession = extensionSessionId;
     desktopOperation = { tool: name, startedAt };
     let reply;
@@ -1007,12 +1144,12 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       return { ...fallback, method: 'windows_ui_automation', focusRequired: true, foregroundTaken: true,
         fallbackReason: 'extension_did_not_self_reload' };
     }
-    const result = await waitForReload({ previousSession });
+    const result = await waitForReload({ previousSession, previousSessions, startedAt, hostId: args.hostId ?? null });
     desktopOperation = null;
     // Clear the list the reload left behind. The page was already brought
     // forward above, and the new worker has reconnected by now, so the error
     // list has been re-rendered against the new session.
-    const errors = await clearExtensionErrorsViaUia();
+    const errors = await clearExtensionErrorsViaUia(result.hostId ?? args.hostId ?? null);
     const described = describeErrorList(errors);
     // A verified reload with a red error list still on screen is not a clean
     // success: the panel is what the user reads, and it would keep saying the
@@ -1035,7 +1172,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // bar, which is browser chrome and therefore readable even when the page
   // exposes no document; requiring "exactly one Chrome window" made an ordinary
   // second window a silent skip that the reload result then reported as success.
-  async function clearExtensionErrorsViaUia() {
+  async function clearExtensionErrorsViaUia(hostId = null) {
     // UIA walks the windows of ONE process. When the connected extension lives
     // in a non-chrome.exe host (the Codex/ChatGPT built-in browser, for
     // example), the old default enumeration inspected a DIFFERENT browser's
@@ -1045,7 +1182,11 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     // walk to the process that actually holds the extension connection. The
     // script still verifies the address bar before reading or clicking, so an
     // explicit PID cannot become a blind click on an unrelated page.
-    const owner = resolveExtensionOwner(extension?._socket?.remotePort ?? null, config.port);
+    // Clear the list in the browser that actually held this reload, not in
+    // whichever host happens to be primary after the worker restarted.
+    const reloadedHost = hostId ? hosts.byId(hostId) : null;
+    const remotePort = reloadedHost?.remotePort ?? extension?._socket?.remotePort ?? null;
+    const owner = resolveExtensionOwner(remotePort, config.port);
     const boundTarget = Number.isSafeInteger(owner?.pid) && owner.pid > 0 ? { processId: owner.pid } : {};
     const attempts = [];
     let entry;
@@ -1078,21 +1219,45 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     return result;
   }
 
-  function waitForReload({ previousSession }) {
+  function waitForReload({ previousSession, previousSessions, startedAt = Date.now(), hostId = null }) {
     const deadline = Date.now() + reloadVerifyTimeoutMs;
+    // The global `extensionSessionId` mirror describes the *primary* host. In a
+    // fleet, promoting a different browser after the reloaded worker drops its
+    // socket swaps that mirror and makes an unrelated old session look new.
+    // Match on a genuinely new session that reports the expected version.
+    const before = previousSessions instanceof Set
+      ? previousSessions : new Set([previousSession].filter(Boolean));
+    const hostSnapshot = () => hosts.list().map(host => ({
+      hostId: host.hostId, sessionId: host.sessionId,
+      extensionVersion: host.extensionVersion, protocolVersion: host.protocolVersion,
+      connectedAt: host.connectedAt, connected: host.ws.readyState === WebSocket.OPEN
+    }));
     return new Promise(resolve => {
       const check = () => {
-        if (extension && extensionVersion === VERSION && extensionSessionId && extensionSessionId !== previousSession) {
-          return resolve({ status: 'success', retryable: false, reason: 'extension_reload_verified', dispatched: true,
+        const reloaded = hosts.list().find(host =>
+          !before.has(host.sessionId) && host.extensionVersion === VERSION &&
+          host.connectedAt >= startedAt - 5000);
+        if (reloaded) {
+          const stale = hosts.list()
+            .filter(host => host !== reloaded && host.extensionVersion !== VERSION)
+            .map(host => ({ hostId: host.hostId, extensionVersion: host.extensionVersion }));
+          return resolve({
+            status: 'success', retryable: false, reason: 'extension_reload_verified', dispatched: true,
             verified: true, method: 'chrome.runtime.reload', expectedVersion: VERSION, focusRequired: false,
-            previousSessionId: previousSession, extensionSessionId,
-            note: 'Reloaded in place by the extension itself. No window was focused, no tab was opened, no keystroke was sent.' });
+            previousSessionId: previousSession, extensionSessionId: reloaded.sessionId,
+            hostId: reloaded.hostId, requestedHostId: hostId, hostCount: hosts.size(),
+            ...(stale.length
+              ? { staleHosts: stale, partialHosts: true,
+                  note: 'This host reloaded in place. Other connected browsers still run an older extension: call browser_reload_extension again with each stale hostId.' }
+              : { note: 'Reloaded in place by the extension itself. No window was focused, no tab was opened, no keystroke was sent.' })
+          });
         }
         if (Date.now() > deadline) {
           return resolve({ status: 'uncertain', retryable: false, reason: 'extension_reload_not_observed', dispatched: true,
             verified: false, method: 'chrome.runtime.reload', expectedVersion: VERSION, focusRequired: false,
-            previousSessionId: previousSession, observedVersion: extensionVersion, observedSessionId: extensionSessionId,
-            message: 'The reload was dispatched but no new extension session with the expected version appeared in time. Inspect before calling again; do not assume the previous worker is still serving.' });
+            previousSessionId: previousSession, requestedHostId: hostId, hostCount: hosts.size(),
+            hosts: hostSnapshot(),
+            message: 'The reload was dispatched but no new extension session with the expected version appeared in time. Inspect the hosts list before calling again; do not assume the previous worker is still serving.' });
         }
         setTimeout(check, 250);
       };
@@ -1354,6 +1519,39 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     // disconnected: the guidance must not depend on the thing that is broken.
     if (name === 'browser_capability_guide') return capabilityGuide(args);
     if (name === 'browser_queue_status') return queueSnapshot();
+    if (name === 'browser_hosts') return {
+      status: 'success',
+      serviceVersion: VERSION,
+      protocolVersion: SERVICE_PROTOCOL_VERSION,
+      primaryHostId: hosts.primaryHostId,
+      hostCount: hosts.size(),
+      hosts: hosts.snapshot({ ownerFor: record => {
+        const owner = resolveExtensionOwner(record.remotePort, config.port);
+        return owner ? { ...owner, nonChromeHost: isNonChromeHost(owner) } : null;
+      } }).map(host => ({
+        ...host,
+        // The extension cannot know whether it is running inside another
+        // agent's embedded browser. The socket owner can, so report the
+        // observed kind separately from the declared hint.
+        hostKindObserved: host.owner?.nonChromeHost === true ? 'agent_embedded' : host.hostKind,
+        inFlight: inFlight.has(host.hostId),
+        activeCommand: inFlight.has(host.hostId) ? {
+          id: inFlight.get(host.hostId).id,
+          tool: inFlight.get(host.hostId).name,
+          ageMs: Date.now() - inFlight.get(host.hostId).created
+        } : null
+      })),
+      policy: {
+        exclusivity: 'none',
+        refusal: 'A second browser is never closed for connecting. Each host has its own in-flight slot, so a stalled browser cannot block its peers.',
+        capabilityFlags: 'Hints for the agent, never a denial. The bridge does not decide what is safe.',
+        hostId: 'Optional on every tool. Omit it for the primary host; supply it to bind a command and its tab lease to one browser.',
+        tabIds: 'Tab ids are unique only inside one browser. Leases are scoped by hostId when one is supplied.'
+      },
+      recommendedNextAction: hosts.size() > 1
+        ? 'Several browsers are connected. Pass hostId on each command to keep each agent on its own browser, and use commandId for writes that must not be replayed.'
+        : 'One browser is connected. Other browsers may connect at any time without displacing it.'
+    };
     if (name === 'browser_wait_until_ready') return waitUntilReady(args);
     // Governance is evaluated before anything is dispatched or queued, so a
     // denied call costs no queue slot and never reaches the extension.
@@ -1363,9 +1561,21 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       return decision;
     }
     if (name === 'browser_failure_help') return failureHelp(args, { readOnly: TOOLS.find(item => item.name === args.attemptedAction)?.annotations?.readOnlyHint === true });
-    if ((name === 'browser_prepare_coordinate' || (name === 'browser_action' && Object.hasOwn(args, 'x'))) && extensionVersion !== VERSION) {
+    // An explicitly routed task stays on its browser. Silently moving it to a
+    // different host would be the exact "wrong browser did the work" failure
+    // this release exists to end, so a missing host is a waiting result with a
+    // concrete next call rather than a reroute.
+    const targetHost = args.hostId ? hosts.byId(args.hostId) : hosts.primary();
+    if (args.hostId && !targetHost) return {
+      status: 'waiting', retryable: true, reason: 'host_not_connected', dispatched: false,
+      requestedHostId: args.hostId, availableHostIds: hosts.list().map(host => host.hostId), hostCount: hosts.size(),
+      nextPollTool: 'browser_hosts', nextPollArgs: {},
+      recommendedNextAction: 'Nothing was dispatched. Call browser_hosts to see the connected browsers, then use an available hostId or omit hostId for the primary host. An explicitly routed task is never silently moved to another browser.'
+    };
+    const targetVersion = targetHost?.extensionVersion ?? extensionVersion;
+    if ((name === 'browser_prepare_coordinate' || (name === 'browser_action' && Object.hasOwn(args, 'x'))) && targetVersion !== VERSION) {
       return { status: 'waiting', reason: 'coordinate_guard_version_mismatch', dispatched: false,
-        serviceVersion: VERSION, extensionVersion, recommendedNextAction: 'Load the matching extension before using coordinate actions. Preserve the task; do not replay an earlier write.' };
+        serviceVersion: VERSION, extensionVersion: targetVersion, hostId: targetHost?.hostId ?? null, recommendedNextAction: 'Load the matching extension before using coordinate actions. Preserve the task; do not replay an earlier write.' };
     }
     // The on-device model gate is answered here too: a write that has not been
     // judged never reaches the queue, so a blocked agent cannot burn slots
@@ -1421,7 +1631,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       verifySpec = checked.spec;
     }
     if (LEASE_TOOLS.has(name)) return leaseCall(name, args, decision);
-    if (!WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) leases.heartbeat(args.tabId, args.agent ?? null, name);
+    if (!WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) leases.heartbeat(args.tabId, args.agent ?? null, name, args.hostId ?? null);
     if (lease && lease !== owner) {
       return { status: 'waiting', retryable: true, reason: 'global_agent_task_lease', holder: lease, suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true }, recommendedNextAction: 'Keep the agent task alive and wait until the global task lease clears.', queue: queueSnapshot() };
     }
@@ -1433,9 +1643,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       if (!context.revived && autoLaunchEnabled) return reviveBrowser({ name, args, owner, context });
       return disconnectedResult();
     }
-    if (queue.length >= 16) return { status: 'waiting', retryable: true, reason: 'queue_full', suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true }, recommendedNextAction: 'Keep the task alive and wait for queued browser jobs to drain before retrying.', queue: queueSnapshot() };
+    // The backlog scales with the number of connected browsers: 16 per host,
+    // still bounded. A single browser keeps the exact old limit of 16, while a
+    // fleet is not strangled by a ceiling designed for one socket.
+    const queueLimit = Math.max(16, 16 * Math.max(1, hosts.size()));
+    if (queue.length >= queueLimit) return { status: 'waiting', retryable: true, reason: 'queue_full', suggestedDelayMs: 3000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true }, recommendedNextAction: 'Keep the task alive and wait for queued browser jobs to drain before retrying.', queue: queueSnapshot() };
     if (WRITE_TOOLS.has(name) && Number.isInteger(args.tabId)) {
-      const conflict = leases.guard(args.tabId, args.agent ?? null, name);
+      const conflict = leases.guard(args.tabId, args.agent ?? null, name, args.hostId ?? null);
       if (conflict) return { ...conflict, queue: queueSnapshot() };
     }
     if (name === 'browser_recipe_save') return recipeSaveCall(name, tool, args);
@@ -1459,7 +1673,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       }
       prepared = { ...args, recipe: loaded.recipe, variables: args.variables ?? {} };
     }
-    const promise = enqueueJob(name, tool, prepared);
+    const promise = enqueueJob(name, tool, prepared, args);
     let result = promise;
     if (name === 'browser_tabs') result = result.then(rows => filterTabs(rows, args));
     // The same static analysis browser_prepare_request exposes, attached to the
@@ -1475,7 +1689,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (tool.annotations?.readOnlyHint && boundariesFor(decision)) result = result.then(withContentBoundaries);
     // A closed tab can never be written again; drop its lease so the next agent
     // is not blocked by a record pointing at a tab that no longer exists.
-    if (name === 'browser_close' && Number.isInteger(args.tabId)) return result.finally(() => leases.releaseTab(args.tabId));
+    if (name === 'browser_close' && Number.isInteger(args.tabId)) return result.finally(() => leases.releaseTab(args.tabId, args.hostId ?? null));
     return result;
   }
   const tasks = createTasks({
@@ -1520,7 +1734,11 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       if (req.method === 'POST' && req.url === '/call') {
         if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON required' });
         const data = await body(req);
-        return json(res, 200, { result: await call(data.name, data.arguments ?? {}) });
+        const supplied = data.arguments ?? {};
+        // hostId may also be supplied at the envelope level by MCP clients that
+        // keep the tool's argument object untouched. An explicit argument wins.
+        const args = data.hostId && !Object.hasOwn(supplied, 'hostId') ? { ...supplied, hostId: data.hostId } : supplied;
+        return json(res, 200, { result: await call(data.name, args) });
       }
       return json(res, 404, { error: 'Not found' });
     } catch (e) {
@@ -1534,10 +1752,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   server.headersTimeout = 5000;
   const wss = new WebSocketServer({ noServer: true, maxPayload: 24 * 1024 * 1024, perMessageDeflate: false });
   server.on('upgrade', (req, socket, head) => {
-    if (req.url !== '/extension' || req.headers.host !== `127.0.0.1:${server.address().port}` || !/^chrome-extension:\/\/[a-p]{32}$/.test(req.headers.origin || '') || clients.size >= 8) {
+    // The old cap of 8 was a symptom of assuming one browser per service. A
+    // fleet of browsers (and their reconnecting sockets) needs real headroom;
+    // the pairing token and Origin check remain the actual access control.
+    if (req.url !== '/extension' || req.headers.host !== `127.0.0.1:${server.address().port}` || !/^chrome-extension:\/\/[a-p]{32}$/.test(req.headers.origin || '') || clients.size >= 64) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
-    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
+    wss.handleUpgrade(req, socket, head, ws => { ws._aibOrigin = req.headers.origin ?? null; wss.emit('connection', ws); });
   });
   wss.on('connection', ws => {
     clients.add(ws);
@@ -1548,25 +1769,36 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       try {
         const msg = JSON.parse(raw.toString());
         if (!authenticated) {
-          // Distinct close codes: the extension used to show the same "reconnecting"
-          // state for a wrong pairing key and for a second Chrome profile, which
-          // made both look like a broken bridge.
+          // A wrong key is still a hard refusal. A *second browser* is not:
+          // every authenticated extension is registered as a peer host. The
+          // 4003 exclusivity close is gone; a host that reconnects with the
+          // same hostId simply supersedes its own stale socket (4004).
           if (msg.type !== 'hello') { ws.close(4001, 'Authentication failed'); return; }
           if (!equal(msg.token, config.extensionToken)) { ws.close(4002, 'Pairing key mismatch'); return; }
-          if (extension) { ws.close(4003, 'Another Chrome profile is already connected'); return; }
-          clearTimeout(timer); authenticated = true; extension = ws;
-          extensionVersion = typeof msg.version === 'string' ? msg.version.slice(0, 30) : null;
-          extensionSessionId = randomUUID();
-          clearTimeout(requeueGrace); requeueGrace = null; extensionPaused = false;
-          ws.send(JSON.stringify({ type: 'ready' })); pump(); return;
+          const remotePort = ws._socket?.remotePort ?? null;
+          const handshake = negotiateHandshake(msg, {
+            serviceVersion: VERSION,
+            fallbackSeed: `${ws._aibOrigin ?? 'extension'}:${remotePort ?? 'local'}`
+          });
+          const record = hosts.register(ws, handshake, { origin: ws._aibOrigin, remotePort });
+          clearTimeout(timer); authenticated = true;
+          clearTimeout(hostGrace.get(record.hostId)); hostGrace.delete(record.hostId);
+          clearTimeout(requeueGrace); requeueGrace = null;
+          syncPrimaryMirrors();
+          extensionPaused = false;
+          ws.send(JSON.stringify({
+            type: 'ready', hostId: record.hostId, protocolVersion: handshake.protocolVersion,
+            serviceVersion: VERSION, hostCount: hosts.size(), primaryHostId: hosts.primaryHostId,
+            warnings: handshake.warnings
+          }));
+          pump(); return;
         }
         if (msg.type === 'keepalive') { ws.send(JSON.stringify({ type: 'keepalive' })); return; }
-        if (msg.type === 'browser' && ws === extension) {
+        if (msg.type === 'browser' && hosts.byWs(ws)) {
           // Validated rather than trusted: this arrives over the same socket as
           // results, and a malformed value would end up in every status reply.
-          if (typeof msg.extensionId === 'string' && /^[a-p]{32}$/.test(msg.extensionId)) extensionId = msg.extensionId;
           const version = typeof msg.browser?.version === 'string' && /^\d+(\.\d+){1,3}$/.test(msg.browser.version) ? msg.browser.version : null;
-          extensionBrowser = version ? {
+          const browser = version ? {
             version,
             major: Number.parseInt(version, 10),
             brands: Array.isArray(msg.browser.brands) ? msg.browser.brands.slice(0, 8)
@@ -1574,9 +1806,19 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
               .map(item => ({ brand: item.brand.slice(0, 40), version: item.version.slice(0, 20) })) : null,
             source: typeof msg.browser.source === 'string' ? msg.browser.source.slice(0, 40) : null
           } : null;
+          const record = hosts.noteBrowser(ws, {
+            extensionId: typeof msg.extensionId === 'string' && /^[a-p]{32}$/.test(msg.extensionId) ? msg.extensionId : null,
+            browser
+          });
+          // The legacy status fields describe the primary host. Every other
+          // host's identity lives in its own registry record.
+          if (record?.hostId === hosts.primaryHostId) {
+            if (record.extensionId) extensionId = record.extensionId;
+            extensionBrowser = browser;
+          }
           return;
         }
-        if (msg.type === 'extension-error' && ws === extension) {
+        if (msg.type === 'extension-error' && hosts.byWs(ws)) {
           const eventId = typeof msg.eventId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(msg.eventId) ? msg.eventId : null;
           try {
             audit({ time: new Date().toISOString(), id: randomUUID(), eventId, occurredAt: typeof msg.at === 'string' ? msg.at.slice(0, 40) : null, droppedBeforeSend: Number.isSafeInteger(msg.droppedBeforeSend) ? Math.max(0, msg.droppedBeforeSend) : 0, tool: 'extension-error', tabId: Number.isInteger(msg.tabId) ? msg.tabId : null, agent: null, outcome: 'error', errorCategory: typeof msg.category === 'string' ? msg.category.slice(0, 80) : 'EXTENSION_ERROR', detail: typeof msg.message === 'string' ? msg.message.slice(0, 1000) : 'unknown', source: typeof msg.source === 'string' ? msg.source.slice(0, 80) : 'extension' });
@@ -1584,23 +1826,57 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
           } catch { /* No acknowledgement if persistence fails; extension retains evidence. */ }
           return;
         }
-        if (msg.type === 'pause') { extensionPaused = true; return; }
+        if (msg.type === 'pause') {
+          // Pausing one browser must not pause the browsers the other agents
+          // are using. The legacy global flag follows the primary host only.
+          const paused = hosts.byWs(ws);
+          if (paused) paused.paused = true;
+          if (!paused || paused.hostId === hosts.primaryHostId) extensionPaused = true;
+          return;
+        }
         // Tab closed in Chrome (not via browser_close): drop its lease now so the
         // tab does not stay reserved until the TTL expires.
-        if (msg.type === 'tab-removed' && ws === extension && Number.isInteger(msg.tabId)) { leases.releaseTab(msg.tabId); return; }
+        if (msg.type === 'tab-removed' && hosts.byWs(ws) && Number.isInteger(msg.tabId)) {
+          const hostId = hosts.hostIdFor(ws);
+          const routedHostId = hosts.byId(msg.hostId) ? msg.hostId : hostId;
+          // A legacy lease has no host scope, an explicitly routed one does.
+          // Clearing both keys is harmless and avoids a stale lock on either.
+          leases.releaseTab(msg.tabId, routedHostId);
+          leases.releaseTab(msg.tabId);
+          return;
+        }
         if (msg.type === 'ui' && typeof msg.id === 'string' && msg.id.length < 100) {
           try { ws.send(JSON.stringify({ type: 'ui-result', id: msg.id, result: uiCall(msg.name, msg.args) })); }
           catch (e) { ws.send(JSON.stringify({ type: 'ui-result', id: msg.id, error: e.message })); }
           return;
         }
-        if (msg.type === 'result' && current && msg.id === current.id && ws === extension) {
-          const job = current; current = null;
+        if (msg.type === 'result') {
+          // A result belongs to exactly one (hostId, command id) pair. A stale
+          // or forged reply from another browser must never finish someone
+          // else's job, free their in-flight slot or be reported as their own.
+          const hostId = hosts.hostIdFor(ws);
+          const job = hostId ? inFlight.get(hostId) : null;
+          if (!job || msg.id !== job.id) return;
+          const host = hosts.byId(hostId);
+          if (host) host.commandsCompleted += 1;
           finish(job, typeof msg.error === 'string' ? msg.error.slice(0, 1000) : null, msg.result);
           pump();
         }
       } catch { ws.close(4002, 'Invalid protocol'); }
     });
-    ws.on('close', () => { clearTimeout(timer); clients.delete(ws); if (extension === ws) drop('Connection lost; active outcome may be unknown. Inspect page before retrying.'); });
+    ws.on('close', () => {
+      clearTimeout(timer); clients.delete(ws);
+      const record = hosts.remove(ws);
+      if (!record) return; // unauthenticated, or superseded by its own reconnect
+      const wasPrimary = extension === ws;
+      // A closed socket has no reconnect window to inherit: legacy callers get
+      // the original immediate failure. When peers exist, dropHostOnly keeps
+      // this host's backlog for its own bounded reconnect instead.
+      drop('Connection lost; active outcome may be unknown. Inspect page before retrying.', { hostId: record.hostId });
+      // Peers keep working. Default callers follow the surviving primary; a
+      // caller that named this specific host keeps its place until reconnect.
+      if (wasPrimary || !hosts.primary()) promotePrimary();
+    });
   });
   
   // ──────────────────────────────────────────────────────────────────────────

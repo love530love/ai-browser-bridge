@@ -47,6 +47,24 @@ const tabOwnership = createTabOwnership(chrome.storage.session);
 // the worker where the promise can actually be awaited. Cached for the worker
 // lifetime on purpose: the value cannot change without the browser restarting,
 // and that restart recreates this worker.
+// A host id is per-browser, persisted in that browser's own extension storage.
+// System Chrome, Canary and an agent-embedded browser therefore never claim to
+// be the same host, and a reconnect keeps the identity (and its tab leases)
+// instead of appearing as a brand new browser. Older services ignore the extra
+// hello fields, so this extension still pairs with a 0.35.x bridge.
+let currentHostId = null;
+async function hostIdentity() {
+  if (currentHostId) return currentHostId;
+  try {
+    const stored = await chrome.storage.local.get('hostId');
+    if (typeof stored?.hostId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(stored.hostId)) return (currentHostId = stored.hostId);
+    const generated = `h-${globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    await chrome.storage.local.set({ hostId: generated });
+    return (currentHostId = generated);
+  } catch {
+    return (currentHostId = `h-${Date.now().toString(36)}`);
+  }
+}
 let browserIdentityCache = null;
 async function browserIdentity() {
   if (browserIdentityCache) return browserIdentityCache;
@@ -1688,12 +1706,17 @@ async function connect({ automatic = false } = {}) {
     return;
   }
   if (epoch !== connectionEpoch) { connectInFlight = false; return; }
+  const hostId = await hostIdentity();
+  if (epoch !== connectionEpoch) { connectInFlight = false; return; }
   const ws = new WebSocket(`ws://127.0.0.1:${config.port}/extension`);
   socket = ws;
   connectInFlight = false;
   connectDeadline = setTimeout(() => { if (socket === ws) disconnect('连接超时，后台自动重连中', { automaticReconnect: true }); }, 10000);
   ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'hello', token: config.token, version: chrome.runtime.getManifest().version }));
+    ws.send(JSON.stringify({
+      type: 'hello', token: config.token, version: chrome.runtime.getManifest().version,
+      protocolVersion: 2, hostId, hostKind: 'generic', extensionId: chrome.runtime.id
+    }));
     // Sent after hello so authentication is never delayed by a hint lookup: a
     // slow client-hints promise must not look like a wrong pairing key.
     browserIdentity()
@@ -1720,6 +1743,13 @@ async function connect({ automatic = false } = {}) {
       }
       if (message.type === 'task-state') { chrome.runtime.sendMessage(message).catch(() => {}); return; }
       if (message.type === 'ready') {
+        // An older service derives a fallback id for extensions that sent none.
+        // Adopt the service's answer so every later message is attributable to
+        // the same host the registry knows about.
+        if (typeof message.hostId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(message.hostId)) {
+          currentHostId = message.hostId;
+          chrome.storage.local.set({ hostId: message.hostId }).catch(() => {});
+        }
         clearTimeout(connectDeadline); connectDeadline = null;
         reconnectAttempt = 0;
         connectionState = '已连接';
@@ -1732,7 +1762,7 @@ async function connect({ automatic = false } = {}) {
         notifyStatus();
         try {
           const result = await execute(message.name, message.args, { socket: ws, epoch: connectionEpoch });
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, result }));
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, result, hostId: currentHostId }));
         } catch (e) {
           if (e.code === 'DEBUGGER_BUSY_BEFORE_DISPATCH') {
             const result = {
@@ -1741,7 +1771,7 @@ async function connect({ automatic = false } = {}) {
               requiresObservation: message.name !== 'browser_screenshot',
               recommendedNextAction: 'Keep the task pending. Do not detach another debugger. Retry screenshots after a delay; for input, re-observe the target before issuing a fresh action.'
             };
-            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, result }));
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, result, hostId: currentHostId }));
             return;
           }
           // A policy refusal is not a defect. The caller asked to read a tab this
@@ -1753,7 +1783,7 @@ async function connect({ automatic = false } = {}) {
           // still audits the call; only the extension-side error journal skips it.
           const policyRefusal = /^Site not allowed\./.test(String(e?.message ?? ''));
           if (!policyRefusal) reportExtensionError(`command:${message.name}`, e, 'COMMAND_ERROR');
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, error: e.message }));
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, error: e.message, hostId: currentHostId }));
         }
       }
   } catch (error) { reportExtensionError('websocket-message', error, 'PROTOCOL_ERROR'); disconnect('协议错误，后台自动重连中', { automaticReconnect: true }); }
@@ -1764,7 +1794,11 @@ async function connect({ automatic = false } = {}) {
     // The service used to close every rejection with the same 4001, so a stale
     // pairing key and a second Chrome profile both looked like "reconnecting".
     if (event.code === 4002) { disconnect('配对密钥不匹配，请重新运行 pair.ps1'); return; }
-    if (event.code === 4003) { disconnect('另一个 Chrome 配置已占用此服务，请先断开它', { automaticReconnect: true, reconnectDelayMs: 30000 }); return; }
+    // 0.36.0+ never sends 4003: every browser is a peer host. Receiving one
+    // means the service is still an older single-socket build, so say that
+    // plainly instead of telling the user to close their other browser.
+    if (event.code === 4003) { disconnect('本机服务仍是单宿主旧版本，请升级服务后重试', { automaticReconnect: true, reconnectDelayMs: 30000 }); return; }
+    if (event.code === 4004) { disconnect('同一浏览器的新连接已接管', { automaticReconnect: false }); return; }
     disconnect('连接已断开，后台自动重连中', { automaticReconnect: true });
   };
 }
@@ -1778,7 +1812,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
   // The tab is gone, so its ownership record is dead weight that would otherwise
   // accumulate for the whole browser session.
   tabOwnership.forget(tabId).catch(() => {});
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'tab-removed', tabId }));
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'tab-removed', tabId, hostId: currentHostId }));
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // Only our own extension UI may configure or reconnect. No content-script API.

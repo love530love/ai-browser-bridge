@@ -44,6 +44,21 @@ node -e "const m=JSON.parse(require('fs').readFileSync('extension/manifest.json'
 - Windows 保留设备名文件（如 `nul`）删不掉：常规 `rm` / 回收站 API 报 `0x800704B0`。本轮实测 `[System.IO.File]::Delete('\\?\<绝对路径>')` → Access denied；`Remove-Item` 报成功但文件仍在（**假成功**）；Node `fs.unlinkSync('\\?\...')` 被 safe-delete shim 转成 trash 后同样失败，关掉 shim 则是 `EPERM`；`Add-Type` 编译 P/Invoke 被沙箱拦截。**本机唯一可行解是加进 `.gitignore`**，不要重复尝试删除，也不要把「报 ok」当删除成功。
 - `chrome://` 页面的 Document 子树只对**同一进程内**的 UIA 客户端可见；跨进程 `browser_native_snapshot` 读不到是预期行为，不是「页面不存在」。所以 reload + read + click 必须在**一个 PowerShell 进程**里完成。
 
+## 多宿主并发（0.36.0 血泪教训）
+
+1. **「第二个连接被 4003 拒绝」不是限流，是所有权 bug**。多个装了扩展的浏览器（系统 Chrome / Canary / Agent 内置浏览器）应该是**对等宿主**，谁先连上都不该决定哪些 agent 能工作。多实例架构只是把「一个独占」复制成「多个独占」，不解决归属。
+2. **单 `current` = 一个宿主卡住、全体 agent 陪等**。`inFlight: Map<hostId, job>` 才能保证每宿主一个 in-flight 槽位。保留 `current` 作兼容镜像时，必须在 `finish()` 里重算为「任一活跃 job」；只在 `current === job` 时清空会让多宿主下留下永久 busy 的悬空指针。
+3. **tab id 只在单个浏览器进程内唯一**。两个浏览器的 tab 7 会共用裸 `tabId` 租约键 ⇒ 作用域键必须能带 `hostId`。但默认路径（未显式传 hostId）要保持裸键，否则单宿主旧契约和 29 条旧测试会全崩。
+4. **close handler 不要传 `keepQueued`**。本轮第一版在连接关闭时误带 `keepQueued:true`，单宿主队列要等 30 秒宽限期才失败，测试直接挂死。`keepQueued` 只属于「写超时、宿主可能重连」；多宿主的排队任务保留由 `dropHostOnly` 自己的 hostGrace 负责。
+5. **队列上限要按宿主数伸缩**。写死 64 会让「queue_full」旧断言挂住；写死 16 会让 3 个浏览器共享一个马桶。`max(16, 16 × 宿主数)` 同时满足两者。
+6. **结果归属必须 `(hostId, command id)` 双匹配**。只按 `msg.id === current.id` 收包，跨宿主迟到/伪造的 result 会结算别人的任务。服务端按 `ws → hostId → inFlight.get(hostId)` 取任务，扩展端带不带 hostId 都能归属。
+7. **新增全局参数要同时改三处**：`schema()` 注入、`validateCall` 做格式校验（hostId 含 `:` 会伪造作用域）、**所有精确参数列表断言**（本轮 `test/field-report-030.test.js` 因硬列 `browser_eval` 参数而挂）。参数由服务消费、绝不转发给页面。
+8. **意图索引有 3500 字节硬上限**。新增 `fleet` 分组后变成 3512 字节，缩短 `purpose` 文案即可，不要去改断言阈值（那个阈值是给调用方省 token 用的）。
+9. **连接上限 8 → 64**：`clients.size` 的旧上限是「一个服务一个浏览器」假设的残留，真正的访问控制是 pairing token + Origin 校验。
+10. **不设能力禁区**：版本错配、宿主不是 chrome.exe、某能力探测为 false，都只能作为 hints / warnings 报告，不得据此拒绝连接或工具。显式指定宿主掉线时返回 `waiting` + `browser_hosts`，绝不静默改派。
+11. **迁移连接层后必须逐个审全局单值镜像的读取点**（`extension` / `extensionVersion` / `extensionSessionId` / `current` / `extensionOwner`）。0.36.0 真机：`waitForReload` 用全局 `extensionSessionId` 判重载，目标宿主断开后 primary 被同伴顶替，同伴的**旧** session 被当成新 session，于是把一次实际成功的重载误报成 `extension_reload_not_observed`。「看起来像状态变化、其实是别人」是这类缺陷的固定形态。修法是快照全部 sessionId + 按新会话与新版本判定，而不是删掉镜像。
+12. **`extensionOwner.pid` 不一定是拥有可见窗口的进程**。实测服务绑定 pid 15944 时 `no_chrome_window`，而不绑定 PID 枚举到 pid 14900 的 `chrome://extensions` 窗口（地址栏验证通过）。清错失败要区分「宿主无窗口」与「绑定进程不是窗口进程」，两者都返回证据，绝不写成已清空。
+
 ## 调度器运行时回归（0.35.1 血泪教训）
 
 `browser_queue_status` 全绿**不等于调度器能用**：服务实际只调用 `assessAndSchedule` 与 `cleanupTimeouts`，

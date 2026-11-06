@@ -25,6 +25,14 @@ Do not start Playwright, Puppeteer, Selenium, CDP, or a second browser-control b
 - The `_verified` tool dispatches once, then independently observes the outcome against a bounded `expect` condition. If the condition is already true before dispatch, it returns `not_dispatched`. After dispatch, an unobserved outcome is `uncertain` and non-retryable — re-observe and verify before the next action.
 - Never assume success from a non-verified call alone. Never replay an uncertain write. Always re-observe before the next step.
 
+## Multiple browsers and multiple agents (0.36.0)
+
+Several browsers may hold an extension connection at the same time: system Chrome, Canary/Dev and agent-embedded browsers are peers. None is closed for connecting, and a stalled browser no longer blocks the others. Call `browser_hosts` first when more than one host is connected; it returns every `hostId`, its protocol/extension/Chrome version, capability hints, socket owner and in-flight command.
+
+Pass optional `hostId` on **any** tool to bind that command and its tab lease to one browser. Tab ids are only unique inside one browser, so two hosts can both have tab 7. Omitting `hostId` uses the primary host for backward compatibility. Pass `commandId` on writes whose outcome may be uncertain: resending the same id replays the recorded outcome instead of dispatching a second write.
+
+If a named host disconnects, the result is `waiting` with `reason:"host_not_connected"` and a `browser_hosts` next step. Do not silently retry against a different browser. Capability flags (`features`, `hostKind`, `hostKindObserved`) are hints for choosing a route; they are never a refusal, and no tool closes a connection because the host is not chrome.exe. Report what you observed; the agent decides what is safe.
+
 ## Action rules
 
 - Use `browser_prepare_action` and `browser_find_element` before clicks, fills, selections, uploads, or downloads.
