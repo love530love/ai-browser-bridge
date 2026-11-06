@@ -1553,7 +1553,49 @@ function appendAuditLog(row) {
   appendFileSync(file, JSON.stringify(row) + '\n', { encoding: 'utf8' });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const config = loadConfig();
+  // Support multi-instance mode via environment variables
+  const instancePort = process.env.AIB_PORT ? parseInt(process.env.AIB_PORT, 10) : null;
+  const instanceProfile = process.env.AIB_PROFILE || 'Default';
+  const instanceUserDataDir = process.env.AIB_USER_DATA_DIR || null;
+  const instanceChromePath = process.env.AIB_CHROME_PATH || null;
+  
+  let config;
+  try {
+    config = loadConfig();
+  } catch (error) {
+    // Create config if it doesn't exist (first run)
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    config = {
+      port: instancePort || 19387,
+      agentToken: randomBytes(32).toString('hex'),
+      extensionToken: randomBytes(32).toString('hex'),
+      uploadRoots: [],
+      autoLaunchBrowser: true,
+      browserTarget: instanceChromePath ? {
+        exePath: instanceChromePath,
+        userDataDir: instanceUserDataDir,
+        profileDirectory: instanceProfile
+      } : null
+    };
+    // Save config
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(join(stateDir, 'config.json'), JSON.stringify(config, null, 2), { mode: 0o600 });
+  }
+  
+  // Override port if instance mode is active
+  if (instancePort) {
+    config.port = instancePort;
+  }
+  
+  // Override browserTarget if instance mode is active
+  if (instanceProfile && instanceProfile !== 'Default' || instanceUserDataDir || instanceChromePath) {
+    config.browserTarget = {
+      exePath: instanceChromePath || config.browserTarget?.exePath || null,
+      userDataDir: instanceUserDataDir || config.browserTarget?.userDataDir || null,
+      profileDirectory: instanceProfile
+    };
+  }
+  
   const bridge = createBridge(config, { audit: appendAuditLog, maintenanceStateFile: join(stateDir, 'maintenance.json') });
   await bridge.listen();
   console.log(`AI Browser Bridge listening on 127.0.0.1:${config.port}`);

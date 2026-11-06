@@ -9,6 +9,8 @@ import { computeBuildIdentity } from './build-identity.js';
 import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory, developerModeInEffect } from './chrome-profile.js';
 import { createDesktopAdapter } from './desktop-adapter.js';
 import { usageSummary } from './usage-summary.js';
+import { listInstances, createInstance, removeInstance, enableInstance, disableInstance } from './instance-config.js';
+import { startInstance, stopInstance, statusInstance, listAllInstances, startAllInstances, stopAllInstances } from './instance-manager.js';
 
 async function rawToolCall(name, args) {
   return await request('/call', { name, arguments: args });
@@ -171,7 +173,16 @@ function upgradeDiagnosis() {
 }
 
 try {
-  const [cmd, name, args] = process.argv.slice(2);
+  const rest = process.argv.slice(2);
+  const cmd = rest[0];
+  const name = rest[1];
+  const args = rest[2];
+  
+  // Handle compound commands like 'instance start-all', 'agent list', etc.
+  const isInstanceCommand = cmd === 'instance';
+  const isAgentCommand = cmd === 'agent';
+  const isMaintenanceCommand = cmd === 'maintenance';
+  
   if (cmd === 'setup') {
     loadConfig(true);
     writeFileSync(join(stateDir, 'mcp-config.json'), JSON.stringify({ mcpServers: { 'ai-browser-bridge': { command: process.execPath, args: [join(ROOT, 'src', 'mcp.js')] } } }, null, 2));
@@ -183,7 +194,7 @@ try {
     config.uploadRoots = [...new Set([...(config.uploadRoots ?? []), root])];
     writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
     console.log(JSON.stringify({ allowedUploadRoot: root, count: config.uploadRoots.length }));
-  } else if (cmd === 'agent') {
+  } else if (isAgentCommand) {
     // Operator surface for the governance layer. Writes land in
     // stateDir/agents.json and take effect on the next call; no restart needed
     // because the service re-reads decisions through the same file on boot and
@@ -198,6 +209,36 @@ try {
     }
     else if (name === 'remove' && args) console.log(JSON.stringify(policy.remove(args), null, 2));
     else throw new Error('Usage: node src/cli.js agent list | show NAME | set NAME [JSON|--stdin] | remove NAME');
+  } else if (isInstanceCommand) {
+    // Instance management commands
+    const instanceCmd = name;
+    if (instanceCmd === 'list') {
+      console.log(JSON.stringify(listAllInstances(), null, 2));
+    } else if (instanceCmd === 'add') {
+      const instanceName = args || `instance_${Date.now()}`;
+      const instance = createInstance({ id: instanceName, name: instanceName });
+      console.log(JSON.stringify(instance, null, 2));
+    } else if (instanceCmd === 'remove' && args) {
+      const removed = removeInstance(args);
+      console.log(JSON.stringify(removed, null, 2));
+    } else if (instanceCmd === 'start' && args) {
+      const result = startInstance(args);
+      console.log(JSON.stringify(result, null, 2));
+    } else if (instanceCmd === 'stop' && args) {
+      const result = stopInstance(args);
+      console.log(JSON.stringify(result, null, 2));
+    } else if (instanceCmd === 'start-all') {
+      const results = startAllInstances();
+      console.log(JSON.stringify(results, null, 2));
+    } else if (instanceCmd === 'stop-all') {
+      const results = stopAllInstances();
+      console.log(JSON.stringify(results, null, 2));
+    } else if (instanceCmd === 'status' && args) {
+      const result = statusInstance(args);
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      throw new Error('Usage: node src/cli.js instance list | add [NAME] | remove NAME | start NAME | stop NAME | start-all | stop-all | status NAME');
+    }
   } else if (cmd === 'status') console.log(JSON.stringify(await request('/status'), null, 2));
   else if (cmd === 'diagnose-upgrade') console.log(JSON.stringify(upgradeDiagnosis(), null, 2));
   else if (cmd === 'doctor') console.log(JSON.stringify(await doctor(), null, 2));
@@ -214,6 +255,6 @@ try {
       ? await raw()
       : await callWithWaitingRecovery({ name, args: parsed, rawCall: rawToolCall, maxWaitMs: Number(process.env.AIB_AUTO_WAIT_MS || 120000) });
     console.log(JSON.stringify(result, null, 2));
-  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin]');
+  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin]');
 } catch (e) { console.error(e.message); process.exitCode = 1; }
 
