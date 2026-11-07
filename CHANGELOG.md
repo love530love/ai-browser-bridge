@@ -1,3 +1,38 @@
+## 0.37.1 — 2026-11-07（**项目审计：修复事故报告 undefined 与心跳五处缺陷**）
+
+一次四视角并行只读审计（运行时与运维、核心代码、契约文档、测试有效性）+ 运行时基线取证。完整报告见 [docs/AUDIT-2026-11-07.md](docs/AUDIT-2026-11-07.md)。
+
+### 确认缺陷（已修）
+
+- **事故报告恒显示 `- verdict: **undefined**`**：`src/heartbeat.js` 模板读 `result.verdict`，调用只传 `evaluation.verdict`。0.35.1 的同型事故原样复发，CLI / jsonl / evidence 全对、730 条全绿没抓到。模板改读 `result.evaluation.verdict`，并新增**渲染后文本**断言（禁止 `**undefined**`、要求 verdict 值与实际一致）。
+- **`--watch` 首轮必报 `clock_drift` 并冻结全部自愈**：首轮 state 来自数小时前的 hourly 单次巡检，却被按 10 秒 cadence 判定（实测 `deltaMs 5199403 / 5209854` vs `expectedMs 10000`）。runner 传 `cycleIndex`，首轮不强校验 cadence，第二轮起才启用；定时巡检 prompt 去掉 `--watch` 复核建议。
+- **扩展重载回落到 primary 兼容镜像**：`version_skew` 仅由 manifest 引起或 `host_degraded` 只有警告时，会产出 `hostId: null` 而重载错误的浏览器。改为从 finding 的 `evidence.hostVersions` / `evidence.hosts` 显式取 hostId，候选为空则**不动作**。
+- **一次采集超时清空去抖计数**：采集失败轮 `buildRules` 只返回 `service_unreachable`，其余 counter 被删，临界告警永不升级。改为失败轮保留 counters（它没观测到任何东西，不构成反证）。
+- **半写锁令心跳永久停摆**：锁 JSON 合法但 `at` 缺失 → `age = NaN` → 既不超时也不清理。改为时间戳不可解析即接管，JSON 解析失败也删除重试。
+- **健康判定只信 primary 镜像**：`provenClean` / `safeToAct` 追加 `hosts.length > 0 && hosts.every(h => h.connected !== false)`。
+
+### 契约与文档纠正（已修）
+
+`README.md` 删除「Bridge 不支持的能力可选 CDP / Playwright」并给 Canary/Default 历史段加 stable/Default 定论注记；`docs/DEVELOPMENT-GUIDE.md` 版本同步「两处」→「四处」；`src/priority-engine.js` 的 `TOOL_CATEGORIES` 五个不存在的工具名逐字对齐 `tools.js`（写错会静默落到默认分）；`src/protected-ui.js` 的 `unsupportedActions` 加范围注释，明确不是产品级禁区；`src/tools.js` 的 lease heartbeat 措辞与 CLI 心跳区分；`docs/HIGH-CONCURRENCY-ROADMAP.md` 注明 `tools.deny` 是运维显式治理而非基座默认设限；CHANGELOG 修正异常规则口径与 4004 发送方归因。
+
+### 测试与运维
+
+- `test/heartbeat.test.js` **13 → 22 条**：新增报告渲染后文本、真实 `GET /status` 的 Bearer/超时、`POST /call` 重载契约、`--no-remediate` / `--dry-run` 开关对照、watch 首轮、损坏锁接管、无 host 落后不动作、采集失败保留计数、hosts 连接派生。
+- 定时巡检 automation 的 prompt 更新：心跳日志按 **UTC** 命名而本机 GMT+8，需同时读 UTC 当天与前一天文件；复核改为再跑一次单次 heartbeat；明确「不要终止父进程已死的 node 服务进程」，避免与另一条每 2 小时孤儿巡检任务并发误杀。
+- 6 份 incident 全部**已闭环、无现症**（按「recheck uncertain 不算修复，须下一轮 clean」逐份核对）；凌晨故障簇归因于看门狗 07:57 才被拉起，当前服务 PID 56484 起于 12:27、触发方未知，均非审计动作。
+
+### 验证与发布
+
+- `npm test` **739 / 739 全绿（EXIT=0）**；`test/heartbeat.test.js` 由 13 条增至 22 条。
+- `node src/cli.js doctor` → `ok:true`，service / manifest / extension 全 `0.37.1`，运行 buildId `12117027…` 与源码一致。
+- `node src/cli.js heartbeat --no-remediate` → `clean` / `provenClean:true` / `hostCount:2`；两个宿主 `h-b76b…`（ChatGPT 内置浏览器）与 `h-0b47…`（系统 Chrome）均重载至 0.37.1，第一轮 `staleHosts` 精确点出另一个仍落后。
+- 扩展报错清理复核：`nothing_to_clear` + `addressVerified:true` + `documentVisible:true` + `errorEntries:0` + `errorsQueryVisible:false` + `clearedState:"empty"`、`dispatched:false`，是证据化空列表。
+- 审计中还纠正一次运维误判：用**过期 PID**（56484）执行「重启」实际没生效，真正监听 19387 的进程是 66728（启动于 20:29，早于 20:43 的版本改动）。复核 `/status` 的 version/buildId 不一致后，改为从当前 `.local/server.pid` 取值重启，看门狗以新代码拉起 60500。状态类结论必须带时间戳、下轮先复核再引用。
+
+### 待排期（本轮未改，明确标注）
+
+`scheduler-integration.js` / `load-balancer.js` 的 `routeTask` 与 `detectConflicts` **尚未接入 `POST /call` 真实分发**（服务端只调用 `assessAndSchedule` 与 `cleanupTimeouts`），跨实例自动路由当前不会在真实请求中发生；`/status` 顶层 `connected` / `extensionOwner` 仍是 primary 聚合；`describeErrorList` 缺端到端投影断言。三项均写进审计报告，避免「能力存在但找不到」。
+
 ## 0.37.0 — 2026-11-06（**心跳巡检：定时体检、有证据的排障、受限自愈**）
 
 用户要求「设置心跳程序，定时监控浏览器项目的使用情况，如遇异常就开始排障和持续升级」。
@@ -12,7 +47,7 @@
 
 ### 交付
 
-- 新增 `src/heartbeat.js`：采集 / 14 类异常规则 / 去抖 / 证据落盘 / 白名单排障 / recheck / watch runner。
+- 新增 `src/heartbeat.js`：采集 / 13 类异常规则（另加 `clock_drift` 与 `heartbeat_collection_failure` 两个判定码，共 15 个 code）/ 去抖 / 证据落盘 / 白名单排障 / recheck / watch runner。
 - `src/cli.js` 新增 `heartbeat` 命令：`--watch`（由用户自行常驻）、`--interval-ms`、`--timeout-ms`、`--max-cycles`、`--remediate` / `--no-remediate`、`--dry-run`。默认单次巡检并允许白名单排障；`critical` / `uncertain` / `skipped` 返回非零退出码给调度器。
 - 落盘 `.local/heartbeat/`：`state.json`（去抖计数 / 冷却 / 上轮快照 / missingHostIds）、`YYYY-MM-DD.jsonl`（每轮摘要）、`evidence.jsonl`（observe / classify / act / recheck 全链证据）、`incidents/*.md`（异常排障报告）、`lock`（单实例，超时可接管）。
 - 只读 `GET /status` 与审计日志 `.local/logs/audit.jsonl` 的**元数据**（不看页面内容、不碰凭据）；不重复实现 doctor 的 profile 扫描与 launch dry-run。
@@ -43,7 +78,7 @@
 - **所有工具**新增两个可选路由参数：`hostId`（绑定命令与 tab 租约到指定浏览器）、`commandId`（重发只回放账本结果、绝不二次派发写操作）。两者由服务消费，不转发给页面；`validateCall` 拒绝含 `:` / `/` 的伪造 hostId。
 - `src/leases.js`：租约键支持可选 `hostId` 维度（`hostId:tabId`），持久化格式向后兼容；未提供 hostId 的旧调用继续使用裸 tabId 键，行为逐字不变。
 - 新工具 `browser_hosts`（意图索引新增 `fleet` 组）：列出全部宿主的 hostId、协议/扩展/Chrome 版本、hostKind、能力 hints、socket 占用进程、in-flight 命令；`hostKindObserved` 由 socket owner 推导 non-chrome.exe 的 agent 内置浏览器。状态端点新增 `hostCount` / `hosts[]` / `activeCount` / `activeByHost`。
-- `extension/worker.js`：hostId 持久化在该浏览器自己的 `chrome.storage.local`（不同渠道天然不同、重连身份稳定）；hello 带 `protocolVersion` / `hostId` / `hostKind` / `extensionId`；result 与 tab-removed 带 hostId；4003 文案改为「服务仍是单宿主旧版本」而不是让用户关掉另一个浏览器；新增 4004（同一浏览器新连接接管）。
+- `extension/worker.js`：hostId 持久化在该浏览器自己的 `chrome.storage.local`（不同渠道天然不同、重连身份稳定）；hello 带 `protocolVersion` / `hostId` / `hostKind` / `extensionId`；result 与 tab-removed 带 hostId；4003 文案改为「服务仍是单宿主旧版本」而不是让用户关掉另一个浏览器；新增 4004 接收分支（同一浏览器新连接接管）。4004 的**发送方是服务端** `src/host-registry.js`：同一 `hostId` 重连时由 `register()` 主动关闭旧 socket，worker.js 只是接收方。
 - 明确不做的：显式指定 `hostId` 的任务在宿主掉线时返回 `waiting` + `browser_hosts`，**绝不静默改派**；能力 hints 从不作为拒绝理由；不为非 chrome.exe 宿主设禁区。
 
 ### 验证

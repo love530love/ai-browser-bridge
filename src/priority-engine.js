@@ -16,16 +16,19 @@ import { STATE_DIR } from './instance-config.js';
 // Priority Scoring System
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Every name here must match src/tools.js verbatim. A misspelled name does not
+// throw - it silently falls through to the default score of 70, which is how
+// an entire scoring tier can appear to work while doing nothing.
 const TOOL_CATEGORIES = {
   // Read operations (lowest cost, highest priority)
   read: {
     tools: [
       'browser_read', 'browser_observe', 'browser_find_element',
-      'browser_find_text', 'browser_page_info', 'browser_tab_list',
+      'browser_find_text', 'browser_at', 'browser_tabs',
       'browser_ai_status', 'browser_capabilities', 'browser_tool_index',
       'browser_queue_status', 'browser_wait_until_ready', 'browser_capability_guide',
-      'browser_page_source', 'browser_screenshot', 'browser_get_cookies',
-      'browser_get_storage', 'browser_network_requests'
+      'browser_hosts', 'browser_screenshot', 'browser_cookies',
+      'browser_storage_read', 'browser_network_summary'
     ],
     baseScore: 10,
     cost: 'low'
@@ -52,8 +55,8 @@ const TOOL_CATEGORIES = {
   // Navigation/structural operations (highest cost)
   navigation: {
     tools: [
-      'browser_navigate', 'browser_close', 'browser_reload',
-      'browser_switch_tab', 'browser_new_tab', 'browser_download'
+      'browser_navigate', 'browser_close', 'browser_navigate_verified',
+      'browser_open', 'browser_windows', 'browser_downloads'
     ],
     baseScore: 80,
     cost: 'critical'

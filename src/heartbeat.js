@@ -326,7 +326,12 @@ export function evaluateSnapshot(snapshot, state = null, options = {}) {
     if (severity === 'warn' && count >= cfg.debounceCycles && !frozen) severity = 'critical';
     findings.push({ ...item, severity, baseSeverity: item.baseSeverity, occurrences: count, firstSeenAt: counters[item.code].firstSeenAt, at: snapshot.ts });
   }
-  for (const code of Object.keys(counters)) if (!raw.some(item => item.code === code)) delete counters[code];
+  // A failed collection observed nothing at all. Dropping counters here would
+  // let one transient 8s timeout erase a finding that was two cycles away from
+  // being confirmed, so keep the accumulated evidence intact.
+  if (!snapshot.error) {
+    for (const code of Object.keys(counters)) if (!raw.some(item => item.code === code)) delete counters[code];
+  }
 
   const consecutiveFailures = snapshot.error ? (state?.consecutiveFailures ?? 0) + 1 : 0;
   const heartbeatFailure = consecutiveFailures >= cfg.debounceCycles;
@@ -348,7 +353,11 @@ export function evaluateSnapshot(snapshot, state = null, options = {}) {
   const provenClean = !snapshot.error && !!status && snapshot.schemaOk &&
     !!snapshot.disk?.diskBuildId && status.buildId === snapshot.disk.diskBuildId &&
     status.version === snapshot.disk.version &&
-    status.connected === true && findings.length === 0;
+    status.connected === true &&
+    // `connected` is the primary-host compatibility mirror. In a fleet, also
+    // require every registered host to be connected before claiming health.
+    hostsOf(status).length > 0 && hostsOf(status).every(host => host.connected !== false) &&
+    findings.length === 0;
   let verdict;
   if (snapshot.error || (!status && consecutiveFailures > 0)) verdict = 'uncertain';
   else if (findings.some(item => item.severity === 'critical')) verdict = 'critical';
@@ -377,7 +386,8 @@ export function evaluateSnapshot(snapshot, state = null, options = {}) {
 export function safeToAct(status) {
   if (!status || typeof status !== 'object') return false;
   const hosts = hostsOf(status);
-  return (status.activeCount ?? 0) === 0 && (status.queued ?? 0) === 0 &&
+  return hosts.length > 0 && hosts.every(host => host.connected !== false) &&
+    (status.activeCount ?? 0) === 0 && (status.queued ?? 0) === 0 &&
     hosts.every(host => !host.inFlight) && !status.taskLease &&
     !status.desktopOperation && !status.maintenance &&
     (status.tabLeases ?? []).length === 0 && status.connected === true;
@@ -433,9 +443,18 @@ export async function planRemediation(evaluation, snapshot, state, options = {})
   if (has('build_stale') && snapshot.disk.pid) {
     add('build_restart', { pid: snapshot.disk.pid, runningBuildId: snapshot.status.buildId, diskBuildId: snapshot.disk.diskBuildId });
   } else if (!has('build_stale') && buildMatches && (has('version_skew') || has('host_degraded'))) {
-    const stale = hostsOf(snapshot.status).filter(host => host.extensionVersion !== snapshot.disk.version || host.baseline === true);
-    const targets = stale.length ? stale.map(host => host.hostId) : [null];
-    for (const hostId of targets) add('extension_reload', { hostId });
+    // Never fall back to `hostId: null` (the primary compatibility mirror).
+    // A skew caused only by the manifest, or a downgrade warning on a host
+    // whose version matches, must not reload an unrelated browser.
+    const skew = evaluation.findings.find(item => item.code === 'version_skew');
+    const degraded = evaluation.findings.find(item => item.code === 'host_degraded');
+    const behind = new Set();
+    for (const [hostId, version] of Object.entries(skew?.evidence?.hostVersions ?? {})) {
+      if (version !== snapshot.disk.version) behind.add(hostId);
+    }
+    for (const entry of degraded?.evidence?.hosts ?? []) if (entry.hostId) behind.add(entry.hostId);
+    const known = new Set(hostsOf(snapshot.status).map(host => host.hostId));
+    for (const hostId of behind) if (known.has(hostId)) add('extension_reload', { hostId });
   }
   return { actions, skipped: actions.length === 0, reason: actions.length ? null : 'no_allowlisted_action' };
 }
@@ -497,13 +516,23 @@ function acquireLock(dir, nowMs, staleMs) {
   try {
     const owner = JSON.parse(readFileSync(path, 'utf8'));
     const age = nowMs - Date.parse(owner.at ?? '');
-    if (Number.isFinite(age) && age > staleMs) {
+    // An unparseable timestamp means the writer died between openSync('wx')
+    // and the write. Treat that lock as untrusted and reclaim it; otherwise a
+    // single half-written file disables monitoring forever.
+    const untrusted = !Number.isFinite(age);
+    if (untrusted || age > staleMs) {
       unlinkSync(path);
       const retry = claim();
-      return retry.acquired ? { ...retry, reclaimedFrom: owner } : { acquired: false, owner };
+      return retry.acquired
+        ? { ...retry, reclaimedFrom: owner, reclaimedReason: untrusted ? 'invalid_timestamp' : 'stale' }
+        : { acquired: false, owner };
     }
     return { acquired: false, owner, ageMs: age };
-  } catch { return { acquired: false, reason: 'lock_corrupt' }; }
+  } catch {
+    try { unlinkSync(path); } catch { /* another instance may have removed it */ }
+    const retry = claim();
+    return retry.acquired ? { ...retry, reclaimedReason: 'corrupt_lock' } : { acquired: false, reason: 'lock_corrupt' };
+  }
 }
 
 function releaseLock(lock) {
@@ -515,7 +544,11 @@ function incidentReport(result) {
   const lines = [
     `# Heartbeat incident ${result.ts}`,
     '',
-    `- verdict: **${result.verdict}**`,
+    // Read from the evaluation, not from a separate `verdict` argument. The
+    // 0.35.1 incident report shipped with `**undefined**` for exactly this
+    // reason: the caller forgot the extra field while CLI/jsonl/evidence all
+    // carried the correct value. One source of truth, and a rendered-text test.
+    `- verdict: **${result.evaluation.verdict}**`,
     `- cycle: ${result.cycleId}`,
     `- provenClean: ${result.evaluation.provenClean}`,
     `- frozen (clock drift): ${result.evaluation.frozen}`,
@@ -557,7 +590,12 @@ export async function runHeartbeat(options = {}) {
     const state = readState(dir) ?? {};
     const evaluation = evaluateSnapshot(snapshot, state.version ? state : null,
       { now, intervalMs: options.intervalMs ?? cfg.intervalMs,
-        intervalEnforced: options.watch === true, thresholds: options.thresholds });
+        // A watch loop's first cycle has no comparable predecessor: state may
+        // come from an hourly single-shot run hours earlier. Enforcing a short
+        // cadence against that gap would report clock_drift and freeze every
+        // escalation on cycle 1 (measured in the field on 2026-11-07).
+        intervalEnforced: options.watch === true && (options.cycleIndex ?? 1) > 1,
+        thresholds: options.thresholds });
     const plan = await planRemediation(evaluation, snapshot, evaluation.nextState,
       { ...options, now, intervalMs: options.intervalMs ?? cfg.intervalMs, thresholds: options.thresholds });
     const remediation = await executeRemediation(plan, options);
@@ -635,7 +673,7 @@ export async function createHeartbeatRunner(options = {}) {
   const loop = (async () => {
     while (!stopped) {
       cycles += 1;
-      const result = await runHeartbeat(options);
+      const result = await runHeartbeat({ ...options, watch: true, cycleIndex: cycles });
       results.push(result);
       options.onCycle?.(result, cycles);
       if (stopped || (maxCycles > 0 && cycles >= maxCycles)) break;

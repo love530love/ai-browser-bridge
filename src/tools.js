@@ -437,7 +437,7 @@ export const TOOLS = [
   tool('browser_claim_tab', 'Enforced multi-agent write lease for a tab. Use before coordinated write actions. Reads remain allowed, but writes require the matching agent until release or expiry. With wait:true, wait locally for a conflicting lease to clear before returning waiting state.', {
     tabId, agent: text(120), ttlMs: { type: 'integer', minimum: 1000, maximum: 600000 }, wait
   }, ['tabId', 'agent']),
-  tool('browser_renew_tab', 'Renew a tab write lease held by an agent. Use as a heartbeat during long unattended tasks; owner writes also renew automatically.', {
+  tool('browser_renew_tab', 'Renew a tab write lease held by an agent. Use as a lease-renewal heartbeat during long unattended tasks (not the CLI health inspection `node src/cli.js heartbeat`); owner writes also renew automatically.', {
     tabId, agent: text(120), ttlMs: { type: 'integer', minimum: 1000, maximum: 600000 }
   }, ['tabId', 'agent']),
   tool('browser_release_tab', 'Release an enforced tab write lease held by an agent.', { tabId, agent: text(120) }, ['tabId', 'agent']),

@@ -237,3 +237,150 @@ test('watch mode stops after maxCycles without launching a detached process', as
   assert.ok(results.every(item => item.status === 'completed'));
   runner.stop();
 });
+
+// ── Audit regressions (0.37.1) ───────────────────────────────────────────
+// These are the failures that 730 green tests did not catch: an incident
+// report whose rendered text was wrong while every in-memory object was right.
+
+test('the incident report renders the real verdict, never **undefined**', async () => {
+  const dir = tempState();
+  const result = await runHeartbeat({
+    stateDir: dir, probe: async () => { throw new Error('ECONNREFUSED'); },
+    diskFacts: diskOk(), now: () => T0, remediate: false
+  });
+  assert.ok(result.incidentPath);
+  const text = readFileSync(result.incidentPath, 'utf8');
+  assert.match(text, new RegExp(`- verdict: \\*\\*${result.verdict}\\*\\*`));
+  assert.doesNotMatch(text, /\*\*undefined\*\*/, 'the CLI/jsonl/evidence copies were correct while the report was not');
+  assert.match(text, /- provenClean: false/);
+  assert.match(text, /service_unreachable/);
+  assert.match(text, /- cycle: [0-9a-f-]{36}/);
+  assert.match(text, /- buildId: unavailable \/ disk: build-a/);
+});
+
+test('a failed collection does not erase an almost-confirmed finding', () => {
+  const skewed = snap({ disk: diskOk({ manifestVersion: '0.36.0' }) });
+  let state = null;
+  for (let i = 0; i < 2; i += 1) {
+    const at = T0 + i * 60000;
+    state = evaluateSnapshot({ ...skewed, ts: new Date(at).toISOString(), atMs: at },
+      state, { now: () => at, intervalMs: 60000 }).nextState;
+  }
+  assert.equal(state.counters.version_skew.count, 2);
+  const failedAt = T0 + 120000;
+  const failed = evaluateSnapshot({ ...snap(), status: null, error: { message: 'timeout', kind: 'timeout' },
+    ts: new Date(failedAt).toISOString(), atMs: failedAt }, state,
+  { now: () => failedAt, intervalMs: 60000 });
+  assert.equal(failed.nextState.counters.version_skew.count, 2, 'one timeout must not reset the debounce');
+  const finalAt = T0 + 180000;
+  const final = evaluateSnapshot({ ...skewed, ts: new Date(finalAt).toISOString(), atMs: finalAt },
+    failed.nextState, { now: () => finalAt, intervalMs: 60000 });
+  assert.equal(final.findings.find(item => item.code === 'version_skew').severity, 'critical');
+});
+
+test('an extension reload is never sent to the primary mirror when no host is behind', async () => {
+  // Skew caused only by the manifest: every connected host already matches.
+  const onlyManifest = snap({ disk: diskOk({ manifestVersion: '0.36.0' }) });
+  const evaluation = evaluateSnapshot(onlyManifest, null, { now: () => T0 });
+  assert.ok(evaluation.findings.some(item => item.code === 'version_skew'));
+  const plan = await planRemediation(evaluation, onlyManifest, evaluation.nextState,
+    { remediate: true, dryRun: true, now: () => T0 });
+  assert.deepEqual(plan.actions, []);
+  assert.equal(plan.reason, 'no_allowlisted_action');
+
+  // A genuinely behind host is still reloaded, bound to its own hostId.
+  const behind = snap({ status: statusOk({ hosts: [host({ extensionVersion: '0.36.0' })] }) });
+  const ev2 = evaluateSnapshot(behind, null, { now: () => T0 });
+  const plan2 = await planRemediation(ev2, behind, ev2.nextState,
+    { remediate: true, dryRun: true, now: () => T0 });
+  assert.deepEqual(plan2.actions.map(action => action.hostId), ['h-a']);
+  assert.ok(plan2.actions.every(action => action.hostId));
+});
+
+test('a half-written lock cannot disable monitoring forever', async () => {
+  const dir = tempState();
+  mkdirSync(join(dir, 'heartbeat'), { recursive: true });
+  writeFileSync(join(dir, 'heartbeat', 'lock'), JSON.stringify({ pid: 4242 })); // no `at`
+  const result = await runHeartbeat({ stateDir: dir, probe: async () => statusOk(),
+    diskFacts: diskOk(), now: () => T0, remediate: false });
+  assert.equal(result.status, 'completed');
+  assert.notEqual(result.reason, 'heartbeat_already_running');
+});
+
+test('watch mode enforces cadence only from its second cycle', async () => {
+  const dir = tempState();
+  const base = { stateDir: dir, probe: async () => statusOk(), diskFacts: diskOk(), remediate: false };
+  await runHeartbeat({ ...base, now: () => T0 });
+  // The first watch cycle inherits state from an hourly single-shot run.
+  const first = await runHeartbeat({ ...base, now: () => T0 + 3600000,
+    watch: true, cycleIndex: 1, intervalMs: 10000 });
+  assert.equal(first.frozen, false);
+  assert.equal(first.findings.some(item => item.code === 'clock_drift'), false);
+  // From cycle 2 the predecessor belongs to this same watch loop.
+  const second = await runHeartbeat({ ...base, now: () => T0 + 3660000,
+    watch: true, cycleIndex: 2, intervalMs: 10000 });
+  assert.equal(second.frozen, true);
+  assert.ok(second.findings.some(item => item.code === 'clock_drift'));
+});
+
+test('the real status probe uses the Bearer token and a bounded timeout', async () => {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200, json: async () => statusOk() };
+  };
+  try {
+    const result = await collectSnapshot({
+      config: { port: 19387, agentToken: 'a'.repeat(64) },
+      diskFacts: diskOk(), now: () => T0, timeoutMs: 5000
+    });
+    assert.equal(result.error, null);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'http://127.0.0.1:19387/status');
+    assert.equal(calls[0].init.headers.Authorization, `Bearer ${'a'.repeat(64)}`);
+    assert.ok(calls[0].init.signal, 'an unbounded probe would hang the scheduler');
+  } finally { globalThis.fetch = original; }
+});
+
+test('the default reload action sends the exact /call contract', async () => {
+  const calls = [];
+  const plan = { actions: [{ kind: 'extension_reload', hostId: 'h-a', executed: true }] };
+  const result = await executeRemediation(plan, {
+    requestFn: async (path, data) => {
+      calls.push({ path, data });
+      return { result: { status: 'success', verified: true } };
+    }
+  });
+  assert.equal(result.acted, true);
+  assert.equal(calls[0].path, '/call');
+  assert.equal(calls[0].data.name, 'browser_reload_extension');
+  assert.equal(calls[0].data.arguments.hostId, 'h-a');
+  assert.ok(calls[0].data.arguments.confirmation);
+});
+
+test('remediation and dry-run switches have opposite, observable behaviour', async () => {
+  const stale = snap({ disk: diskOk({ diskBuildId: 'build-b' }) });
+  const evaluation = evaluateSnapshot(stale, null, { now: () => T0 });
+  const enabled = await planRemediation(evaluation, stale, evaluation.nextState, { remediate: true, now: () => T0 });
+  const disabled = await planRemediation(evaluation, stale, evaluation.nextState, { remediate: false, now: () => T0 });
+  assert.equal(enabled.actions[0].executed, true);
+  assert.equal(disabled.skipped, true);
+  assert.equal(disabled.reason, 'remediation_disabled');
+  let killed = 0;
+  const restartFn = async () => { killed += 1; return { ok: true }; };
+  await executeRemediation(enabled, { restartFn });
+  assert.equal(killed, 1);
+  const dry = await planRemediation(evaluation, stale, evaluation.nextState, { remediate: true, dryRun: true, now: () => T0 });
+  await executeRemediation(dry, { restartFn });
+  assert.equal(killed, 1, 'a dry run must not touch the service');
+});
+
+test('health claims require every registered host to be connected', () => {
+  assert.equal(safeToAct(statusOk({ hostCount: 0, hosts: [], connected: false })), false);
+  assert.equal(safeToAct(statusOk({ hosts: [host({ connected: false })] })), false);
+  const broken = evaluateSnapshot(snap({ status: statusOk({ hosts: [host({ connected: false })] }) }),
+    null, { now: () => T0 });
+  assert.equal(broken.provenClean, false);
+  assert.equal(broken.verdict, 'uncertain', 'a disconnected host must not be reported as healthy');
+});

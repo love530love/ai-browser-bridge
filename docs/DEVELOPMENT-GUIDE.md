@@ -4,12 +4,14 @@
 
 ## 版本号同步规则（硬规则）
 
-### 每次更新版本时，必须同时更新两处：
+### 每次更新版本时，必须同时更新四处：
 
 1. **`package.json`** → `"version"` 字段
 2. **`extension/manifest.json`** → `"version"` 字段
+3. **`package-lock.json` 顶层** → `"version"` 字段
+4. **`package-lock.json` 的 `packages[""]`** → `"version"` 字段
 
-**这两处必须保持一致，缺一不可。**
+**这四处必须保持一致，缺一不可。** `src/version.js` 只从 `package.json` 读，所以漏改 lock 不会立刻报错，但 `doctor` 与发布对账会留下版本漂移；0.35.1 就因为 lock 停在 0.32.0 被记进 CHANGELOG。
 
 #### 踩过的坑
 - **0.32.1 遗漏**：只更新了 `package.json`，遗漏 `extension/manifest.json`，导致扩展端仍然显示 0.32.0。
@@ -43,6 +45,18 @@ node -e "const m=JSON.parse(require('fs').readFileSync('extension/manifest.json'
 - PowerShell 参数/局部变量**永不叫 `$pid` / `$Pid`**（保留变量，赋值直接报 ParserError）。
 - Windows 保留设备名文件（如 `nul`）删不掉：常规 `rm` / 回收站 API 报 `0x800704B0`。本轮实测 `[System.IO.File]::Delete('\\?\<绝对路径>')` → Access denied；`Remove-Item` 报成功但文件仍在（**假成功**）；Node `fs.unlinkSync('\\?\...')` 被 safe-delete shim 转成 trash 后同样失败，关掉 shim 则是 `EPERM`；`Add-Type` 编译 P/Invoke 被沙箱拦截。**本机唯一可行解是加进 `.gitignore`**，不要重复尝试删除，也不要把「报 ok」当删除成功。
 - `chrome://` 页面的 Document 子树只对**同一进程内**的 UIA 客户端可见；跨进程 `browser_native_snapshot` 读不到是预期行为，不是「页面不存在」。所以 reload + read + click 必须在**一个 PowerShell 进程**里完成。
+
+## 项目审计（0.37.1 血泪教训）
+
+1. **凡「只在异常轮生成」的产物，必须有一条断言检查渲染后文本**，不能只检查内存对象。0.35.1 事故报告与 0.37.0 incident 报告两次栽在同一处：模板读 `result.verdict`、调用没传，报告恒 `**undefined**`，而 CLI / jsonl / evidence 全对、730 条全绿。
+2. **凡新增模块，必须有一条测试走真实边界**（HTTP URL / header / body、CLI 参数、文件落盘），不能只测注入桩的纯函数。`test/scheduler-runtime.test.js` 是正面范例。
+3. **去抖状态机要检查「失败轮会不会清空证据」**：采集超时什么都没观测到，不构成反证；否则一次 8 秒超时就能让临界告警永不升级。
+4. **常驻 watch 的首轮不能与历史 cadence 比较**：state 可能来自数小时前的 hourly 单次巡检，按 10 秒间隔判定必报 `clock_drift` 并冻结全部自愈。单次巡检与常驻 watch 必须分别处理时序假设。
+5. **修复动作绝不能回落到 primary 兼容镜像**：`hostId: null` 会把命令打到另一个浏览器。候选为空就**不动作**，从 finding 的 evidence 显式取目标。
+6. **锁文件时间戳不可解析时必须可接管**，否则一次「openSync 之后、write 之前」的崩溃会让监控永久 `skipped`。
+7. **文档里的「两处 / 不支持 / 正确答案是 X」要与代码逐字对账**：内部工具名写错不抛错、静默落到默认分；过时的 Canary/Default 与「可换 Playwright」会直接把 Agent 引到错路；版本同步漏改 lock 不会立刻报错。
+8. **审计结论要区分现症与已闭环**：recheck 报 `uncertain` 不是修复，下一轮 `clean` 才是；心跳 jsonl 按 UTC 命名、工作日志按本地 GMT+8，相差 8 小时，只按「当天」找会漏掉凌晨故障。
+9. **能力存在但没接进真实调用路径 = 能力不存在**：调度器 `routeTask` 至今只在模块级测试里被调用，文档必须写明「尚未接入 `/call`」，不能让读者以为跨实例自动路由已生效。
 
 ## 心跳巡检（0.37.0 硬规则）
 

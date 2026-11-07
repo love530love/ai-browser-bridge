@@ -67,6 +67,10 @@ export function protectedUiPlan({ url = '', action = 'observe', target = '', des
       ...(executableHere ? { tool: actionTool } : {})
     },
     supportedActions: [...implementedActions],
+    // Scope note: these are unsupported for chrome:// protected pages through
+    // THIS UI Automation path only. They are not product-wide prohibitions -
+    // browser_debugger / browser_eval / browser_cookies etc. remain available
+    // to the agent on ordinary pages. Never read this list as a capability ban.
     unsupportedActions: ['chrome_settings_changes', 'devtools_script_execution', 'extension_install_or_remove', 'browser_data_access'],
 
     workflow: surfaceWorkflow(url, action),
