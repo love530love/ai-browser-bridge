@@ -1,4 +1,36 @@
-## 0.37.1 — 2026-11-07（**项目审计：修复事故报告 undefined 与心跳五处缺陷**）
+## 0.37.2 — 2026-11-07（**调度器接线与 /status 聚合字段、端到端投影回归**）
+
+P1 能力接线：`scheduler-integration.js` 的 `routeTask` / `detectConflicts` 不再只活在模块级测试与文档里，`/status` 增加 `hosts` 派生字段。
+
+### 新增模块
+
+- **`src/scheduler-bridge.js`**：导出 `createSchedulerBridge`，提供 `describe()`、`conflictEvidenceFor(job, queue)`（只读冲突证据，不改队列）、`routeExplicitly({name, arguments, agent})`（唯一会转发 POST /call 的路径，含递归防护 / 超时 uncertain 不重放 / 2 秒去抖）、`setInstanceMode()`。
+- **`src/load-balancer.js`**：新增 `routeTaskToInstance(instanceId, task)`，与现有 `routeTask` 同样的 POST /call 契约，目标端口由实例决定。
+
+### 集成到 server.js
+
+- `server.js` 创建 `schedulerBridge`，`/status` 响应增加 `hosts[]`（含 `hostId`、`protocolVersion`、`extensionVersion`、`connected`、`inFlight`、`features` 等）与 `queuedJobs[].conflictEvidence`。
+- `browser_route_task` 从策略判定之前移至之后，不绕过 `tools.deny`。
+- `browser_scheduler_status` 新增，报告接线状态与实例模式。
+
+### 工具索引与文档
+
+- `src/tool-index.js`：新增 `browser_route_task`（显式实例路由）与 `browser_scheduler_status`（调度器状态），缩 `purpose` 字段保持 < 3500 字节。
+- `src/tools.js`：`browser_route_task` 描述明确「仅在你明确调用时转发」，`browser_scheduler_status` 描述说明接线生效与实例模式。
+
+### 测试
+
+- **`test/scheduler-bridge.test.js`**（11 条）：单实例不转发、递归防护、正常转发 URL/headers/body 断言、转发超时 uncertain 不重放、2 秒去抖抑制、conflictEvidenceFor 不改队列、describe 字段完整、`routeTaskToInstance` 打到指定端口。
+- **`test/host-status-e2e.test.js`**（7 条）：真实 HTTP `GET /status` + `POST /call` 契约验证，多宿主投影、hostId 校验、不静默改派。
+- **`test/route-tool-e2e.test.js`**（5 条）：策略判定顺序、`browser_route_task` 递归防护、冲突证据可见性、实例模式切换。
+- **`test/visibility-runtime.test.js`**（5 条）：隐藏文档 rAF 不触发 + timer 兜底运行时断言。
+- 其余受影响测试同步通过。
+
+### 已知待排期（未实现）
+
+- `scheduler-integration.js` 的跨实例自动路由（当前仅显式调用）。
+- `/status` 顶层 `connected` / `extensionOwner` 仍为 primary 聚合。
+- `describeErrorList` 缺端到端投影断言。
 
 一次四视角并行只读审计（运行时与运维、核心代码、契约文档、测试有效性）+ 运行时基线取证。完整报告见 [docs/AUDIT-2026-11-07.md](docs/AUDIT-2026-11-07.md)。
 

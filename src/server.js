@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from 'node:fs';
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -15,6 +15,7 @@ import {
   HostRegistry, CommandLedger, negotiateHandshake, pickDispatchable,
   SERVICE_PROTOCOL_VERSION
 } from './host-registry.js';
+import { createSchedulerBridge } from './scheduler-bridge.js';
 import { createAgentPolicy } from './policy.js';
 import { protectedUiPlan } from './protected-ui.js';
 import { createMaintenanceStore } from './maintenance.js';
@@ -160,6 +161,33 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     taskDecompositionEnabled: true,
     instanceMode: false, // Set dynamically based on multi-instance config
     currentInstanceId: null
+  });
+
+  // P1 (0.37.2): wire the scheduler capabilities that previously existed only
+  // in module-level tests. detectConflicts becomes advisory evidence on queued
+  // jobs; routeTask is reachable ONLY through the explicit browser_route_task
+  // tool, never as an implicit /call forward (that would recurse and could
+  // replay a write whose outcome is unknown). Multi-instance mode is enabled
+  // only when a real instances.json declares more than one instance, so the
+  // default single-host behaviour is unchanged.
+  // Multi-instance routing is an explicit opt-in, NEVER inferred from a
+  // leftover instances.json: a stale registry would silently change /call
+  // behaviour and send work to an instance that is not running (measured in
+  // the 0.37.2 wiring test). Enable with config.instanceMode=true or
+  // AIB_INSTANCE_MODE=1. The registry is still read, but only as evidence.
+  const instanceModeEnabled = config.instanceMode === true || process.env.AIB_INSTANCE_MODE === '1';
+  let registeredInstances = 0;
+  try {
+    const instancesFile = join(stateDir, 'instances.json');
+    if (existsSync(instancesFile)) {
+      const parsed = JSON.parse(readFileSync(instancesFile, 'utf8'));
+      const list = Array.isArray(parsed) ? parsed : Object.values(parsed?.instances ?? parsed ?? {});
+      registeredInstances = list.length;
+    }
+  } catch { /* unreadable registry: report zero, stay in single-instance mode */ }
+  const schedulerBridge = createSchedulerBridge({
+    scheduler, instanceMode: instanceModeEnabled,
+    currentInstanceId: String(config.port)
   });
   
   // Use the scheduler's queue instead of the raw array
@@ -407,13 +435,18 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     })),
     activeCount: inFlight.size,
     activeByHost: [...inFlight.entries()].map(([hostId, job]) => ({ hostId, id: job.id, tool: job.name, ageMs: Date.now() - job.created })),
+    // Derived from the registry rather than the primary compatibility mirror:
+    // `connected` above describes one host, these describe the whole fleet.
+    hostsConnected: hosts.list().filter(host => host.ws.readyState === WebSocket.OPEN).length,
+    hostsDegraded: hosts.list().filter(host => host.baseline === true || (host.protocolVersion ?? 0) < 2).length,
+    scheduler: schedulerBridge.describe(),
     maintenance: maintenanceState(),
     tabLeases: leases.list(),
     connected: extension?.readyState === WebSocket.OPEN,
     queued: queue.length,
     queueSummary: queue.reduce((acc, job) => { acc[job.priorityName] = (acc[job.priorityName] || 0) + 1; return acc; }, {}),
     active: current ? { id: current.id, tool: current.name, priority: current.priorityName, ageMs: Date.now() - current.created, readOnly: !!current.tool.annotations?.readOnlyHint } : null,
-    queuedJobs: queue.map((job, index) => ({ index, id: job.id, tool: job.name, priority: job.priorityName, ageMs: Date.now() - job.created, readOnly: !!job.tool.annotations?.readOnlyHint, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null })),
+    queuedJobs: queue.map((job, index) => ({ index, id: job.id, tool: job.name, priority: job.priorityName, ageMs: Date.now() - job.created, readOnly: !!job.tool.annotations?.readOnlyHint, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, conflictEvidence: !!job.conflictEvidence })),
     taskLease: lease,
     desktopOperation: desktopOperation ? { tool: desktopOperation.tool, ageMs: Date.now() - desktopOperation.startedAt } : null,
     uploadRoots: config.uploadRoots.length,
@@ -1036,6 +1069,12 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       };
       const index = queue.findIndex(item => item.priority > job.priority);
       if (index === -1) queue.push(job); else queue.splice(index, 0, job);
+
+      // Advisory only. Conflict detection never refuses, reorders or changes a
+      // job: the agent gets evidence in queuedJobs and decides what is safe.
+      // This is the first real /call-path use of scheduler.detectConflicts.
+      try { job.conflictEvidence = schedulerBridge.conflictEvidenceFor(job, queue); }
+      catch { job.conflictEvidence = null; }
       
       // Enhanced enqueue with AI assessment (if enabled)
       if (scheduler) {
@@ -1519,6 +1558,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     // disconnected: the guidance must not depend on the thing that is broken.
     if (name === 'browser_capability_guide') return capabilityGuide(args);
     if (name === 'browser_queue_status') return queueSnapshot();
+    if (name === 'browser_scheduler_status') return {
+      status: 'success', ...schedulerBridge.describe(), registeredInstances,
+      note: 'detectConflicts and routeTask are now reachable from the /call path. Conflict detection is advisory evidence on queued jobs; cross-instance dispatch happens only when you explicitly call browser_route_task, never as an implicit forward. Instance mode is an explicit opt-in (config.instanceMode=true or AIB_INSTANCE_MODE=1), never inferred from a leftover instances.json.',
+      recommendedNextAction: schedulerBridge.describe().instanceMode
+        ? 'Multi-instance routing is enabled. Use browser_route_task for work that should run on a sibling instance.'
+        : 'Single-instance mode: browser_route_task returns waiting instead of forwarding. Enable config.instanceMode (or AIB_INSTANCE_MODE=1) and start the sibling instances if you need cross-instance dispatch.'
+    };
     if (name === 'browser_hosts') return {
       status: 'success',
       serviceVersion: VERSION,
@@ -1559,6 +1605,14 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (!decision.allowed) {
       audit({ time: new Date().toISOString(), id: randomUUID(), tool: name, tabId: args.tabId ?? null, agent: decision.agent ?? null, outcome: 'denied', errorCategory: decision.reason, durationMs: 0 });
       return decision;
+    }
+    // This is the ONLY place a /call can be forwarded to a sibling instance,
+    // and it sits AFTER policy.evaluate so an agent restricted by tools.deny
+    // cannot use routing to bypass its own governance. Explicit dispatch
+    // prevents recursion and never replays an unknown write.
+    if (name === 'browser_route_task') {
+      const routedArgs = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments) ? args.arguments : {};
+      return schedulerBridge.routeExplicitly({ name: args.name, arguments: routedArgs, agent: args.agent ?? null });
     }
     if (name === 'browser_failure_help') return failureHelp(args, { readOnly: TOOLS.find(item => item.name === args.attemptedAction)?.annotations?.readOnlyHint === true });
     // An explicitly routed task stays on its browser. Silently moving it to a

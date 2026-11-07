@@ -233,6 +233,38 @@ class LoadBalancer {
   getInstancePort(instanceId) {
     return portFor(instanceId);
   }
+
+  /**
+   * Route a task to one specific instance (precise target binding).
+   * Same POST /call contract as routeTask (method/headers/body identical),
+   * but the target port is resolved from the caller-supplied instanceId
+   * instead of selectBestInstance, so a task is never silently sent to a
+   * different browser. Returns { routed, targetInstance, result } or
+   * { routed:false, reason }.
+   */
+  async routeTaskToInstance(instanceId, task) {
+    const port = this.getInstancePort(instanceId);
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/call`, {
+        method: 'POST',
+        headers: { ...agentHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: task.name,
+          arguments: task.args || {}
+        }),
+        signal: AbortSignal.timeout(5000)
+      });
+
+      if (!response.ok) {
+        return { routed: false, reason: 'routing_failed', targetInstance: instanceId };
+      }
+
+      const result = await response.json();
+      return { routed: true, targetInstance: instanceId, result };
+    } catch {
+      return { routed: false, reason: 'routing_timeout', targetInstance: instanceId };
+    }
+  }
   
   /**
    * Get all instances with their current load
