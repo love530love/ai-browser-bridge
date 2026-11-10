@@ -157,3 +157,38 @@ test('the reload result separates "the reload worked" from "the list is gone"', 
   assert.doesNotMatch(workerSource, /errorsClearedBy/,
     'the worker must not claim the reload clears the list: Chrome keeps those entries per extension id, outside the worker');
 });
+
+test('a failed clear step reports unknown with a read-only next step, never "reload again"', () => {
+  // Extract the REAL nextStep literals from the shipped PowerShell script. A
+  // test that invents its own wording stays green while the string the caller
+  // actually sees regresses - the projection bug this contract exists to stop.
+  const literals = [...script.matchAll(/nextStep = '([^']*)'/g)].map(m => m[1]);
+  assert.ok(literals.length >= 10, `every failure branch must carry a nextStep, got ${literals.length}`);
+  for (const text of literals) {
+    assert.doesNotMatch(text, /call browser_reload_extension again|then repeat/i,
+      `a clear-step failure must not tell the caller to repeat the extension reload: ${text}`);
+    assert.match(text, /browser_extension_errors/, 'must name the read-only error-list page');
+    assert.match(text, /unknown, not proof that errors remain/i,
+      'must say the list state is unknown rather than implying errors are still there');
+    assert.match(text, /Do not repeat browser_reload_extension/, 'must warn against a second reload');
+  }
+
+  // Rendered-text assertion: no_chrome_window is the exact branch that fired
+  // on a host with no visible Chrome window. Check what describeErrorList()
+  // actually hands back as howToRetry, not just the in-memory input object.
+  const noWindow = literals.find(t => /not showing any visible window/i.test(t));
+  assert.ok(noWindow, 'the no_chrome_window wording must exist');
+  const described = describeErrorList({
+    status: 'failed', reason: 'no_chrome_window', documentVisible: false,
+    scanned: 0, nextStep: noWindow
+  });
+  assert.equal(described.errorListCleared, false);
+  assert.equal(described.errorListClearStep.reason, 'no_chrome_window');
+  assert.equal(described.errorListClearStep.howToRetry, noWindow,
+    'the projected text must be the shipped wording verbatim');
+  assert.doesNotMatch(described.errorListClearStep.howToRetry, /call browser_reload_extension again/i);
+  assert.match(described.errorListClearStep.howToRetry, /browser_extension_errors/);
+  assert.match(described.errorListClearStep.howToRetry, /unknown/i);
+  assert.equal(described.errorList.nextStep, noWindow,
+    'the evidence whitelist must not drop nextStep');
+});

@@ -1,3 +1,13 @@
+## 0.37.4 — 2026-11-10（**修正清错失败分支的误导指引**）
+
+起因：v0.37.3 部署时 `browser_reload_extension` 已 `verified:true`，但附带的清错子步骤因 `no_chrome_window` 报 `errorListCleared:false`，其 `howToRetry` 却写着「Bring a Chrome window up and call **browser_reload_extension again**」。用户现场看到错误列表其实已清空——那条返回的含义是「没读到页面 ⇒ 状态 unknown」，不是「确认还有错误」。把 unknown 说成否定事实，还会诱导调用方**为一个已经成功的重载再重载一次**。
+
+- `scripts/clear-extension-errors.ps1`：全部 **10 处**失败分支的 `nextStep` 统一为同一契约——明确「list state is unknown, not proof that errors remain」「重载本身可能已成功」、指向 `browser_extension_errors` **只读核验**、并写明 `Do not repeat browser_reload_extension`（只有在前提真正改变、确实需要重新清错时才显式重跑，且它会二次重载）。原先 6 处 `call browser_reload_extension again` 与 4 处含糊的 `then repeat` / `before retrying` 全部清除；`reload_invoke_raised` / `clear_all_invoke_raised` 两条额外保留「结果不确定的写不得盲目重放」。
+- `src/server.js:1290` 的多宿主指引（「其它浏览器仍跑旧扩展，按各自 hostId 重载」）语义正当，**未改**；`describeErrorList()` 的保守语义（无页面证据不宣称 clean）也未改——问题在文案，不在判定。
+- `test/extension-errors.test.js` 新增 1 条：从 PowerShell 源码**提取真实的 `nextStep` 字面量**（不是测试自造字符串），逐条断言无重复重载指引、含 `browser_extension_errors` / `unknown` / `Do not repeat`；再把 `no_chrome_window` 那条真实文案喂给 `describeErrorList()`，断言**渲染后**的 `errorListClearStep.howToRetry` 逐字保留，且证据白名单没丢 `nextStep`。
+
+不改判定逻辑、不改能力面；仅文案与契约测试。全量 `npm test` 796→797 条全绿。
+
 ## 0.37.3 — 2026-11-10（**部署入口可诊断化：宿主环境体检、启动器闭环、运行时固化**）
 
 来源是一份真实 Windows 部署复盘（[全文归档](docs/DEPLOYMENT-FEEDBACK-2026-11-09.md)）。它记录的环境是 0.5.22 / `D:\Project\ai-browser-bridge`，与本仓库版本线不同，但逐条对账后 §3 的 8 条问题在 0.37.2 中全部或大部分成立。核心结论：**运行时健康检查做得很细，宿主环境检查几乎为零；断线后的自愈很强，首次安装的自助性很弱。**

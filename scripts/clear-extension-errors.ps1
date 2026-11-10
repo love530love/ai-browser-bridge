@@ -115,7 +115,7 @@ if ($candidates.Count -eq 0) {
   Emit @{
     status = 'failed'; retryable = $true; reason = 'no_chrome_window'; cleared = 0; dispatched = $false
     documentVisible = $false; clearedState = 'unknown'; scanned = 0
-    nextStep = 'Chrome is not showing any visible window, so the error list cannot be reached. Bring a Chrome window up and call browser_reload_extension again - do not assume the panel is clean.'
+    nextStep = 'Chrome is not showing any visible window, so the error list could not be read. The list state is unknown, not proof that errors remain; the extension reload itself may already have succeeded. Verify with browser_extension_errors (read-only) once a Chrome window is visible. Do not repeat browser_reload_extension to clear this result - that reloads the extension a second time; only do it deliberately after the preconditions change.'
   }
 }
 
@@ -146,7 +146,7 @@ if ($ChromeWindowHandle -gt 0) {
       status = 'failed'; retryable = $false; reason = 'multiple_errors_pages'; cleared = 0; dispatched = $false
       documentVisible = $false; clearedState = 'unknown'; scanned = 0
       candidates = (Show-Candidates $showingErrors)
-      nextStep = 'More than one Chrome window is showing the extension error list. Nothing was clicked. Close the extra one and call browser_reload_extension again, or run browser_native_snapshot with includeDocuments:true on the intended window and invoke its "Clear all" button.'
+      nextStep = 'More than one Chrome window is showing the extension error list, so no window was chosen and nothing was clicked. The list state is unknown, not proof that errors remain; the extension reload itself may already have succeeded. Close the extra window, then verify with browser_extension_errors (read-only). Do not repeat browser_reload_extension to clear this result - that reloads the extension a second time; only do it deliberately after the preconditions change.'
     }
   } elseif ($candidates.Count -eq 1) {
     $target = $candidates[0]
@@ -156,7 +156,7 @@ if ($ChromeWindowHandle -gt 0) {
       status = 'failed'; retryable = $false; reason = 'target_window_ambiguous'; cleared = 0; dispatched = $false
       documentVisible = $false; clearedState = 'unknown'; scanned = 0
       candidates = (Show-Candidates $candidates)
-      nextStep = 'Several Chrome windows are open and none of them shows the extension error list, so no window can be identified safely and nothing was clicked. Call browser_extension_errors first to bring that page to the front, then repeat. As a last resort run browser_native_snapshot with includeDocuments:true on the intended window and invoke its "Clear all" button.'
+      nextStep = 'Several Chrome windows are open and none of them shows the extension error list, so no window can be identified safely and nothing was clicked. The list state is unknown, not proof that errors remain; the extension reload itself may already have succeeded. Call browser_extension_errors (read-only) to put the error list in front of the intended window, then read it. Do not repeat browser_reload_extension to clear this result - that reloads the extension a second time; only do it deliberately after the preconditions change.'
     }
   }
 }
@@ -181,7 +181,7 @@ try {
     status = 'failed'; retryable = $true; reason = 'window_unavailable'; cleared = 0; dispatched = $false
     documentVisible = $false; clearedState = 'unknown'; scanned = 0
     processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
-    nextStep = 'The Chrome window disappeared before it could be read. Call browser_reload_extension again after the window is stable.'
+    nextStep = 'The Chrome window disappeared before it could be read. The list state is unknown, not proof that errors remain; the extension reload itself may already have succeeded. Once a window is stable, verify with browser_extension_errors (read-only). Do not repeat browser_reload_extension to clear this result - that reloads the extension a second time; only do it deliberately after the preconditions change.'
   }
 }
 
@@ -280,7 +280,7 @@ if (-not $addressVerified) {
     processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
     address = $target.Address; addressVerified = $false
     candidates = (Show-Candidates $candidates)
-    nextStep = 'The front tab of the selected window is not chrome://extensions, so this is not the extension error list. Nothing was read and nothing was clicked. Call browser_extension_errors to put the error list in front, then repeat. Do NOT report the panel as clean. If the connected extension belongs to a different browser host, this page belongs to the wrong browser entirely.'
+    nextStep = 'The front tab of the selected window is not chrome://extensions, so this is not the extension error list. Nothing was read and nothing was clicked. The list state is unknown, not proof that errors remain; the extension reload itself may already have succeeded. Call browser_extension_errors (read-only) to put the error list in front, then read it, and do not report the panel as clean. Do not repeat browser_reload_extension to clear this result - that reloads the extension a second time; only do it deliberately after the preconditions change. If the connected extension belongs to a different browser host, this page belongs to the wrong browser entirely.'
   }
 }
 $errorsQueryVisible = $false
@@ -303,7 +303,7 @@ if (-not (Has-Document $rows)) {
       documentVisible = $false; clearedState = 'unknown'; scanned = $rows.Count
       processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
       address = $target.Address
-      nextStep = 'The browser Reload control was not in the tree, so the page could not be brought into the accessibility engine. Call browser_reload_extension again.'
+      nextStep = 'The browser Reload control was not in the tree, so the error list page could not be brought into the accessibility engine. The list state is unknown, not proof that errors remain; the extension reload itself may already have succeeded. Verify with browser_extension_errors (read-only) once the page is readable. Do not repeat browser_reload_extension to clear this result - that reloads the extension a second time; only do it deliberately after the preconditions change.'
     }
   }
   if (-not (Invoke-Btn $reload)) {
@@ -311,7 +311,7 @@ if (-not (Has-Document $rows)) {
       status = 'failed'; retryable = $true; reason = 'reload_invoke_raised'; cleared = 0; dispatched = $false
       documentVisible = $false; clearedState = 'unknown'; scanned = $rows.Count
       processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
-      nextStep = 'Reload was found but its Invoke call raised. Nothing was clicked. Read the window state before retrying.'
+      nextStep = 'Reload was found but its Invoke call raised, so the outcome of that click is unknown; the list state is unknown, not proof that errors remain, and the extension reload itself may already have succeeded. Do not repeat browser_reload_extension to clear this result - that reloads the extension a second time, and an uncertain click must be re-observed before any retry. Verify with browser_extension_errors (read-only) once the page is readable.'
     }
   }
   $reloadMethod = 'toolbar_reload'
@@ -331,7 +331,7 @@ if (-not (Has-Document $rows)) {
       waitedMs = $deadline.ElapsedMilliseconds; scanned = $rows.Count
       processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
       address = $target.Address
-      nextStep = 'The error list was reloaded but its content never became readable within the wait, so nothing was clicked and the state of the list is unknown. Call browser_reload_extension again - do not report the panel as clean.'
+      nextStep = 'The error list was reloaded but its content never became readable within the wait, so nothing was clicked. The list state is unknown, not proof that errors remain; the extension reload itself may already have succeeded. Verify with browser_extension_errors (read-only) once the page is readable, and do not report the panel as clean. Do not repeat browser_reload_extension to clear this result - that reloads the extension a second time; only do it deliberately after the preconditions change.'
     }
   }
 }
@@ -354,7 +354,7 @@ if (-not $documentVisible) {
     documentVisible = $false; clearedState = 'unknown'; reloaded = ($reloadMethod -ne 'none'); reloadMethod = $reloadMethod
     waitedMs = $clearDeadline.ElapsedMilliseconds; scanned = $rows.Count
     processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
-    nextStep = 'The page stopped being readable before the error list could be read. Nothing was clicked. Call browser_reload_extension again.'
+    nextStep = 'The page stopped being readable before the error list could be read, so nothing was clicked. The list state is unknown, not proof that errors remain; the extension reload itself may already have succeeded. Verify with browser_extension_errors (read-only) once the page is readable. Do not repeat browser_reload_extension to clear this result - that reloads the extension a second time; only do it deliberately after the preconditions change.'
   }
 }
 
@@ -384,7 +384,7 @@ if (-not $dispatched) {
     status = 'failed'; retryable = $false; reason = 'invoke_raised'; cleared = 0; dispatched = $false
     documentVisible = $true; clearedState = 'unknown'; errorEntries = $errorEntries; scanned = $rows.Count
     processId = $target.ProcessId; windowHandle = $target.Handle.ToInt64(); targetResolution = $resolution
-    nextStep = 'The Clear all button was found but its Invoke call raised, so the outcome is unknown and repeating it blindly is not safe. Read the page again before deciding.'
+    nextStep = 'The Clear all button was found but its Invoke call raised, so the outcome is unknown; the list state is unknown, not proof that errors remain, and the extension reload itself may already have succeeded. Do not repeat browser_reload_extension to clear this result - that reloads the extension a second time, and an uncertain write must never be replayed blindly. Verify with browser_extension_errors (read-only) by reading the page before deciding.'
   }
 }
 
