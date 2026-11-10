@@ -47,5 +47,5 @@ AI → MCP stdio / CLI / HTTP → 127.0.0.1 HTTP 服务 → 已认证 WebSocket 
 
 ## 执行约定
 
-所有 Windows shell 使用 PowerShell 7。项目 Node 22+；`npm ci` 使用锁文件。保持 `.local`、个人浏览器资料、测试临时配置和 `node_modules` 不进入源码分发包。普通用户聊天不得触发后台 AI 轮询。未经用户明确请求，不更新全局 memories。
+所有 Windows shell 使用 PowerShell 7；**唯一例外是 `doctor-lite.bat` → `scripts/doctor-host-env.mjs`**，它刻意只依赖 `node.exe`，用于诊断「PowerShell 7 缺失」这个 `doctor.bat` 自身覆盖不了的故障，不要给它加回 pwsh 依赖。所有 `.bat` 双击入口先 `call scripts/check-runtime.bat` 检测 pwsh / Node 22+，失败写 `.local/launcher-error.log`、保留窗口并返回非零码，成功路径不 `pause`。项目 Node 22+；`npm ci` 使用锁文件。保持 `.local`、个人浏览器资料、测试临时配置和 `node_modules` 不进入源码分发包。普通用户聊天不得触发后台 AI 轮询。未经用户明确请求，不更新全局 memories。
 

@@ -1,3 +1,44 @@
+## 0.37.3 — 2026-11-10（**部署入口可诊断化：宿主环境体检、启动器闭环、运行时固化**）
+
+来源是一份真实 Windows 部署复盘（[全文归档](docs/DEPLOYMENT-FEEDBACK-2026-11-09.md)）。它记录的环境是 0.5.22 / `D:\Project\ai-browser-bridge`，与本仓库版本线不同，但逐条对账后 §3 的 8 条问题在 0.37.2 中全部或大部分成立。核心结论：**运行时健康检查做得很细，宿主环境检查几乎为零；断线后的自愈很强，首次安装的自助性很弱。**
+
+### P0 · 双击入口不再静默失败
+
+- 新增 `scripts/check-runtime.bat`：检测 `pwsh.exe` 与 Node 22+，缺失时给中文安装指引、写 `.local/launcher-error.log`、`pause`、退出非零码；成功路径不 `pause`（不卡 CI / Agent）。
+- 7 个 `.bat`（`start` / `status` / `doctor` / `pair` / `stop` / `install-autostart` / `uninstall-autostart`）统一 `call` 公共检查、捕获并传播退出码；`install` / `uninstall` 原先成功也 `pause`，改为仅失败时保留窗口。
+- README 前置要求显式列出 **PowerShell 7**，补在线 / 便携版离线安装路径。
+- **明确不采纳**「`.bat` 回退 `powershell.exe`」：`start.ps1` / `scripts/watch-service.ps1` 用了 `[Convert]::ToHexString`（PowerShell 7 / .NET 5+ 才有），回退只会把可见失败换成更难查的运行时异常。同时更正 README 旧注脚「所有 `.ps1` 都不要求 PowerShell 7，5.1 也能直接运行」——**脚本引擎兼容性与启动器依赖是两件事**。
+
+### P1 · 让诊断工具与故障在同一层
+
+- `doctor-lite.bat` + `scripts/doctor-host-env.mjs`：**零 pwsh 依赖**，直接由 `node.exe` 运行，因此能覆盖「PowerShell 7 缺失」这个 `doctor.bat` 天然覆盖不了的最高频故障。检查 pwsh / node 路径与版本、`.local/runtime.json` 固化路径是否失效、自启注册项（启动快捷方式 / HKCU Run / 计划任务）、19387 监听者与**服务四态**（未安装 / 未启动 / 端口占用或无响应 / 运行中）、`NO_PROXY` 是否覆盖 loopback；每项带可复制修复命令。
+- 沙箱或权限拿不到的检查（`reg` / `schtasks` / `netstat`）一律报 `unknown`，**不把「查不到」写成「失败」**；带 token 的本机探活不把密钥写进命令行、日志或输出。
+- `extension/worker.js` 增加 `hasEverConnected`（`chrome.storage.session` 持久化）：从未握手成功时面板给「请双击 start.bat / doctor-lite.bat」而不是误导性的「后台自动重连中」，**自动重连照常保留**；4002 / 4003 / 4004 分支语义不变。
+
+### P1 · 自启安装 / 卸载闭环
+
+- `install-autostart.ps1` 写 `.local/autostart-registry.json`（只记本次真正注册成功的条目）与 `.local/runtime.json`（pwsh / node 绝对路径），新增只读 `-StatusOnly` 列出全部注册项；外部计划任务标 `external` 且不由项目管理。
+- `uninstall-autostart.ps1` 按清单逐项清理并输出「已移除 / 未找到」，最后把 `entries` 清空但保留文件作为证据；对外部计划任务**只报告、不擅自删除**。
+
+### P2 · 运行时路径与本机网络
+
+- 新增 `scripts/resolve-runtime.ps1`；`start.ps1` / `agent.ps1` / `scripts/watch-service.ps1` 统一优先读固化路径、失效告警后回退 `Get-Command`（三个入口不再各自 `Get-Command`）。
+- 两处本机 `Invoke-RestMethod` 加 `-NoProxy`；`start.ps1` 启动失败时区分「端口已有监听但 `/status` 不通」与「端口始终无监听」，分别给 `Get-NetTCPConnection` 命令 / 日志路径与 `doctor-lite.bat`。
+- README 补「现象 → 命令」排查表、重启后验收清单、代理与 `NO_PROXY` 提示。
+
+### 测试
+
+- 新增 `test/launcher-contract.test.js`、`test/doctor-host-env.test.js`、`test/extension-never-connected.test.js`、`test/autostart-registry.test.js`、`test/runtime-resolution.test.js`、`test/deployment-contract.test.js`：前五个都要求至少一条真实边界断言（真实 spawn `.bat` / `node --json` / `pwsh` 解析固化路径），并检查**渲染后面向用户的文本**；最后一个把「文档承诺的路径必须真实存在」「清单写入格式与诊断读取格式逐字一致」固化为可执行契约。
+- **真实边界测试当场抓到三处回归，逐一按证据修掉，没有放宽断言掩盖**：
+  1. `start.ps1` 改为加载 `scripts/resolve-runtime.ps1` 后，`test/startup-mutex.test.js` 的临时夹具只复制 `start.ps1`，脚本在拿互斥锁之前就失败，看起来像互斥锁缺陷（全量 771 条里唯一一条红）。夹具补齐共享模块后恢复通过。
+  2. `test/launcher-policy.test.js` 原本遍历根目录所有 `.bat` 并断言每个都含 `pwsh.exe -NoProfile -File`，新增的零 pwsh 入口 `doctor-lite.bat` 命中。改为**显式白名单 + 更强的正向契约**（该入口必须真的不含 `pwsh.exe`、必须用 `node.exe` 调 `scripts\doctor-host-env.mjs`、必须传播退出码），而不是把断言改松。
+  3. `scripts/doctor-host-env.mjs` 的 `checkPort()` 把 `...extra`（含 `serviceState: null`）排在显式状态之后，四个分支的结构化字段恒为 `null`，而手写 `detail` 文本是对的——典型的「只在异常轮生成 / 渲染后字段值」缺陷。由模块测试第 12 / 13 条抓到，改为不把 `serviceState` 放进 `extra`。
+
+### 已知未采纳 / 延后
+
+- 官方计划任务式无人值守自启（反馈 §5 P2）：本轮只检测并如实报告外部任务，安装 / 卸载均不自动注册或删除。
+- 反馈 §7 的「额外注册 `AI Browser Bridge Watchdog`」是那次部署的规避措施，不是项目自带能力。
+
 ## 0.37.2 — 2026-11-07（**调度器接线与 /status 聚合字段、端到端投影回归**）
 
 P1 能力接线：`scheduler-integration.js` 的 `routeTask` / `detectConflicts` 不再只活在模块级测试与文档里，`/status` 增加 `hosts` 派生字段。

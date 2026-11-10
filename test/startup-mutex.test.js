@@ -13,8 +13,11 @@ test('concurrent start invocation does not enter setup twice', { skip: process.p
   const server = http.createServer((req,res) => { res.setHeader('content-type','application/json'); res.end('{"service":"ai-browser-bridge"}'); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => { server.closeAllConnections(); server.close(); rmSync(root, { recursive:true, force:true }); });
-  mkdirSync(join(root, 'src')); mkdirSync(join(root, '.local'));
+  mkdirSync(join(root, 'src')); mkdirSync(join(root, '.local')); mkdirSync(join(root, 'scripts'));
   copyFileSync(fileURLToPath(new URL('../start.ps1', import.meta.url)), join(root, 'start.ps1'));
+  // start.ps1 dot-sources the shared runtime resolver. A fixture that omits it
+  // fails before the mutex is acquired, which would look like a mutex bug.
+  copyFileSync(fileURLToPath(new URL('../scripts/resolve-runtime.ps1', import.meta.url)), join(root, 'scripts', 'resolve-runtime.ps1'));
   writeFileSync(join(root,'.local','config.json'), JSON.stringify({port:server.address().port,agentToken:'fixture'}));
   writeFileSync(join(root,'src','cli.js'), "const fs=require('fs');fs.appendFileSync(require('path').join(__dirname,'../entered'),'x');setTimeout(()=>{},2000);");
   const launch = () => {

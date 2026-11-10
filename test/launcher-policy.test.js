@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+// Deliberate exception: doctor-lite.bat must work on a machine with NO
+// PowerShell 7 at all. Otherwise the most common first-install failure also
+// disables the only tool that could explain it (diagnosis and fault on the
+// same layer). It is a positive contract, not a waiver.
+const NODE_ONLY_LAUNCHERS = new Set(['doctor-lite.bat']);
 test('distributed Windows launchers respect host execution policy and use explicit script files', () => {
   const files = readdirSync(root).filter(name => name.endsWith('.bat'));
   assert.ok(files.length > 0);
@@ -12,7 +17,16 @@ test('distributed Windows launchers respect host execution policy and use explic
     const source = readFileSync(join(root, file), 'utf8');
     assert.doesNotMatch(source, /-ExecutionPolicy\b|-EncodedCommand\b|powershell\.exe/i, file);
     assert.doesNotMatch(source, /-Command\b/i, `${file}: use -File to avoid script-string interpolation`);
+    if (NODE_ONLY_LAUNCHERS.has(file)) {
+      assert.doesNotMatch(source, /pwsh\.exe/i, `${file} must not depend on PowerShell 7`);
+      assert.match(source, /node\.exe\s+"%~dp0scripts\\doctor-host-env\.mjs"/i, file);
+      assert.match(source, /exit \/b/, `${file} must propagate an exit code`);
+      continue;
+    }
     assert.match(source, /pwsh\.exe\s+-NoProfile\s+-File\s+"%~dp0[^"\r\n]+\.ps1"/i, file);
+  }
+  for (const name of NODE_ONLY_LAUNCHERS) {
+    assert.ok(files.includes(name), `声明的零 pwsh 例外入口必须真实存在：${name}`);
   }
 });
 

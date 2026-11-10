@@ -130,7 +130,7 @@ async function doctor() {
     }
   } catch (error) {
     add('service-status', false, { error: error.message });
-    report.recommendations.push('Bridge service is not reachable on 127.0.0.1. Run start.ps1 and wait for status.');
+    report.recommendations.push('Bridge service is not reachable on 127.0.0.1. Run start.ps1 and wait for status. If the launcher itself may have failed (missing PowerShell 7, wrong Node, port occupied, proxy swallowing loopback), run doctor-lite.bat first: it uses only node.exe, needs no pwsh.exe, and reports the host environment with copyable fixes.');
     report.localOnly = 'The bridge intentionally binds to 127.0.0.1 and rejects browser Origins; do not expose it directly to the public internet.';
     return report;
   }

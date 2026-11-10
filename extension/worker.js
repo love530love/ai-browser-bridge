@@ -33,6 +33,26 @@ let reconnectTimer = null;
 let reconnectAttempt = 0;
 let connectInFlight = false;
 let connectionState = '未连接';
+// The service worker is re-evaluated on every wake, so a plain in-memory flag
+// would forget a successful handshake and tell a working user "never connected"
+// after each suspension. chrome.storage.session survives the wake without a
+// disk write. MV3 has no top-level await, so the value is restored through one
+// shared promise that connect() awaits before a socket can close; a failed read
+// resolves to false and never blocks the connection.
+let hasEverConnected = false;
+async function restoreHasEverConnected() {
+  try {
+    const stored = await chrome.storage.session.get('hasEverConnected');
+    hasEverConnected = stored?.hasEverConnected === true;
+  } catch {
+    hasEverConnected = false;
+  }
+}
+const everConnectedReady = restoreHasEverConnected();
+function markEverConnected() {
+  hasEverConnected = true;
+  chrome.storage.session.set({ hasEverConnected: true }).catch(() => {});
+}
 const errorJournal = createErrorJournal(chrome.storage.local, message => {
   if (socket?.readyState !== WebSocket.OPEN || connectionState !== '已连接') return false;
   socket.send(JSON.stringify(message)); return true;
@@ -370,6 +390,17 @@ async function scheduleReconnect(delayMs = null) {
   }
   reconnectTimer = setTimeout(() => connect({ automatic: true }), delayMs);
   chrome.alarms.create(reconnectAlarm, { delayInMinutes: Math.max(0.1, delayMs / 60000) });
+}
+// The panel is the only status surface a normal user sees. A close with no
+// successful handshake behind it is not "a disconnect that will reconnect": no
+// service process ever answered, so automatic retries cannot succeed on their
+// own. Give an action instead of a promise. Once a handshake has completed, a
+// later close really is a disconnect and the original wording is accurate.
+// Kept pure so the exact rendered text can be asserted without standing up Chrome.
+function disconnectHintFor(hasEverConnected) {
+  return hasEverConnected
+    ? '连接已断开，后台自动重连中'
+    : '未连上本机服务：请双击 start.bat；已启动请运行 doctor-lite.bat';
 }
 function disconnect(message = '已暂停', { automaticReconnect = false, reconnectDelayMs = 5000 } = {}) {
   connectionEpoch++;
@@ -1706,6 +1737,7 @@ async function connect({ automatic = false } = {}) {
     return;
   }
   if (epoch !== connectionEpoch) { connectInFlight = false; return; }
+  await everConnectedReady;
   const hostId = await hostIdentity();
   if (epoch !== connectionEpoch) { connectInFlight = false; return; }
   const ws = new WebSocket(`ws://127.0.0.1:${config.port}/extension`);
@@ -1752,6 +1784,7 @@ async function connect({ automatic = false } = {}) {
         }
         clearTimeout(connectDeadline); connectDeadline = null;
         reconnectAttempt = 0;
+        markEverConnected();
         connectionState = '已连接';
         void errorJournal.flush().catch(() => {});
         notifyStatus();
@@ -1799,7 +1832,7 @@ async function connect({ automatic = false } = {}) {
     // plainly instead of telling the user to close their other browser.
     if (event.code === 4003) { disconnect('本机服务仍是单宿主旧版本，请升级服务后重试', { automaticReconnect: true, reconnectDelayMs: 30000 }); return; }
     if (event.code === 4004) { disconnect('同一浏览器的新连接已接管', { automaticReconnect: false }); return; }
-    disconnect('连接已断开，后台自动重连中', { automaticReconnect: true });
+    disconnect(disconnectHintFor(hasEverConnected), { automaticReconnect: true });
   };
 }
 chrome.alarms.onAlarm.addListener(alarm => {

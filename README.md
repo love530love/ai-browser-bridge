@@ -4,7 +4,7 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.37.2**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.37.3**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 0.25.0 补的是**一闪而过、或者悬停才存在**的那层 UI。toast 活 2–3 秒，任何「等你问我的时候再扫一遍」都必然错过，所以 `browser_transient` 不是更快的扫描，而是扩展在 isolated world 里装一个常驻 `MutationObserver`，**在提示还在屏幕上时就记下来**：`read` 能查到已经消失的 toast（带 `firstSeenAt` / `goneAt` / `preExisting`），`watch` 等新的提示出现，`clear` 只清记录。tooltip 有两条路：声明式的（`title` / `data-tooltip` / `aria-describedby`）由 `browser_popup action:"probe"` 直接读；纯 CSS `:hover` 的只能让**真实指针**去问——合成 `mouseover` 不移动 `:hover` 状态，所以 `action:"reveal"` 走 CDP `Input.dispatchMouseEvent`，settle 之后再读新出现的浮层。popconfirm 看起来就是个普通按钮，点两次就删两次，所以 `action:"open"` 点一次并返回气泡里的按钮，`action:"choose"` 按 `choice:"confirm"|"cancel"` 或确切文本选，每个派发过点击的结果都是 `retryable:false`。tooltip 常挂在 `<span>`/图标上，`browser_find_element` 不会给 ref，因此 `browser_popup` 支持 `selector` 自己定位，`probe` 不带参数时还会列出全页声明了 tooltip 的元素。真机实测（Chrome 156）三处坑写进了代码：`el.textContent = x` 是替换文本节点而不是 `characterData` 变更（第一版因此漏掉全部 aria-live）；`visible()` 的 per-call 缓存会把「点击前不可见」记到「点击后」（`open` 因此误报 `not_opened`）；用几何距离猜「这个气泡属于哪个触发源」会认错爹（改成只认 `aria-expanded` + `aria-controls`，其余靠 `opened`/`closed_by_click`/`unchanged` 三态如实报告）。另外 `extension/worker.js` 有一行显式的工具分发白名单，新工具漏加就是真机 `Unknown command` 而 532 个单测全绿，所以加了一条静态测试直接读那行源码。
 
@@ -148,7 +148,15 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 
 ## 本机启动与安装
 
-要求：Node.js 22+、Chrome 120+。**不需要会命令行**：每个 `.ps1` 都配了同名 `.bat`，双击即可运行。
+要求：**Node.js 22+、PowerShell 7（`pwsh.exe`）、Chrome 120+**。**不需要会命令行**：每个 `.ps1` 都配了同名 `.bat`，双击即可运行。
+
+> **PowerShell 7 是常规双击入口的硬依赖，不是可选项。** 7 个入口 `.bat`（`start` / `status` / `doctor` / `pair` / `stop` / `install-autostart` / `uninstall-autostart`）都调用 `pwsh.exe`，而且 `start.ps1` / `scripts/watch-service.ps1` 用到 PowerShell 7（.NET 5+）才有的 `[Convert]::ToHexString`。缺了它，`start.bat` 根本起不来。现在这 7 个入口都会先检测：缺依赖时给出中文安装指引、把时间 / 脚本名 / 原因写进 `.local/launcher-error.log`、保留窗口并退出非零码，不会一闪而过。**唯一例外是 `doctor-lite.bat`**：它只调用 `node.exe`，专门用于诊断「连 `doctor.bat` 都打不开」的 pwsh 缺失场景。
+>
+> 未安装时任选其一：
+> - 在线：`winget install --id Microsoft.PowerShell --source winget`
+> - 离线 / 国内网络：从 [PowerShell GitHub Releases](https://github.com/PowerShell/PowerShell/releases) 下载 `PowerShell-*-win-x64.zip` **便携版**，解压到任意目录，把该目录加入**用户级 PATH**，然后重新双击。winget 的 MSIX 包在部分环境会在 `StagePackageAsync` 阶段中断；GitHub 单连接下载可能很慢，可改用支持多线程分段下载的工具。
+>
+> 如果 `where.exe pwsh` 有结果但双击仍失败，先运行 **`doctor-lite.bat`**：它只用 `node.exe`，完全不经过 `pwsh.exe`，所以能在 PowerShell 7 缺失或 PATH 异常时给出宿主环境报告（pwsh / node / 自启注册 / 端口占用 / 代理 / 服务四态），每项都带可复制的修复命令。
 
 本机已安装依赖；迁移到另一台电脑时先在项目目录运行 `npm ci`。
 
@@ -195,9 +203,14 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 
 安装会立即启动守护程序，并注册以后登录时启动。它约每 10 秒检查认证状态，服务未监听时尝试启动，失败退避至最多 60 秒；命名互斥锁避免重复守护。当前状态写入 `.local/watchdog-status.json`，状态变化写入可轮转的 `.local/watchdog.jsonl`。安装命令完成不等于连接验收通过，使用 `npm run doctor` 确认。
 
+安装时还会写两份可审计的清单：
+
+- `.local/runtime.json`：本次解析到的 `pwsh.exe` / `node.exe` **绝对路径**。`start.ps1` / `agent.ps1` / `scripts/watch-service.ps1` 都优先读它，文件失效才回退 `Get-Command`。这样即便登录时便携版 pwsh 或 AI 工具链注入的临时 node 改变了 PATH，服务重启后也不会选到另一个二进制。`doctor-lite.bat` 会报告当前实际使用的路径。
+- `.local/autostart-registry.json`：**本次真正注册成功**的条目（`startup-shortcut` 或 `registry-run`），含目标路径。用 `.\install-autostart.ps1 -StatusOnly` 可只读列出所有注册项，包括检测到但**不由项目管理**的外部计划任务（标 `external`，不会自动删除）。
+
 运行期调用、连接恢复、队列等待、权限拒绝和错误分类会自动追加到 `.local\logs\audit.jsonl`；单文件超过 10 MB 时滚动为 `audit.1.jsonl`。这些日志用于下一次版本升级的回归分析，不包含页面正文、输入值、Cookie 或 Authorization。
 
-撤销：双击 `uninstall-autostart.bat`。它会清掉快捷方式、注册表项和生成的启动器，但**保留配对密钥和你的配置**。
+撤销：双击 `uninstall-autostart.bat`。它按 `.local/autostart-registry.json` **逐项清理**并输出「已移除 / 未找到」，最后把 `entries` 清空（文件保留作为证据），**保留配对密钥和你的配置**。若你自己额外注册过计划任务（例如 `AI Browser Bridge Watchdog`），卸载器只会如实报告并给出清理命令，**不会擅自删除**——否则「卸载了却没卸干净」会反过来变成「删了不该删的东西」。
 
 此外，扩展只需要加载 `extension/` 并用 `pair.bat` 配对**一次**；密钥保存在扩展里，之后自动重连。
 
@@ -215,18 +228,38 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 
 ### 状态不对时的排查顺序
 
-先双击 `doctor.bat`，它会直接告诉你卡在哪一层。
+**先双击 `doctor-lite.bat`**（只用 Node，不依赖 PowerShell 7），它检查宿主环境：pwsh / node 的实际路径与版本、`.local/runtime.json` 是否失效、自启注册了哪些项、19387 端口被谁占用、`NO_PROXY` 是否覆盖本机、以及服务处于「未安装 / 未启动 / 端口占用或无响应 / 运行中」哪一种状态。服务起来之后，再双击 `doctor.bat` 做运行时体检（buildId、版本一致性、扩展连接、工具 schema）。两者不在同一层，缺一不可。
 
 | 现象 | 处理 |
 |---|---|
+| 双击 `.bat` 一闪而过 | 看 `.local/launcher-error.log`；再 `where.exe pwsh`，缺则按上文装 PowerShell 7 |
 | 服务未监听、`fetch failed` | 查看 `.local/watchdog-status.json`；可双击 `start.bat`，反复失败检查 `.local/server-error.log` |
-| 服务在跑但 `connected: false` | 扩展被暂停（角标 `OFF`）：点图标 → “重新连接” |
+| 端口有监听但 `/status` 不通 | `Get-NetTCPConnection -LocalPort 19387` 查 OwningProcess；可能是别的进程占用或代理吞掉本机请求（本机探活已显式 `-NoProxy`） |
+| 守护把服务拉起来了吗 | 看 `.local/watchdog.jsonl` 的 `starting-service → startup-completed → connected` 状态迁移 |
+| 服务在跑但 `connected: false` | 扩展被暂停（角标 `OFF`）：点图标 → “重新连接”；或看 `doctor` 的 `extension-connected` |
 | 角标 `?` | 配对密钥不匹配，重跑 `pair.bat` 再粘贴 |
 | 角标 `2` | 另一个 Chrome 配置已占用，先在那边断开 |
 | 扩展卡着红色 `Errors` | 只是历史错误残留，不影响使用。等几分钟或在 `chrome://extensions` 点 Reload |
-| 换电脑 / 重装系统 | `npm ci` → `start.bat` → `install-autostart.bat` → `pair.bat` |
+| 面板一直显示「未连上本机服务」 | 说明扩展从未握手成功过：先 `start.bat`，再 `doctor-lite.bat`；自动重连仍在后台运行 |
+| 换电脑 / 重装系统 | `npm ci` → 装 PowerShell 7 → `start.bat` → `install-autostart.bat` → `pair.bat` |
+| 卸载自启后守护还在拉服务 | `.\install-autostart.ps1 -StatusOnly` 列出全部注册项；外部手工注册的计划任务项目不会自动删除，报告会给出清理命令 |
 
-> 所有 `.ps1` 都不再要求 PowerShell 7，Windows PowerShell 5.1 也能直接运行。
+> **关于 PowerShell 版本（2026-11-10 更正）**：这里曾写「所有 `.ps1` 都不再要求 PowerShell 7，Windows PowerShell 5.1 也能直接运行」，这是错的。`.ps1` 里的 `[Convert]::ToHexString` 等属于 PowerShell 7 / .NET 5+，5.1 跑不了；而且用户实际双击的是 `.bat`，它只认 `pwsh.exe`。**脚本引擎兼容性与启动器依赖是两件事**，不要把前者当成后者已解决。因此也不做「`.bat` 悄悄回退 `powershell.exe`」：那会把一步可见的失败换成更难查的运行时异常。
+
+#### 重启后验收清单
+
+重启并登录 Windows 后，30 秒内按顺序确认：
+
+```powershell
+.\status.bat                          # 期望 "connected": true
+.\doctor.bat                          # 期望 "ok": true，extension-connected / version-match 均为 true
+type .local\watchdog-status.json      # 期望 "state": "connected"
+.\install-autostart.ps1 -StatusOnly   # 期望列出本次注册的条目，无「幽灵注册」
+```
+
+Chrome 面板应显示「已连接」、角标 `ON`。若 30 秒内未恢复，先看 `.local/watchdog.jsonl` 的状态迁移，再看 `.local/server-error.log`，最后跑 `doctor-lite.bat` 区分「服务没起来」与「端口被占用」。
+
+> **代理环境**：本机请求固定走 `127.0.0.1`，脚本已用 `-NoProxy` 绕过代理。若在企业网络或使用代理工具，建议把用户级 `NO_PROXY` 设为 `127.0.0.1,localhost,::1`（`setx NO_PROXY "127.0.0.1,localhost,::1"`）；`HTTP_PROXY` 与 `http_proxy` 大小写重复会让 Windows PowerShell 5.1 的部分命令报「已添加具有相同键的项」。
 
 ## 让其他 AI 接入
 
@@ -307,8 +340,13 @@ npm run test:native
 | `src/cli.js` | 命令行入口 |
 | `.local/` | 本机密钥、日志、PID、接入配置，不进入分发包 |
 | 各 `.bat` | 双击入口：`start` / `stop` / `pair` / `status` / `doctor` / `install-autostart` / `uninstall-autostart` |
-| `install-autostart.ps1` | 注册登录自启，默认启动文件夹，`-Method Registry` 用注册表 |
-| `uninstall-autostart.ps1` | 撤销登录自启，清掉所有方式与生成的启动器 |
+| `doctor-lite.bat` | **零 pwsh 依赖**的宿主环境诊断（只用 `node.exe`），服务没起来 / PowerShell 7 缺失时先跑它 |
+| `scripts/check-runtime.bat` | 各 `.bat` 的公共前置检查；失败写 `.local/launcher-error.log` |
+| `scripts/doctor-host-env.mjs` | `doctor-lite` 的检查实现，输出中文报告或 `--json` |
+| `scripts/resolve-runtime.ps1` | 优先读 `.local/runtime.json` 的 pwsh / node 绝对路径，失效才回退 PATH |
+| `install-autostart.ps1` | 注册登录自启（默认启动文件夹，`-Method Registry` 用注册表）；`-StatusOnly` 只读列出注册项；写 `runtime.json` 与 `autostart-registry.json` |
+| `uninstall-autostart.ps1` | 按 `autostart-registry.json` 逐项撤销并输出「已移除 / 未找到」；不擅自删除外部计划任务 |
+| `.local/runtime.json` · `.local/autostart-registry.json` | 固化的二进制路径与本次注册项清单，供诊断与卸载对账 |
 | `test/` | 服务测试和真实扩展端到端测试 |
 | `docs/HANDOFF.md` | 后续开发交接与已知限制 |
 

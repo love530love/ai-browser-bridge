@@ -1,52 +1,153 @@
 # Remove the auto-start registration installed by install-autostart.ps1.
-# Clears every method (startup shortcut, registry entry) and the generated
-# launcher files, so re-running install-autostart.ps1 starts from clean slate.
-# Idempotent: returns success whether anything was registered or not.
+# Cleans up from .local/autostart-registry.json (one line per entry: removed /
+# not-found), keeps the manifest as an empty-entries evidence file, reports but
+# never deletes externally registered scheduled tasks, and is idempotent.
+#
+# 守卫：不会自动删除外部计划任务（用户自行注册的 AI Browser Bridge Watchdog）。
+# 该项目自带能力不创建计划任务；查不到或被沙箱拦时如实报 unknown，绝不因为
+# 查不到就声称「自启已全部清除」。
 $ErrorActionPreference = 'Stop'
 
 $root = $PSScriptRoot
-New-Item -ItemType Directory -Force -Path (Join-Path $root '.local') | Out-Null
-Set-Content -LiteralPath (Join-Path $root '.local/watchdog-disabled') -Value 'Autostart removed; supervisor exits on its next check.'
-$removed = @()
-
-# 1) Startup folder shortcut (default method).
-$startupDir = [Environment]::GetFolderPath('Startup')
-$lnkPath = Join-Path $startupDir 'AI Browser Bridge.lnk'
-if (Test-Path -LiteralPath $lnkPath) {
-  Remove-Item -LiteralPath $lnkPath -Force
-  $removed += "startup shortcut: $lnkPath"
-}
-
-# 2) HKCU Run entry (Registry method).
+$registryPath = Join-Path $root '.local/autostart-registry.json'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $valueName = 'AIBrowserBridge'
-if (Get-ItemProperty -LiteralPath $runKey -Name $valueName -ErrorAction SilentlyContinue) {
-  Remove-ItemProperty -LiteralPath $runKey -Name $valueName -ErrorAction Stop
-  $removed += "registry entry: HKCU\...\Run\$valueName"
+$linkPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'AI Browser Bridge.lnk'
+$watchdogTaskName = 'AI Browser Bridge Watchdog'
+
+function Get-WatchdogTaskState([string]$TaskName) {
+  # Returns 'registered' when the task is positively found, otherwise 'unknown'.
+  # Read-only, best-effort and never throws: the host sandbox may block
+  # schtasks.exe / the ScheduledTasks module, and a failed query must not
+  # abort the uninstall.
+  $ErrorActionPreference = 'SilentlyContinue'
+  # Prefer the lightweight schtasks.exe query; fall back to the ScheduledTasks
+  # cmdlet only when the executable is blocked (avoids a slow module autoload).
+  try {
+    $null = & schtasks.exe /query /tn $TaskName 2>$null
+    if ($LASTEXITCODE -eq 0) { return 'registered' }
+    return 'unknown'
+  } catch { }
+  try {
+    if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+      if ($null -ne (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { return 'registered' }
+    }
+  } catch { }
+  return 'unknown'
 }
 
-# 3) Generated launcher files and the recorded node path.
+function Read-AutostartRegistry {
+  # Returns the parsed manifest, or $null when missing / corrupt. The caller
+  # then falls back to scanning the two known methods and reports unknown.
+  if (-not (Test-Path -LiteralPath $registryPath -PathType Leaf)) { return $null }
+  try {
+    $parsed = Get-Content -LiteralPath $registryPath -Raw -Encoding utf8 | ConvertFrom-Json
+    if ($null -eq $parsed -or $null -eq $parsed.entries) { return $null }
+    return $parsed
+  } catch { return $null }
+}
+
+function Remove-AutostartEntry($e) {
+  # Cleans one managed entry and returns a "removed / not-found" line that also
+  # carries the concrete path. Never touches scheduled tasks (external items).
+  $kind = [string]$e.kind
+  if ($kind -eq 'startup-shortcut') {
+    $p = if ($e.path) { [string]$e.path } else { $script:linkPath }
+    try {
+      if (Test-Path -LiteralPath $p) {
+        Remove-Item -LiteralPath $p -Force -ErrorAction Stop
+        return "已移除 startup shortcut: $p"
+      }
+      return "未找到 startup shortcut: $p"
+    } catch { return "未找到/未能确认 startup shortcut: $p（$($_.Exception.Message)）" }
+  }
+  if ($kind -eq 'registry-run') {
+    $k = if ($e.key) { [string]$e.key } else { $script:runKey }
+    $n = if ($e.name) { [string]$e.name } else { $script:valueName }
+    try {
+      if (Get-ItemProperty -LiteralPath $k -Name $n -ErrorAction SilentlyContinue) {
+        Remove-ItemProperty -LiteralPath $k -Name $n -ErrorAction Stop
+        return "已移除 registry entry: $k\$n"
+      }
+      return "未找到 registry entry: $k\$n"
+    } catch { return "未找到/未能确认 registry entry: $k\$n（$($_.Exception.Message)）" }
+  }
+  return "跳过（不自动删除）清单项 kind=$kind：外部项交由用户自行处理"
+}
+
+New-Item -ItemType Directory -Force -Path (Join-Path $root '.local') | Out-Null
+# Keep the supervisor disabled marker (project convention, .NET-friendly write).
+Set-Content -LiteralPath (Join-Path $root '.local/watchdog-disabled') -Value 'Autostart removed; supervisor exits on its next check.' -Encoding utf8
+
+$lines = @()
+$reg = Read-AutostartRegistry
+if ($null -eq $reg) {
+  # No valid manifest: report unknown (never pretend clean) and fall back to
+  # scanning the two known registration methods.
+  Write-Host '未找到有效的 .local/autostart-registry.json 清单（缺失或损坏）：unknown，无法保证清理完整。'
+  Write-Host '回退到扫描两种已知注册方式（启动文件夹快捷方式 / HKCU Run）。'
+  $fallback = @(
+    [ordered]@{ kind = 'startup-shortcut'; path = $linkPath }
+    [ordered]@{ kind = 'registry-run'; key = $runKey; name = $valueName }
+  )
+  foreach ($e in $fallback) { $lines += Remove-AutostartEntry $e }
+} else {
+  $entries = @($reg.entries)
+  if ($entries.Count -eq 0) {
+    Write-Host '清单 entries 为空：没有项目管理的自启注册项需要清理。'
+  }
+  foreach ($e in $entries) { $lines += Remove-AutostartEntry $e }
+}
+
+if ($lines.Count -eq 0) {
+  Write-Host 'No auto-start registration was found. Nothing to remove.'
+} else {
+  Write-Host 'Removed / not-found (per manifest entry):'
+  foreach ($item in $lines) { Write-Host ("  - {0}" -f $item) }
+}
+
+# Legacy cleanup: bridge-autostart.vbs / bridge-autostart.cmd / .local\node-path.txt
+# are leftovers from an older installer; the CURRENT install-autostart.ps1 does
+# NOT generate them. Only report when one actually exists, so users do not think
+# the uninstall deleted something important.
 foreach ($relative in @('bridge-autostart.vbs', 'bridge-autostart.cmd')) {
   $path = Join-Path $root $relative
   if (Test-Path -LiteralPath $path) {
-    Remove-Item -LiteralPath $path -Force
-    $removed += "launcher: $relative"
+    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    Write-Host "发现并移除历史遗留启动器: $relative"
   }
 }
 $nodePathFile = Join-Path $root '.local\node-path.txt'
-if (Test-Path -LiteralPath $nodePathFile) {
-  Remove-Item -LiteralPath $nodePathFile -Force
-  $removed += 'recorded node path'
+if ([System.IO.File]::Exists($nodePathFile)) {
+  # .local files use the .NET delete API, not Remove-Item (safe-delete shim).
+  try { [System.IO.File]::Delete($nodePathFile); Write-Host '发现并移除历史遗留 .local\node-path.txt' }
+  catch { Write-Host "保留 .local\node-path.txt：$($_.Exception.Message)" }
 }
 
-if ($removed.Count -eq 0) {
-  Write-Host 'No auto-start registration was found. Nothing to remove.'
+# Keep the manifest file as evidence, but with an empty entries array.
+$empty = [ordered]@{
+  version   = 1
+  updatedAt = [DateTimeOffset]::Now.ToString('o')
+  entries   = @()
+}
+$empty | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $registryPath -Encoding utf8
+
+# Externally registered scheduled task: detect and report, never delete.
+$state = Get-WatchdogTaskState $watchdogTaskName
+Write-Host ''
+if ($state -eq 'registered') {
+  Write-Host '检测到外部注册的计划任务 "AI Browser Bridge Watchdog"，项目不会自动删除。'
+  Write-Host '卸载后该任务仍可能在登录时把守护拉起；如需移除请手动（复制）执行：'
+  Write-Host ('  schtasks /delete /tn "' + $watchdogTaskName + '" /f')
 } else {
-  Write-Host 'Removed:'
-  foreach ($item in $removed) { Write-Host ("  - {0}" -f $item) }
+  Write-Host '计划任务检测：未能确认（unknown）——本机无法查询 schtasks 或该任务不存在。'
+  Write-Host '项目不会自动删除任何计划任务；如需自行确认 / 移除：'
+  Write-Host ('  schtasks /query /tn "' + $watchdogTaskName + '"')
+  Write-Host ('  schtasks /delete /tn "' + $watchdogTaskName + '" /f')
 }
 
 Write-Host ''
-Write-Host 'The bridge service will no longer auto-start at logon.'
-Write-Host 'A service started earlier is still running; stop it with stop.ps1 if needed.'
-Write-Host 'Your pairing key, upload roots and agent policy are kept in .local/ and are untouched.'
+Write-Host '项目管理的登录自启注册已按清单清理；外部注册的计划任务（若有）不受本脚本管理，也不会被自动删除。'
+Write-Host '注意：本脚本不宣称「自启已全部清除」——外部计划任务需按上方命令自行确认。'
+Write-Host '先前启动的服务仍在运行；如需停止请用 stop.ps1。'
+Write-Host '配对密钥、上传根目录与 agent 策略仍保留在 .local/，未被改动。'

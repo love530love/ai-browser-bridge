@@ -4,8 +4,9 @@ param(
   [ValidateRange(2, 60)][int]$IntervalSec = 10
 )
 $ErrorActionPreference = 'Stop'
-$pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
+. (Join-Path $PSScriptRoot 'resolve-runtime.ps1')
 $root = [IO.Path]::GetFullPath($ProjectRoot)
+$pwsh = Resolve-BridgeBinary -Root $root -Kind pwsh
 $state = Join-Path $root '.local'
 New-Item -ItemType Directory -Force -Path $state | Out-Null
 $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant()))).Substring(0,24)
@@ -35,7 +36,9 @@ try {
       else {
         $config = Get-Content -LiteralPath (Join-Path $state 'config.json') -Raw | ConvertFrom-Json
         $health = $null
-        try { $health = Invoke-RestMethod -Uri "http://127.0.0.1:$($config.port)/status" -Headers @{Authorization="Bearer $($config.agentToken)"} -TimeoutSec 3 } catch { }
+        # Loopback only. -NoProxy keeps an injected HTTP_PROXY from swallowing
+        # the health probe and making a running service look dead.
+        try { $health = Invoke-RestMethod -Uri "http://127.0.0.1:$($config.port)/status" -Headers @{Authorization="Bearer $($config.agentToken)"} -TimeoutSec 3 -NoProxy } catch { }
         if ($health.service -eq 'ai-browser-bridge') {
           $failures = 0
           if ($health.maintenance) { Report-State 'maintenance' }

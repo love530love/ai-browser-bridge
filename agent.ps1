@@ -4,7 +4,8 @@ param(
     [string]$Json = '{}'
 )
 $ErrorActionPreference = 'Stop'
-$nodePath = (Get-Command node.exe -ErrorAction Stop).Source
+. (Join-Path $PSScriptRoot 'scripts\resolve-runtime.ps1')
+$nodePath = Resolve-BridgeBinary -Root $PSScriptRoot -Kind node
 $entry = Join-Path $PSScriptRoot 'src/cli.js'
 if ($Action -eq 'call' -or $Action -eq 'call-raw') {
     if (!$Tool) { throw 'Tool name required' }
