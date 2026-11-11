@@ -1,3 +1,48 @@
+## 0.38.0 — 2026-11-11（**CNIPA 四案实测反馈：上传能力、写动作可观测性、等待/读取能力、站点 recipe**）
+
+来源：`docs/UPGRADE-PLAN-20261111-cnipa-site-feedback.md` 与 `docs/FIELD-REPORT-20261111-cnipa-toas-review.md`（11-11 用本 Bridge 完成 CNIPA 4 件业务后的复盘）。按 M1→M4 全部落地。**动手前先逐条与 0.37.4 源码对账，改准了 5 处过时断言**，避免重复造轮子。
+
+### 复核更正（文档已改，代码按真实缺口实现）
+
+- P0-2 原写「`browser_upload` 判定 unavailable」：实际 `page.js` 的可见性检查已有 `&& name !== 'browser_upload'` 例外、`sensitive()` 不拦 file input。真卡点是 `browser_find_element` 过滤 `display:none` 导致**拿不到 ref**，而 upload 只有 `ref` 参数。
+- P0-3 原写「`cli.js:194` 仅改内存」：实际 `:194-195` 已 `writeFileSync` 持久化；真因是 `server.js` 启动时一次性缓存 config。
+- P1-2 原写「`browser_health` 需暴露 visibilityState」：`worker.js:700-701/922-924` 已实现，只缺写动作前 `throttled:true`。
+- P1-7 原写「ref 失效静默点击」：`page.js` 已有 `isConnected` + `fingerprint` 检测，`errorCategory` 已分类 `STALE_REFERENCE`。本轮补结构化 `STALE_REF` + generation 回显与硬规则文档。
+- P1-4 原写「find_element 无指引」：`browser_prepare_action` 已有 `scroll_element` nextStep，缺的是工具内部自动重试。
+
+### M1 · P0 上传（3 项）
+
+- **P0-1**：新增 `src/upload-mime.js`（`mimeFor(filePath, explicit)` + 20 类 MIME 表）；`server.js` 改用它，`browser_upload` / `_verified` 增加显式 `mimeType`，返回体回显 `mimeType` / `mimeSource` / `uploadMaxBytes` / `configSource`；非法显式 MIME 直接拒绝。
+- **P0-2**：两个 upload 工具支持 `selector` / `inputIndex` 精确定位 `display:none` 的 file input；`page.js` 把 payload 处理抽成 `applyUpload`，三条路径共用同一 `DataTransfer` + `input`/`change` 派发；selector 必须恰好命中一个 file input，零个/多个/多目标均拒绝，敏感与 `[data-ai-private]` 子树仍拒绝。
+- **P0-3**：`config.js` 新增 `uploadMaxBytes`（默认 16 MiB，上限 256 MiB）与校验；`server.js` 的 `liveUploadPolicy()` 按 mtime 缓存热加载，只采用 **agentToken 同源**配置文件的 upload 字段（端口/令牌等仍用启动快照，避免测试夹具或另一实例的配置串入）；`page.js` 同用该上限；拒绝时消息带当前上限与配置来源。`loadConfig(create, file)` 支持注入路径以便真实边界测试。
+
+### M2 · P1 可观测（4 项）
+
+- **P1-1**：`browser_click` 返回 `effect`（`dom|network|dialog|none`）与 `diagnoseFlow`（DOM/资源/对话框/file-input 增量 + 最近 5 条资源请求，URL 中 token 脱敏），`settleMs` 默认 120ms 可设 0；**下载与 console 错误在页面世界不可观测，如实标 unknown 而非编造零效应证据**。
+- **P1-2**：写动作返回 `throttled:true` + `visibilityState` + nextStep；`browser_at` 增 `timersThrottled` 估计。
+- **P1-6**：dialog 内确认按钮额外返回 `flow:{fileInputs,requests,domDelta,downloads:null,consoleErrors:null}`。
+- **P1-7**：stale ref 消息追加 `[stale_ref generation=<snapshot>]`；`errorCategory` 新增 `STALE_REF` 分类（旧文本仍归 `STALE_REFERENCE`）；明确 ref 形如 `snapshot:index`，snapshot 即 generation。
+
+### M3 · P1 易用（3 项）
+
+- **P1-3**：新增 `browser_wait_for_selector`（CSS / 精确文本 / role+name，`state: visible|attached|detached`，`timeoutMs`），页内 `MutationObserver` + 有界定时器，返回**同一 snapshot 体系的真实 ref** 与 `elapsedMs`；超时返回 `status:"timeout"` 与 `lastObservedCount`，不伪造命中。已同步 `tools.js` / `worker.js` 白名单 / `tool-index.js` 三处。
+- **P1-4**：`browser_find_element` 空结果时对首个可滚动容器（或文档）做一次有界滚动并重试一次，`diagnostics.autoScrolled:true` 留痕。
+- **P1-5**：`browser_read` 增 `includeFormValues`（默认 false，`cheap` 模式不启用），把 input/textarea/select 当前值以 `field: value` 并入结果；password/hidden/`[data-ai-private]` 仍排除。
+
+### M4 · 站点 recipe
+
+- 新增 `skills/cnipa-trademark-online/`（SKILL.md、README、snippets），从外部能力包 `J:\WorkAndData\双柏彝笙商城\80_工具与脚本\01_能力包_CNIPA\` 整理两套系统差异、antd 5 交互配方、Vue 表单模型探针（含 PII 警告）、商品弹窗/Jeecg 菜单、上传替代路径与 30 分钟复现清单。站点知识不进 Bridge 核心。
+
+### 测试
+
+- 新增 `test/upload-mime.test.js`（10）、`test/action-diagnostics.test.js`（14）、`test/upload-cnipa.test.js`（3，真实起服务 + WS + 磁盘改配置验证不重启热加载）、`test/cnipa-capabilities.test.js`（5，三处接线 + 从源码提取文案喂给真实分类器断言渲染结果）。
+- `tool-index` 新增工具后一度超 3500 字节限制（3517），按既有做法压缩 `maintenance` 组 purpose 后恢复。
+- 最终全量 `npm test` **829/829 全绿，EXIT=0**。期间被真实边界测试抓到 4 条回归（页面侧观测/自动滚动在最小 DOM 夹具里因缺少 `getElementsByTagName` / `performance.getEntriesByType` / `setTimeout` / `getComputedStyle` 抛错），已按「观测不到即 unknown、不支持滚动即保留原结果」修复，**未放宽任何断言**。
+
+### 执行口径
+
+- 方案 §4 建议开 `feature/cnipa-feedback-20261111` 分支；因主工作区有其他会话未提交的并行改动（`.aep/`、`coordination/`、`AGENTS.md` 等），`git checkout -b` 会切换整个工作树并干扰它们，且新 worktree 无 `node_modules` / `.local`，故本轮在 `main` 上分批提交、每批精确 `git add`；「不新建 Qoder 项目空间」结论不变。细节见方案文档的执行备注。
+
 ## 0.37.4 — 2026-11-10（**修正清错失败分支的误导指引**）
 
 起因：v0.37.3 部署时 `browser_reload_extension` 已 `verified:true`，但附带的清错子步骤因 `no_chrome_window` 报 `errorListCleared:false`，其 `howToRetry` 却写着「Bring a Chrome window up and call **browser_reload_extension again**」。用户现场看到错误列表其实已清空——那条返回的含义是「没读到页面 ⇒ 状态 unknown」，不是「确认还有错误」。把 unknown 说成否定事实，还会诱导调用方**为一个已经成功的重载再重载一次**。

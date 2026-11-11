@@ -14,7 +14,8 @@
 export const TOOL_GROUPS = [
   { id: 'read', purpose: '读页面、读元素、拿 ref；扫不到就 eval', tools: [
     'browser_at', 'browser_read', 'browser_eval', 'browser_observe', 'browser_ax_snapshot', 'browser_find_text',
-    'browser_find_element', 'browser_shadow_tree', 'browser_frames', 'browser_performance'
+    'browser_find_element', 'browser_shadow_tree', 'browser_frames', 'browser_performance',
+    'browser_wait_for_selector'
   ] },
   { id: 'act', purpose: '点、填、选、按键、滚动', tools: [
     'browser_prepare_action', 'browser_click', 'browser_click_verified', 'browser_fill',
@@ -66,7 +67,7 @@ export const TOOL_GROUPS = [
   { id: 'recipe', purpose: '把一段流程存成可复用的 recipe', tools: [
     'browser_recipe_save', 'browser_recipe_run', 'browser_recipe_list', 'browser_recipe_delete'
   ] },
-  { id: 'maintenance', purpose: '浏览器自身设置（低频，日常任务通常用不到）', tools: [
+  { id: 'maintenance', purpose: '浏览器自身设置（低频）', tools: [
     'browser_bookmarks', 'browser_bookmarks_write', 'browser_history', 'browser_history_search',
     'browser_history_delete', 'browser_extensions', 'browser_extension_state', 'browser_clear_browsing_data',
     'browser_site_settings', 'browser_site_settings_write', 'browser_privacy_settings',

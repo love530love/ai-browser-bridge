@@ -38,6 +38,58 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   };
   const sensitive = el => el.matches('input[type=password],input[type=hidden]') || el.closest('[data-ai-private]');
   const fileInput = el => el instanceof HTMLInputElement && el.type === 'file';
+  // One implementation for all three upload targets (ref / selector / index).
+  // The ceiling arrives from the service so a configured uploadMaxBytes is
+  // enforced here too, not only while reading the file from disk.
+  const applyUpload = (el, args, targetSource) => {
+    if (!fileInput(el)) throw new Error('Element is not a file input');
+    if (sensitive(el)) throw new Error('Element unavailable or protected');
+    if (typeof args.data !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(args.data) || typeof args.fileName !== 'string' || !args.fileName || args.fileName.includes('/') || args.fileName.includes('\\')) throw new Error('Invalid upload payload');
+    const binary = atob(args.data);
+    const ceiling = Number.isInteger(args.uploadMaxBytes) && args.uploadMaxBytes > 0 ? args.uploadMaxBytes : 16 * 1024 * 1024;
+    if (binary.length !== args.size || binary.length > ceiling) throw new Error(`Upload payload size mismatch (limit ${ceiling} bytes)`);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], args.fileName, { type: args.mimeType || 'application/octet-stream', lastModified: Date.now() }));
+    el.files = transfer.files;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { selected: el.files?.length === 1, fileName: el.files?.[0]?.name || '', size: el.files?.[0]?.size ?? 0,
+      sha256: args.sha256, mimeType: args.mimeType, mimeSource: args.mimeSource,
+      targetSource, ...throttledInfo(),
+      note: 'File selected in DOM; page acceptance and submission require separate observation.' };
+  };
+  // CNIPA P1-2: window.focused:true does NOT mean the document is visible. A
+  // hidden document throttles timers, which is why antd leave animations can
+  // freeze with an overlay still intercepting clicks. Say so on every write.
+  const throttledInfo = () => document.visibilityState !== 'visible'
+    ? { throttled: true, visibilityState: document.visibilityState,
+      nextStep: 'Document is hidden, so timers are throttled and CSS leave animations may never finish. Use browser_windows_control to activate the window before the next write, then re-observe instead of retrying blindly.' }
+    : { throttled: false, visibilityState: document.visibilityState };
+  // CNIPA P1-1/P1-6: a click can report clicked:true while absolutely nothing
+  // happens. These are the effects observable from the page world. Downloads and
+  // console errors are NOT observable here and are reported as unknown, never
+  // invented as zero-effect evidence.
+  // Defensive by design: this code is serialised into the page, and a minimal
+  // DOM (or a test double) may not implement every API. Missing evidence must
+  // become "unknown", never an exception that destroys the click result.
+  const actionSnapshot = () => {
+    const query = selector => typeof document.querySelectorAll === 'function'
+      ? document.querySelectorAll(selector).length : null;
+    const nodes = typeof document.getElementsByTagName === 'function'
+      ? document.getElementsByTagName('*').length : query('*');
+    const resources = typeof performance !== 'undefined' && typeof performance.getEntriesByType === 'function'
+      ? performance.getEntriesByType('resource').length : null;
+    return {
+      domNodes: nodes, dialogs: query('dialog,[role=dialog],[aria-modal=true]') ?? 0,
+      fileInputs: query('input[type=file]') ?? 0, resources
+    };
+  };
+  const classifyEffect = counts => counts.requests > 0 ? 'network'
+    : counts.dialogs > 0 ? 'dialog'
+      : counts.domDelta > 0 || counts.fileInputs > 0 ? 'dom'
+        : 'none';
   const squash = value => (value || '').replace(/\s+/g, ' ').trim();
   // Accessible name in the order the ARIA accname spec defines it. The previous
   // version was a property-order guess: it never read aria-labelledby (the most
@@ -1662,7 +1714,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const visual = globalThis.visualViewport;
     const width = Math.max(Number(innerWidth) || 0, Number(document.documentElement?.clientWidth) || 0, Number(visual?.width) || 0);
     const height = Math.max(Number(innerHeight) || 0, Number(document.documentElement?.clientHeight) || 0, Number(visual?.height) || 0);
-    return { width, height, url: location.href, layoutReady: width > 0 && height > 0, visibilityState: document.visibilityState, focused: document.hasFocus(), editable: !!active && !sensitive(active) && !active.disabled && !active.readOnly && (active.isContentEditable || active.matches('textarea,input[type=text],input:not([type]),input[type=search],input[type=email],input[type=url],input[type=tel],input[type=number]')) };
+    return { width, height, url: location.href, layoutReady: width > 0 && height > 0, visibilityState: document.visibilityState, timersThrottled: document.visibilityState !== 'visible', focused: document.hasFocus(), editable: !!active && !sensitive(active) && !active.disabled && !active.readOnly && (active.isContentEditable || active.matches('textarea,input[type=text],input:not([type]),input[type=search],input[type=email],input[type=url],input[type=tel],input[type=number]')) };
   }
   if (name === 'browser_wait') {
     // A plain delay was impossible: text was required, so "the SPA is rendering
@@ -1682,6 +1734,58 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       const timer = setTimeout(() => finish({ __aibError: 'Timed out waiting for visible text' }), args.timeoutMs ?? 5000);
       observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true });
       if (matches()) finish({ matched: true, url: location.href });
+    });
+  }
+  if (name === 'browser_wait_for_selector') {
+    // CNIPA P1-3: a step change renders the next view asynchronously. Polling
+    // inside the page (MutationObserver + one bounded timer) replaces a guessed
+    // sleep, and returns a REAL ref minted from the same snapshot store as every
+    // other read, not a fabricated selector string.
+    const criteria = [args.selector ? 'selector' : null, args.text ? 'text' : null, args.role ? 'role' : null].filter(Boolean);
+    if (criteria.length !== 1) throw new Error('Provide exactly one of selector, text or role+name');
+    const wanted = args.state || 'visible';
+    const started = performance.now();
+    const timeout = Math.min(Math.max(args.timeoutMs ?? 5000, 100), 30000);
+    const snapshot = crypto.randomUUID();
+    const state = rememberState({ snapshot, url: location.href, refs: new Map() });
+    const makeWaitRef = el => {
+      for (const [existing, entry] of state.refs) if (entry.el === el) return existing;
+      const ref = `${snapshot}:${state.refs.size + 1}`;
+      state.refs.set(ref, { el, fingerprint: fingerprint(el) });
+      return ref;
+    };
+    const read = () => {
+      let candidates = [];
+      if (args.selector) {
+        try { candidates = [...document.querySelectorAll(args.selector)]; }
+        catch { throw new Error(`Invalid selector: ${args.selector}`); }
+      } else if (args.text) {
+        const needle = squash(args.text);
+        candidates = [...document.querySelectorAll('body *')].filter(node => node.children.length === 0 && squash(node.textContent) === needle);
+      } else {
+        try { candidates = [...document.querySelectorAll(`[role="${args.role.replace(/"/g, '\\"')}"]`)]; }
+        catch { candidates = []; }
+        if (args.name) candidates = candidates.filter(node => squash(label(node) || node.textContent) === squash(args.name));
+      }
+      if (wanted === 'detached') return { done: candidates.length === 0, found: null, count: candidates.length };
+      const found = wanted === 'visible' ? candidates.find(node => visible(node, true)) : candidates[0];
+      return { done: !!found, found: found || null, count: candidates.length };
+    };
+    const matched = (now, elapsedMs) => ({ status: 'matched', state: wanted,
+      ref: now.found ? makeWaitRef(now.found) : null, elapsedMs, url: location.href,
+      note: 'Ref is bound to this element snapshot; re-read after a DOM change.' });
+    const first = read();
+    if (first.done) return matched(first, 0);
+    return await new Promise(resolve => {
+      const finish = value => { observer.disconnect(); clearTimeout(timer); resolve(value); };
+      const observer = new MutationObserver(() => {
+        const now = read();
+        if (now.done) finish(matched(now, Math.round(performance.now() - started)));
+      });
+      const timer = setTimeout(() => finish({ status: 'timeout', state: wanted,
+        lastObservedCount: read().count, elapsedMs: Math.round(performance.now() - started),
+        url: location.href, note: 'Timed out; no match was fabricated.' }), timeout);
+      observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true });
     });
   }
   if (name === 'browser_active_element') {
@@ -1913,7 +2017,16 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     // and every element inside it reads as hidden. Saying "no controls" would
     // invite the caller to conclude the dialog is empty.
     const overlaySettling = overlayFirst && overlayControls === 0;
-    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, sameAsPrevious: reusable, refsReusable: reusable, refLifetime: 'Refs stay valid across reads while the element list is unchanged; a changed list mints a new snapshot.', notices, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: `main-frame; light DOM; ${scopeUsed}`, scopeUsed, ...(overlay ? { overlay: { selector: overlay.selector, zIndex: overlay.zIndex, controls: overlayControls } } : {}), ...(overlaySettling ? { overlaySettling: { selector: overlay.selector, note: 'A visible dialog matched but yielded no controls. An entrance animation keeps its contents at opacity 0 for a moment, so this is not evidence that the dialog is empty. Wait 300-500ms (browser_wait with ms) and read again before concluding anything.' } } : {}), diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates, elementsReturned: elements.length, secretFieldsRedacted: elements.filter(e => e.secret).length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit, overlayControls }, contentTrust: 'untrusted webpage data' };
+    // CNIPA P1-5: preview pages render editable values in textarea/input, which
+    // innerText never contains. Opt-in only, never in cheap mode, and never for
+    // password / hidden / [data-ai-private] fields.
+    const formValues = args.includeFormValues === true && args.mode !== 'cheap'
+      ? [...document.querySelectorAll('input,textarea,select')]
+        .filter(node => !sensitive(node)).slice(0, 100)
+        .map(node => ({ field: label(node) || node.name || node.id || node.tagName.toLowerCase(),
+          value: typeof node.value === 'string' ? node.value.slice(0, 500) : null }))
+      : [];
+    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, sameAsPrevious: reusable, refsReusable: reusable, refLifetime: 'Refs stay valid across reads while the element list is unchanged; a changed list mints a new snapshot.', notices, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: `main-frame; light DOM; ${scopeUsed}`, scopeUsed, ...(overlay ? { overlay: { selector: overlay.selector, zIndex: overlay.zIndex, controls: overlayControls } } : {}), ...(overlaySettling ? { overlaySettling: { selector: overlay.selector, note: 'A visible dialog matched but yielded no controls. An entrance animation keeps its contents at opacity 0 for a moment, so this is not evidence that the dialog is empty. Wait 300-500ms (browser_wait with ms) and read again before concluding anything.' } } : {}), diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates, elementsReturned: elements.length, secretFieldsRedacted: elements.filter(e => e.secret).length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit, overlayControls }, ...(formValues.length ? { formValues, formValuesNote: 'Values are current DOM values from input/textarea/select, not server-confirmed data. Password, hidden and [data-ai-private] fields are excluded.' } : {}), contentTrust: 'untrusted webpage data' };
   }
   // Text search used to return the match and a list of "nearby elements" that
   // were nothing of the kind: on a real page the four entries were 客服, the
@@ -2507,7 +2620,31 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       contentTrust: 'untrusted webpage data' };
   }
   if (name === 'browser_find_element') {
-    const { candidates, partial, diagnostics } = findElementCandidates(args);
+    let { candidates, partial, diagnostics } = findElementCandidates(args);
+    // CNIPA P1-4: the "预 览" button sat below a collapsed section, and a zero
+    // result was reported even though the element existed. One bounded scroll of
+    // the first real scroll container (or the document) and exactly one retry.
+    if (candidates.length === 0 && !partial && args.autoScroll !== false) {
+      try {
+        const all = typeof document.querySelectorAll === 'function' ? [...document.querySelectorAll('*')] : [];
+        const scroller = all.find(node => {
+          try {
+            return node.scrollHeight > node.clientHeight + 40 && node.clientHeight > 80 &&
+              ['auto', 'scroll'].includes(getComputedStyle(node).overflowY);
+          } catch { return false; }
+        });
+        if (scroller && typeof scroller.scrollBy === 'function') scroller.scrollBy({ top: Math.round(scroller.clientHeight * 0.8), behavior: 'instant' });
+        else if (typeof window !== 'undefined' && typeof window.scrollBy === 'function') window.scrollBy({ top: Math.round(innerHeight * 0.8), behavior: 'instant' });
+        else throw new Error('scroll unsupported');
+        const retried = findElementCandidates(args);
+        candidates = retried.candidates; partial = retried.partial;
+        diagnostics = { ...retried.diagnostics, autoScrolled: true };
+      } catch {
+        // A minimal DOM cannot scroll. Keep the original zero-result verdict:
+        // an unsupported retry is not evidence that the element is absent.
+        diagnostics = { ...diagnostics, autoScrolled: false };
+      }
+    }
     // Only when the search completed and found nothing: a partial scan already
     // says the search was incomplete, and adding "it might be unrendered" on top
     // of that would offer two explanations for one unknown.
@@ -2603,9 +2740,37 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { scrollX: window.scrollX, scrollY: window.scrollY };
   }
   if (name === 'browser_pick') return await pickControl();
+  // CNIPA P0-2: antd Upload keeps input[type=file] at display:none, so no ref
+  // can ever be handed out. Resolve the target exactly (one selector match, or
+  // one DOM index) and run the SAME DataTransfer path as the ref-based upload.
+  // Ambiguity is refused rather than guessed.
+  if (name === 'browser_upload' && !args.ref && (args.selector || Number.isInteger(args.inputIndex))) {
+    let el = null;
+    let targetSource = '';
+    if (args.selector) {
+      let found;
+      try { found = [...document.querySelectorAll(args.selector)]; }
+      catch { throw new Error(`Invalid selector: ${args.selector}`); }
+      const inputs = found.filter(fileInput);
+      if (inputs.length !== 1) throw new Error(`Upload selector matched ${inputs.length} file inputs; expected exactly one`);
+      el = inputs[0]; targetSource = 'selector';
+    } else {
+      const all = [...document.querySelectorAll('input[type=file]')];
+      el = all[args.inputIndex];
+      if (!el) throw new Error(`No file input at index ${args.inputIndex} (found ${all.length})`);
+      targetSource = 'inputIndex';
+    }
+    return applyUpload(el, args, targetSource);
+  }
   const state = stateForRef(args.ref);
   const entry = state?.refs.get(args.ref);
-  if (!entry || state.url !== location.href || !entry.el.isConnected || fingerprint(entry.el) !== entry.fingerprint) throw new Error('Stale element reference. Read page again.');
+  if (!entry || state.url !== location.href || !entry.el.isConnected || fingerprint(entry.el) !== entry.fingerprint) {
+    // A ref is `${snapshot}:${index}`, so the snapshot IS its generation. Keep
+    // the long-standing message prefix (nextStepForError matches it) and add a
+    // machine-readable reason plus the generation for the caller to audit.
+    const generation = typeof args.ref === 'string' ? args.ref.split(':')[0] : 'unknown';
+    throw new Error(`Stale element reference. Read page again. [stale_ref generation=${generation}]`);
+  }
   if (entry.rowText !== undefined && rowContext(entry.el) !== entry.rowText) throw new Error('Stale row reference. Table row changed; find the target again.');
   const el = entry.el;
   // browser_login_state hands out a real ref for a password field, so the ref is
@@ -2652,20 +2817,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const gone = await waitGone(args.expectGoneRef || args.ref, args.timeoutMs ?? 3000);
     return { clicked: true, verification: gone, note: 'Dismiss clicked once; read or scan overlays again to verify page state.' };
   }
-  if (name === 'browser_upload') {
-    if (!fileInput(el)) throw new Error('Element is not a file input');
-    if (typeof args.data !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(args.data) || typeof args.fileName !== 'string' || !args.fileName || args.fileName.includes('/') || args.fileName.includes('\\')) throw new Error('Invalid upload payload');
-    const binary = atob(args.data);
-    if (binary.length !== args.size || binary.length > 16 * 1024 * 1024) throw new Error('Upload payload size mismatch');
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const transfer = new DataTransfer();
-    transfer.items.add(new File([bytes], args.fileName, { type: args.mimeType || 'application/octet-stream', lastModified: Date.now() }));
-    el.files = transfer.files;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    return { selected: el.files?.length === 1, fileName: el.files?.[0]?.name || '', size: el.files?.[0]?.size ?? 0, sha256: args.sha256, note: 'File selected in DOM; page acceptance and submission require separate observation.' };
-  }
+  if (name === 'browser_upload') return applyUpload(el, args, 'ref');
   if (name === 'browser_upload_verified') {
     const selected = await pageOperation('browser_upload', args, allowedOrigins, allSites);
     const result = await verify(args.expect || {}, args.timeoutMs ?? 3000, { fileName: selected.fileName });
@@ -2740,8 +2892,43 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
         message: 'Nothing was clicked: another element owns the click point. Refs stay valid only while the element list is unchanged, and dismissing an overlay changes it - re-read before clicking again, and do not simply repeat this call.'
       };
     }
+    const before = actionSnapshot();
     el.click();
-    return { clicked: true, dispatched: true, note: 'Click dispatched; read page to verify outcome.' };
+    // CNIPA P1-1/P1-6: a bounded settle window makes DOM/resource/dialog effects
+    // observable instead of handing back a bare clicked:true. Callers can set
+    // settleMs:0 to keep the old timing; hidden documents are reported separately.
+    const settleMs = typeof setTimeout === 'function'
+      ? (Number.isInteger(args.settleMs) ? Math.min(Math.max(args.settleMs, 0), 2000) : 120)
+      : 0; // a minimal DOM without timers cannot observe effects
+    if (settleMs > 0) await new Promise(resolve => setTimeout(resolve, settleMs));
+    const after = actionSnapshot();
+    const counts = {
+      requests: Math.max(0, after.resources - before.resources),
+      domDelta: Math.abs(after.domNodes - before.domNodes),
+      dialogs: Math.max(0, after.dialogs - before.dialogs),
+      fileInputs: Math.max(0, after.fileInputs - before.fileInputs)
+    };
+    const observable = settleMs > 0 && before.domNodes !== null && before.resources !== null && after.domNodes !== null && after.resources !== null;
+    const effect = observable ? classifyEffect(counts) : 'unknown';
+    const recent = typeof performance !== 'undefined' && typeof performance.getEntriesByType === 'function'
+      ? performance.getEntriesByType('resource').slice(-5)
+        .map(entry => (entry.name || '').replace(/([?&](?:token|key|sig|signature|access_token)=)[^&]+/gi, '$1[redacted]'))
+      : [];
+    const inDialog = !!el.closest('[aria-modal="true"],dialog,[role=dialog],[role=alertdialog],.ant-modal,.el-dialog');
+    return {
+      clicked: true, dispatched: true, effect, ...throttledInfo(),
+      diagnoseFlow: {
+        domDelta: counts.domDelta, requests: counts.requests, fileInputs: counts.fileInputs,
+        dialogs: counts.dialogs, recent,
+        note: effect === 'none'
+          ? 'No DOM, resource or dialog change was observed in the settle window. This is not proof the site did nothing: downloads and console errors are outside the page world, and late effects need a separate read.'
+          : effect === 'unknown'
+            ? 'No settle window or DOM measurement was available, so no effect verdict could be formed. Re-observe in a full browser before concluding anything.'
+            : 'Observed within the settle window only; verify the site outcome with a separate read.'
+      },
+      ...(inDialog ? { flow: { fileInputs: counts.fileInputs, requests: counts.requests, domDelta: counts.domDelta, downloads: null, consoleErrors: null } } : {}),
+      note: 'Click dispatched; read page to verify outcome.'
+    };
   }
   if (name === 'browser_click_verified') {
     const baseline = expectationState(args.expect || {});

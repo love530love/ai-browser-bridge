@@ -4,7 +4,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rena
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { loadConfig, ROOT, stateDir } from './config.js';
+import { loadConfig, configPath, DEFAULT_UPLOAD_MAX_BYTES, ROOT, stateDir } from './config.js';
+import { mimeFor } from './upload-mime.js';
 import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory, developerModeInEffect } from './chrome-profile.js';
 import { VERSION } from './version.js';
 import { TOOLS, validateCall } from './tools.js';
@@ -116,8 +117,36 @@ function withContentBoundaries(result) {
   }
   return next;
 }
-export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true, browserTarget = config.browserTarget ?? null } = {}) {
-  config = { ...config, uploadRoots: config.uploadRoots ?? [] };
+export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true, browserTarget = config.browserTarget ?? null, uploadConfigPath = configPath } = {}) {
+  config = { ...config, uploadRoots: config.uploadRoots ?? [], uploadMaxBytes: config.uploadMaxBytes ?? DEFAULT_UPLOAD_MAX_BYTES };
+  // Upload policy is read from disk on demand, cached by mtime. The old code
+  // snapshotted config once at boot: `allow-upload-root` DID write the file,
+  // but a running service never noticed the new root (CNIPA field report P0-3).
+  // Only upload policy is live-reloaded; port/tokens still use the boot snapshot
+  // so a broken edit cannot silently move the listener or rotate credentials.
+  let uploadPolicy = { mtimeMs: -1, value: config, source: 'startup snapshot' };
+  function liveUploadPolicy() {
+    try {
+      const mtimeMs = statSync(uploadConfigPath).mtimeMs;
+      if (uploadPolicy.mtimeMs !== mtimeMs) {
+        const fresh = loadConfig(false, uploadConfigPath);
+        // Adopt only the upload fields, and only when the file is still the SAME
+        // config this service booted from. Port + token acting as identity stops
+        // a test fixture (or another instance's .local) from having its injected
+        // allowlist silently replaced by an unrelated file on disk.
+        // Token alone is the identity. Tests boot on port 0 while a config file
+        // must declare a valid (>=1024) port, so comparing ports would disable
+        // live reload in exactly the fixture that has to prove it works.
+        const sameConfig = fresh.agentToken === config.agentToken;
+        uploadPolicy = sameConfig
+          ? { mtimeMs, value: { ...config, uploadRoots: fresh.uploadRoots, uploadMaxBytes: fresh.uploadMaxBytes }, source: 'config.json (live)' }
+          : { mtimeMs, value: config, source: `startup snapshot (config.json is a different config, port ${fresh.port})` };
+      }
+      return uploadPolicy;
+    } catch (error) {
+      return { ...uploadPolicy, source: `startup snapshot (config.json unreadable: ${error.message})` };
+    }
+  }
   let extension = null;
   let current = null;
   // `extension` and the version fields are mirrors of the primary host so that
@@ -449,7 +478,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     queuedJobs: queue.map((job, index) => ({ index, id: job.id, tool: job.name, priority: job.priorityName, ageMs: Date.now() - job.created, readOnly: !!job.tool.annotations?.readOnlyHint, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, conflictEvidence: !!job.conflictEvidence })),
     taskLease: lease,
     desktopOperation: desktopOperation ? { tool: desktopOperation.tool, ageMs: Date.now() - desktopOperation.startedAt } : null,
-    uploadRoots: config.uploadRoots.length,
+    uploadRoots: liveUploadPolicy().value.uploadRoots.length,
+    uploadMaxBytes: liveUploadPolicy().value.uploadMaxBytes,
     policy: {
       conflictResult: 'Lease conflicts return status=waiting instead of failing the tool call.',
       recommendedNextAction: current ? 'Wait for the active command or inspect queuedJobs before submitting conflicting writes.' : (queue.length ? 'Wait for queued jobs to drain or submit read-only diagnostics.' : 'Queue is idle; submit the next browser task.'),
@@ -677,21 +707,39 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     return { value: 70, name: 'normal' };
   }
   function uploadArgs(args) {
+    // Exactly one target. A selector that silently lost to a ref (or an index
+    // that pointed at a different input) is how a file lands in the wrong field.
+    const targets = [args.ref ? 'ref' : null, args.selector ? 'selector' : null, Number.isInteger(args.inputIndex) ? 'inputIndex' : null].filter(Boolean);
+    if (targets.length === 0) throw new Error('Upload target required: ref, selector or inputIndex');
+    if (targets.length > 1) throw new Error(`Use exactly one upload target, got: ${targets.join(', ')}`);
     if (!isAbsolute(args.filePath)) throw new Error('Upload path must be absolute');
     const filePath = realpathSync(resolve(args.filePath));
-    const allowed = config.uploadRoots.some(root => {
-      const base = realpathSync(resolve(root));
+    const policy = liveUploadPolicy();
+    const { uploadRoots, uploadMaxBytes } = policy.value;
+    const allowed = uploadRoots.some(root => {
+      let base;
+      try { base = realpathSync(resolve(root)); }
+      catch { return false; } // a removed allowlist directory must not break every upload
       const rel = relative(base, filePath);
       return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
     });
-    if (!allowed) throw new Error('Upload path is outside configured upload roots');
+    if (!allowed) throw new Error(`Upload path is outside configured upload roots (source: ${policy.source})`);
     const stat = statSync(filePath);
-    if (!stat.isFile() || stat.size < 1 || stat.size > 16 * 1024 * 1024) throw new Error('Upload file must be 1 byte..16 MiB');
+    if (!stat.isFile() || stat.size < 1 || stat.size > uploadMaxBytes) {
+      throw new Error(`Upload file must be 1 byte..${uploadMaxBytes} bytes (source: ${policy.source})`);
+    }
     const bytes = readFileSync(filePath);
     const actualSha = createHash('sha256').update(bytes).digest('hex');
     if (actualSha !== args.sha256.toLowerCase()) throw new Error('Upload SHA256 mismatch');
-    const mime = { '.zip': 'application/zip', '.json': 'application/json', '.txt': 'text/plain', '.csv': 'text/csv' }[extname(filePath).toLowerCase()] || 'application/octet-stream';
-    return { tabId: args.tabId, ref: args.ref, fileName: basename(filePath), mimeType: mime, size: stat.size, sha256: actualSha, data: bytes.toString('base64') };
+    // One shared MIME table, with an explicit caller override. An explicit but
+    // malformed type is refused here instead of reaching the page as a File type.
+    const resolved = mimeFor(filePath, args.mimeType);
+    return {
+      tabId: args.tabId, ref: args.ref, selector: args.selector, inputIndex: args.inputIndex,
+      fileName: basename(filePath), mimeType: resolved.mimeType, mimeSource: resolved.source,
+      uploadMaxBytes, configSource: policy.source,
+      size: stat.size, sha256: actualSha, data: bytes.toString('base64')
+    };
   }
   function recordDesktopAudit(name, args, result, startedAt) {
     const status = result?.status ?? 'failed';

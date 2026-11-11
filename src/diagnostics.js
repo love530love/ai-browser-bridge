@@ -2,6 +2,11 @@
 export function errorCategory(message) {
   if (!message) return null;
   const value = String(message);
+  // The injected page script appends this marker (with the ref generation) to
+  // its long-standing "Stale element reference" message. Keep the marker as a
+  // distinct, structured category so callers can tell a stale ref from a
+  // generic stale-sounding error, without changing the older text match.
+  if (/\[stale_ref\b/i.test(value)) return 'STALE_REF';
   if (/stale|reference/i.test(value)) return 'STALE_REFERENCE';
   if (/navigation|page changed|loading/i.test(value)) return 'PAGE_TRANSITION';
   if (/covered/i.test(value)) return 'ELEMENT_COVERED';
