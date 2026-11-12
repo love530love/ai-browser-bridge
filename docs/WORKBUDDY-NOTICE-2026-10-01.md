@@ -6,7 +6,7 @@
 请更新 WorkBuddy 的浏览器桥接策略：
 
 1. 断线时只检查 `GET http://127.0.0.1:19387/status` 或执行 `npm run status`。
-2. 禁止自动打开 `chrome-extension://mmopbppoabmhliflinadkgnedjpmbgig/panel.html`。
+2. 禁止自动打开 `chrome-extension://<实际扩展 ID>/panel.html`。解压扩展的 ID 由绝对路径派生，换机器/换目录就会变；以 `GET /status` 的 `extensionId` 为准，不要写死任何具体 ID。
 3. 禁止自动打开扩展设置页、禁止自动重新配对、禁止通过 shell 启动 Chrome 扩展页。
 4. 如果 `/status` 返回 `connected:false`，只报告“扩展未连接，等待后台自动重连或用户手动检查一次”，不要创建新标签页；工具返回 `status:"waiting"` 时继续等待，不要结束任务。
 5. 多个 AI/任务共用同一个 tab 时，写入前调用 `browser_claim_tab`，无人值守任务建议带 `wait:true`；后续点击、填写、上传、滚动、导航、按键等写工具必须传入匹配的 `agent`，长任务可用 `browser_renew_tab` 心跳，持有人写操作会自动续租，完成后调用 `browser_release_tab`。

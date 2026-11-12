@@ -1,5 +1,6 @@
 param(
-  [string]$ExtensionId = 'mmopbppoabmhliflinadkgnedjpmbgig',
+  [string]$ExtensionId = '',
+  [string]$ExpectedExtensionPath = '',
   [int]$ChromeProcessId = 0,
   [long]$ChromeWindowHandle = 0,
   [switch]$ListWindows,
@@ -21,6 +22,29 @@ public static class NativeWindow {
   [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
   [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int maxCount);
+  [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+  // A background or elevated session often refuses the first SetForegroundWindow.
+  // Attach to the current foreground thread, restore/raise the target, then ask
+  // the OS again. The CALLER still has to verify GetForegroundWindow() before
+  // sending any keystroke - this helper never claims success on its own.
+  public static bool ForceForeground(IntPtr hWnd) {
+    uint foregroundProcess;
+    uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out foregroundProcess);
+    uint currentThread = GetCurrentThreadId();
+    bool attached = foregroundThread != 0 && foregroundThread != currentThread &&
+      AttachThreadInput(currentThread, foregroundThread, true);
+    try {
+      ShowWindow(hWnd, 9);
+      BringWindowToTop(hWnd);
+      SetForegroundWindow(hWnd);
+    } finally {
+      if (attached) AttachThreadInput(currentThread, foregroundThread, false);
+    }
+    return GetForegroundWindow() == hWnd;
+  }
   public static string WindowTitle(IntPtr hWnd) {
     var text = new System.Text.StringBuilder(512);
     GetWindowText(hWnd, text, text.Capacity);
@@ -54,12 +78,27 @@ if ($ListWindows) {
   else { $windows }
   exit 0
 }
-$fixedExtensionId = 'mmopbppoabmhliflinadkgnedjpmbgig'
-if ($ExtensionId -ne $fixedExtensionId) {
-  $message = 'This script only operates on the fixed AI Browser Bridge extension; no UI action was taken.'
+# Guard #2. The Node side binds the id to THIS project's extension/ directory
+# through Chrome Preferences before calling this script. A bare format check is
+# not enough: that would turn "reload our extension" into "reload whatever id a
+# caller passes". Require an explicit id, a strict shape, and a real manifest
+# in the expected directory whose name belongs to this project.
+if ([string]::IsNullOrWhiteSpace($ExpectedExtensionPath)) { $ExpectedExtensionPath = Join-Path $projectRoot 'extension' }
+$manifestPath = Join-Path $ExpectedExtensionPath 'manifest.json'
+$identityOk = ($ExtensionId -match '^[a-p]{32}$') -and (Test-Path -LiteralPath $manifestPath -PathType Leaf)
+if ($identityOk) {
+  try {
+    $manifestName = [string]((Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).name)
+    $identityOk = $manifestName -match 'AI Browser Bridge'
+  } catch { $identityOk = $false }
+}
+if (-not $identityOk) {
+  Write-Host 'extensionIdSource=unverified reason=id_not_bound'
+  $message = "Extension id was not bound to this project's extension directory; no UI action was taken."
   if ($BestEffort) { Write-Warning $message; exit 2 }
   throw $message
 }
+Write-Host 'extensionIdSource=node-verified-path'
 $config = Get-Content -LiteralPath (Join-Path $projectRoot '.local/config.json') -Raw | ConvertFrom-Json
 $expectedVersion = (Get-Content -LiteralPath (Join-Path $projectRoot 'extension/manifest.json') -Raw | ConvertFrom-Json).version
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -96,11 +135,20 @@ if (-not $chromeWindow) {
 }
 $targetUrl = "chrome://extensions/?id=$ExtensionId"
 $focused = [NativeWindow]::SetForegroundWindow($chromeWindow.Handle)
-if (-not $focused -or [NativeWindow]::GetForegroundWindow() -ne $chromeWindow.Handle) {
-  $message = 'Could not verify the selected Chrome window is foreground; no keyboard input was sent.'
+$foregroundVerified = $focused -and ([NativeWindow]::GetForegroundWindow() -eq $chromeWindow.Handle)
+if (-not $foregroundVerified) {
+  # One bounded AttachThreadInput retry, then VERIFY AGAIN. No keystroke is
+  # ever sent to a window we did not prove is in front.
+  Start-Sleep -Milliseconds 250
+  $foregroundVerified = [NativeWindow]::ForceForeground($chromeWindow.Handle)
+}
+if (-not $foregroundVerified) {
+  Write-Host 'foregroundVerified=False reason=foreground_not_acquired'
+  $message = 'Could not verify the selected Chrome window is foreground after the AttachThreadInput fallback; no keyboard input was sent.'
   if ($BestEffort) { Write-Warning $message; exit 2 }
   throw $message
 }
+Write-Host 'foregroundVerified=True'
 $shell = New-Object -ComObject WScript.Shell
 $shell.SendKeys('^l'); Start-Sleep -Milliseconds 150
 $shell.SendKeys($targetUrl); Start-Sleep -Milliseconds 150

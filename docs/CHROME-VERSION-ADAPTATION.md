@@ -62,10 +62,12 @@ node src/cli.js doctor
 ```
 doctor -> bridge-extension-registered
   profileDirectory: Default
-  extensionId: mmopbppoabmhliflinadkgnedjpmbgig
+  extensionId: mmopbppoabmhliflinadkgnedjpmbgig   # 见下方注记
   enabled: false
   disableReasons: [16777216]
 ```
+
+> 注记：上面代码块是当时**开发机**上的一份 doctor 样例输出，原样保留作为历史证据。其中的 `extensionId` 不是通用常量——解压扩展的 ID 由加载时的绝对路径派生，换盘符、换目录、换机器都会不同。现在统一以 `GET /status` 的 `extensionId`（握手学到的真实 ID）为准；服务侧 `resolveBridgeExtensionId()` 会在扩展断连时按本项目 `extension/` 目录从 Chrome Preferences 反查。脚本侧另有第二道护栏，拒绝未经绑定的目标。
 
 `User Data\Default\Secure Preferences` 里这条扩展记录带 `disable_reasons: [16777216]`，同时
 `extensions.ui.developer_mode` 未设置（开发者模式关闭）。**154 上它一直可用，156 上第一次真正重启后被停用**

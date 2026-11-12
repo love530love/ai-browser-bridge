@@ -428,12 +428,13 @@ test('desktop reload is one-shot, target-bound, auditable, and excludes concurre
   const audit = [];
   let reloadCalls = 0;
   let resolveReload;
+  let capturedArgs = null;
   const desktopAdapter = {
     available: true,
     listChromeWindows: async () => ({ status: 'success', windows: [{ processId: 17, windowHandle: 801, title: 'Work - Chrome' }], dispatched: false }),
     reloadExtension: args => {
       reloadCalls++;
-      assert.deepEqual(args, { windowHandle: 801, processId: 17, confirmation: 'reload_extension_once' });
+      capturedArgs = args;
       return new Promise(resolve => { resolveReload = resolve; });
     }
   };
@@ -451,6 +452,14 @@ test('desktop reload is one-shot, target-bound, auditable, and excludes concurre
   assert.equal(reloadCalls, 0);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(reloadCalls, 1);
+  // P0-1: the UI reload chain must carry an id bound to this project's
+  // extension directory, never the maintainer's hard-coded constant.
+  assert.equal(capturedArgs.windowHandle, 801);
+  assert.equal(capturedArgs.processId, 17);
+  assert.equal(capturedArgs.confirmation, 'reload_extension_once');
+  assert.match(capturedArgs.extensionId, /^[a-p]{32}$/);
+  assert.ok(['extension-handshake', 'chrome-profile-path', 'chrome-profile-id', 'fallback-constant'].includes(capturedArgs.extensionIdSource),
+    `unexpected extensionIdSource: ${capturedArgs.extensionIdSource}`);
   assert.equal(b.status().desktopOperation.tool, 'browser_reload_extension');
   const concurrentWrite = await b.call('browser_click', { tabId: 1, ref: 'current-ref' });
   assert.equal(concurrentWrite.status, 'waiting');

@@ -4,7 +4,7 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.38.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.39.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 0.25.0 补的是**一闪而过、或者悬停才存在**的那层 UI。toast 活 2–3 秒，任何「等你问我的时候再扫一遍」都必然错过，所以 `browser_transient` 不是更快的扫描，而是扩展在 isolated world 里装一个常驻 `MutationObserver`，**在提示还在屏幕上时就记下来**：`read` 能查到已经消失的 toast（带 `firstSeenAt` / `goneAt` / `preExisting`），`watch` 等新的提示出现，`clear` 只清记录。tooltip 有两条路：声明式的（`title` / `data-tooltip` / `aria-describedby`）由 `browser_popup action:"probe"` 直接读；纯 CSS `:hover` 的只能让**真实指针**去问——合成 `mouseover` 不移动 `:hover` 状态，所以 `action:"reveal"` 走 CDP `Input.dispatchMouseEvent`，settle 之后再读新出现的浮层。popconfirm 看起来就是个普通按钮，点两次就删两次，所以 `action:"open"` 点一次并返回气泡里的按钮，`action:"choose"` 按 `choice:"confirm"|"cancel"` 或确切文本选，每个派发过点击的结果都是 `retryable:false`。tooltip 常挂在 `<span>`/图标上，`browser_find_element` 不会给 ref，因此 `browser_popup` 支持 `selector` 自己定位，`probe` 不带参数时还会列出全页声明了 tooltip 的元素。真机实测（Chrome 156）三处坑写进了代码：`el.textContent = x` 是替换文本节点而不是 `characterData` 变更（第一版因此漏掉全部 aria-live）；`visible()` 的 per-call 缓存会把「点击前不可见」记到「点击后」（`open` 因此误报 `not_opened`）；用几何距离猜「这个气泡属于哪个触发源」会认错爹（改成只认 `aria-expanded` + `aria-controls`，其余靠 `opened`/`closed_by_click`/`unchanged` 三态如实报告）。另外 `extension/worker.js` 有一行显式的工具分发白名单，新工具漏加就是真机 `Unknown command` 而 532 个单测全绿，所以加了一条静态测试直接读那行源码。
 
@@ -92,15 +92,35 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 ### 发布与版本管理
 
 - 发布历史：[GitHub Releases](https://github.com/love530love/ai-browser-bridge/releases)。源码与本机部署版本以 package.json 和 doctor 为准；推送提交不等于创建 Release。
+> **版本标记口径**：`package.json` / `extension/manifest.json` 的工程版本号（如 `0.39.0`）与部分历史文档、部署记录里的功能叙述版本号（如 `0.5.x`）是**两套并行标记，不能据数字大小判断代码新旧**，看起来像「降级」的快进也可能是正常升级。以 `git HEAD`、`buildId` 和 `doctor` 为准。此说明同样适用于 Release 页面。
+
 - 所有版本：[GitHub Releases](https://github.com/love530love/ai-browser-bridge/releases)
 - 版本号必须同时更新 `package.json`、`package-lock.json`、`extension/manifest.json` 和 `CHANGELOG.md`，再创建同名 Git tag 与 GitHub Release。
 - Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
 
-### 当前版本升级指南
+### 当前版本升级指南（0.39.0）
 
-0.5.10：在 0.5.9 基础上增加 SPA 零尺寸布局诊断、视口回退和坐标动作安全等待，避免客服浮窗等图标控件被盲点。完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+> **只 `git pull` 不等于升级完成。** 磁盘代码、运行中的服务进程、Chrome 里加载的扩展、`.local/config.json` 的新字段是四层独立状态；只更新第一层会出现「面板已连接、体检却跑在旧代码上」的假健康状态。
 
-下一阶段的一次性重构与 Python 数据自动化接入方案见 [一次性升级与验收方案](docs/ONE-SHOT-UPGRADE-PLAN.md)。该文件区分已实现能力、实施批次和验收证据；计划内容不会自动视为当前版本功能。
+先跑只读自检，它会指出卡在哪一层并给有序、可复制的步骤：
+
+```bash
+node src/cli.js upgrade-check
+```
+
+固定五步：
+
+1. `git pull --ff-only origin main`（浅克隆或落后很多个提交同样适用）。
+2. **重启服务**：`doctor` 的 `service-build-current` 会比较运行 buildId 与磁盘 buildId；落后时需在**服务完全空闲**时重启。不要用 `stop.ps1`（它会写 `service-paused`，让守护自我暂停）；交给看门狗拉起，或启用 `-Heartbeat` 让心跳白名单动作在空闲时处理。
+3. **重载扩展**：扩展已连接时 `browser_reload_extension` 走 `chrome.runtime.reload()` 自我重载；多宿主时先 `browser_hosts`，按每个 `hostId` 分别调用，不要只重载 primary。
+4. **补配置字段**：旧配置缺 `browserTarget` 时用 `node src/cli.js set-browser-target --from-running-chrome`（默认只打印建议与证据，确认后加 `--write` 才写回）；其它缺项见 `upgrade-check` 输出。
+5. **复验**：`doctor-lite.bat` → `doctor.bat`，期望 `ok:true`，`service-build-current` 与 `version-match` 全通过。
+
+`upgrade-check` 是只读的：不重启服务、不重载扩展、不改配置。每条建议都带可直接复制的命令。
+
+> **自动重启的边界**：默认守护只做**只读**的源码陈旧报告（状态 `build-stale-restart-needed`），不会擅自杀进程——心跳白名单自愈要求完全空闲、冷却、单实例锁与动作后复核，守护看不到 in-flight 命令。需要无人值守时可用 `install-autostart.ps1 -Heartbeat` 把心跳常驻纳入自启，自动重启仍走心跳白名单。**`-Heartbeat` 与已有的每小时单次巡检 automation 不要同时启用**，混用首轮会报时钟漂移并冻结自愈。
+
+完整历史见 [CHANGELOG.md](CHANGELOG.md)。下一阶段的一次性重构与 Python 数据自动化接入方案见 [一次性升级与验收方案](docs/ONE-SHOT-UPGRADE-PLAN.md)；该文件区分已实现能力、实施批次和验收证据，计划内容不会自动视为当前版本功能。
 
 
 ### 远程沙箱与 VNC 登录边界
@@ -183,6 +203,17 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 
 扩展更新后，在 Chrome 扩展页点“重新加载”。已保存配对密钥且未暂停时，扩展会在后台自动重连；连接成功时每 20 秒发送一个纯本机保活消息，**不会调用模型或消耗模型 token**。AI 客户端诊断断线时只应读取 `npm run status` 或 `GET /status`，不要自动打开 `chrome-extension://.../panel.html`。
 
+### 原生消息宿主（可选）
+
+`extension/manifest.json` 声明了 `nativeMessaging`、`offscreen`、`identity` 等权限。其中 `nativeMessaging` 对应的本机宿主 `com.aibridge.host` **默认不安装**；不安装不影响页面读写、上传、截图等常规能力，只有部分原生能力需要它。`doctor` 里的 `native-host` 是信息级检查（`optional:true`），未注册**不会**让 `ok` 变红，但会告诉你「要不要装、怎么装、装完怎么验」。
+
+- 注册表位置：`HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.aibridge.host`
+- 只读查看：`node src/cli.js call browser_native_host '{}'`
+- 安装：`node src/cli.js call browser_native_host_install '{}'`（会写用户级注册表，确认后再执行）
+- 卸载：删除上述注册表项与安装时生成的宿主清单文件，不要动其它扩展的注册项
+
+安装后预期 `registered:true` / `usable:true`。`expectedOrigin` 用的是 `/status.extensionId` 的真实扩展 ID —— 解压扩展的 ID 由绝对路径派生，换盘符或换目录就会变，**不要写死**。
+
 ## 开机 / 关机后的必要操作
 
 服务注册为登录自启后，日常使用**不需要任何手动操作**。下面分「一次性设置」和「日常」两部分。
@@ -194,6 +225,16 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 启动入口使用 PowerShell 7 并遵守机器原有的脚本执行策略。若被策略或安全软件拦截，应保留报错并排查，不自动添加排除项、降低策略或恢复隔离文件。参见 [2026-10-19 告警记录](docs/SECURITY-INCIDENT-20261019.md)。
 
 默认在用户「启动」文件夹放一个快捷方式，运行隐藏的 PowerShell 7 健康守护程序。可以在「任务管理器 → 启动应用」里禁用；组织安全软件仍可能限制启动。
+
+可选开关（**都不默认启用**，需要时显式指定）：
+
+```powershell
+.\install-autostart.ps1 -ScheduledTask   # 登录触发的计划任务，适合无人值守
+.\install-autostart.ps1 -Heartbeat       # 把心跳常驻纳入自启（与每小时单次巡检 automation 二选一）
+.\install-autostart.ps1 -StatusOnly      # 只读列出本次注册的所有条目
+```
+
+两种方式都会写进 `.local/autostart-registry.json`，`uninstall-autostart.bat` 按清单逐项清理并输出「已移除 / 未找到」。沙箱或权限不足时计划任务会报 `unknown` 并给出可复制命令，不会中断安装。项目移动目录或删除便携运行时目录后，**外部手工注册**的任务不会自动更新，迁移时需人工核对。
 
 两种方式均隐藏运行。如需注册表方式：
 
@@ -243,8 +284,16 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 | 面板一直显示「未连上本机服务」 | 说明扩展从未握手成功过：先 `start.bat`，再 `doctor-lite.bat`；自动重连仍在后台运行 |
 | 换电脑 / 重装系统 | `npm ci` → 装 PowerShell 7 → `start.bat` → `install-autostart.bat` → `pair.bat` |
 | 卸载自启后守护还在拉服务 | `.\install-autostart.ps1 -StatusOnly` 列出全部注册项；外部手工注册的计划任务项目不会自动删除，报告会给出清理命令 |
+| `git pull` 报 untracked 文件冲突 | 先备份本地未跟踪文件 → 逐字比对远程版是否已包含本地内容 → 再移除本地文件并 `git pull --ff-only origin main`；见下方「本机现场报告命名约定」 |
+| 拉取成功但 `/status.version` 还是旧版 | 只更新了磁盘代码，服务仍在跑旧进程；跑 `node src/cli.js upgrade-check` 并按五步指南重启服务、重载扩展 |
 
 > **关于 PowerShell 版本（2026-11-10 更正）**：这里曾写「所有 `.ps1` 都不再要求 PowerShell 7，Windows PowerShell 5.1 也能直接运行」，这是错的。`.ps1` 里的 `[Convert]::ToHexString` 等属于 PowerShell 7 / .NET 5+，5.1 跑不了；而且用户实际双击的是 `.bat`，它只认 `pwsh.exe`。**脚本引擎兼容性与启动器依赖是两件事**，不要把前者当成后者已解决。因此也不做「`.bat` 悄悄回退 `powershell.exe`」：那会把一步可见的失败换成更难查的运行时异常。
+
+#### 本机现场报告命名约定
+
+维护者会把外部反馈归档进仓库，例如 [`docs/DEPLOYMENT-FEEDBACK-2026-11-09.md`](docs/DEPLOYMENT-FEEDBACK-2026-11-09.md) 与 [`docs/field-reports/LOVE-PC-WIN11-2026-11-11-deploy-upgrade.md`](docs/field-reports/LOVE-PC-WIN11-2026-11-11-deploy-upgrade.md)。若你在本机也写了一份**同名**的未跟踪文档，下次 `git pull` 会被 Git 拒绝覆盖（GitHub Desktop 显示 "untracked working tree files would be overwritten by merge"），看起来像项目坏了。
+
+本机现场报告请放在 `docs/local/<机器名>-<日期>-<主题>.md`（该目录自带的 `.gitignore` 只跟踪自身、忽略目录内所有报告），或至少加 `LOCAL-` 前缀与机器标识，避免与维护者归档版同名。维护者归档时也会改用带机器标识的文件名，不再复用原文件名。
 
 #### 重启后验收清单
 

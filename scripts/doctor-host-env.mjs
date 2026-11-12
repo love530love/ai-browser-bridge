@@ -316,8 +316,25 @@ async function checkPort() {
 
 function checkNoProxy() {
   const name = 'no-proxy-loopback';
-  const raw = [process.env.NO_PROXY, process.env.no_proxy].filter(Boolean).join(',');
-  const entries = raw.split(/[,;\s]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+  // 大小写归并：NO_PROXY / no_proxy（以及任意大小写变体）在 Windows 上是同一个
+  // 变量名（环境字典大小写不敏感）。注入式会话把两者叠加进同一字典后，若直接
+  // 拼接 NO_PROXY + no_proxy 会把每个条目重复一遍，输出读起来像配置错了。
+  // 这里先按大小写不敏感地收集所有同名键，再统一切分、去重（Set + 小写归一）。
+  const nameKeys = Object.keys(process.env).filter(k => /^no_proxy$/i.test(k));
+  const sourceValues = nameKeys.map(k => process.env[k]).filter(Boolean);
+  const combined = sourceValues.join(',');
+  const tokens = combined.split(/[,;\s]+/).map(s => s.trim()).filter(Boolean);
+  const seen = new Set();
+  const deduped = [];
+  for (const token of tokens) {
+    const key = token.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(token);
+  }
+  const hadDuplicates = deduped.length < tokens.length;
+  const displayValue = deduped.join(',');
+  const entries = deduped.map(t => t.toLowerCase());
   const norm = s => {
     let v = s.replace(/^\./, '').toLowerCase();
     if (/^[^:]+:\d+$/.test(v)) v = v.replace(/:\d+$/, '');
@@ -327,15 +344,30 @@ function checkNoProxy() {
   const covers = t => entries.some(e => e === '*' || norm(e) === t);
   const targets = ['127.0.0.1', 'localhost', '::1'];
   const missing = targets.filter(t => !covers(t));
-  const proxyVars = ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy'].filter(k => process.env[k]);
+  // 代理变量名同样按大小写归并，避免 HTTP_PROXY / http_proxy 被重复列出。
+  const seenProxy = new Set();
+  const proxyVars = [];
+  for (const k of ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy']) {
+    if (!process.env[k]) continue;
+    const lower = k.toLowerCase();
+    if (seenProxy.has(lower)) continue;
+    seenProxy.add(lower);
+    proxyVars.push(k);
+  }
   const ok = missing.length === 0;
+  // 同值重复来自会话注入，不影响登录进程：只加说明，不改变 ok 判定与 fix 语义。
+  const dedupNote = hadDuplicates
+    ? ' 已对 NO_PROXY / no_proxy 做大小写归并 + 条目去重；检测到同值重复来自会话注入，不影响登录进程。'
+    : '';
+  const shown = sanitize(displayValue) || '(空)';
   return { name, ok, status: ok ? 'ok' : 'fail',
     detail: ok
-      ? `NO_PROXY / no_proxy 已覆盖 127.0.0.1、localhost、::1（当前值：${sanitize(raw) || '(空)'}）。${proxyVars.length ? `检测到代理变量 ${proxyVars.join('、')}，本机请求已明确绕过代理。` : '未检测到会话级代理变量。'}`
-      : `NO_PROXY / no_proxy 未完整覆盖本机回环地址，缺少 ${missing.join('、')}（当前值：${sanitize(raw) || '(空)'}）。${proxyVars.length ? `检测到代理变量 ${proxyVars.join('、')}，本机 127.0.0.1 请求有被代理吞掉的风险。` : ''}`,
+      ? `NO_PROXY / no_proxy 已覆盖 127.0.0.1、localhost、::1（去重后当前值：${shown}）。${proxyVars.length ? `检测到代理变量 ${proxyVars.join('、')}，本机请求已明确绕过代理。` : '未检测到会话级代理变量。'}${dedupNote}`
+      : `NO_PROXY / no_proxy 未完整覆盖本机回环地址，缺少 ${missing.join('、')}（去重后当前值：${shown}）。${proxyVars.length ? `检测到代理变量 ${proxyVars.join('、')}，本机 127.0.0.1 请求有被代理吞掉的风险。` : ''}${dedupNote}`,
     fix: ok ? ''
       : '为本机回环地址固化免代理（在「命令提示符」执行，重开终端生效）：setx NO_PROXY "127.0.0.1,localhost,::1"；若已有用户级 no_proxy，建议同步设置同名值。不要让本机请求走系统代理。',
-    noProxy: sanitize(raw), missingTargets: missing, proxyVariablesPresent: proxyVars };
+    noProxy: sanitize(displayValue), missingTargets: missing, proxyVariablesPresent: proxyVars,
+    deduplicated: hadDuplicates, noProxyEntryCount: tokens.length, noProxyUniqueCount: deduped.length };
 }
 
 const runtime = readJson(join(stateDir, 'runtime.json'));

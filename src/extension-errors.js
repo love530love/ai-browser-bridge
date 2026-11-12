@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { delimiter, join } from 'node:path';
 import { existsSync } from 'node:fs';
+import { resolveBridgeExtensionId } from './chrome-profile.js';
 
 // Clearing an extension's error list is the one maintenance job that no extension
 // API can do: the list lives only inside chrome://extensions, developerPrivate
@@ -32,6 +33,11 @@ export async function clearExtensionErrors(target = {}, { platform = process.pla
   if (!executable) return { status: 'unavailable', reason: 'powershell7_unavailable', cleared: 0, dispatched: false, retryable: false };
   const script = fileURLToPath(new URL('../scripts/clear-extension-errors.ps1', import.meta.url));
   const args = ['-NoProfile', '-NonInteractive', '-File', script];
+  // The script guards against unvalidated ids, so always supply the one bound
+  // to this project's extension directory (or the caller's validated id).
+  const extensionId = typeof target?.extensionId === 'string' && /^[a-p]{32}$/.test(target.extensionId)
+    ? target.extensionId : resolveBridgeExtensionId().extensionId;
+  args.push('-ExtensionId', extensionId);
   if (hasProcess) args.push('-ChromeProcessId', String(processId));
   if (hasHandle) args.push('-ChromeWindowHandle', String(windowHandle));
   return new Promise(resolve => {

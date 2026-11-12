@@ -1,0 +1,6 @@
+# Machine-local field reports live here and are never committed.
+# The maintainer archives external feedback under docs/ with a machine-tagged
+# filename; a same-named tracked copy would make `git pull` refuse to overwrite
+# a local untracked report. See README "本机现场报告命名约定".
+*
+!.gitignore

@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { loadConfig, configPath, DEFAULT_UPLOAD_MAX_BYTES, ROOT, stateDir } from './config.js';
 import { mimeFor } from './upload-mime.js';
-import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory, developerModeInEffect } from './chrome-profile.js';
+import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory, developerModeInEffect, resolveBridgeExtensionId } from './chrome-profile.js';
 import { VERSION } from './version.js';
 import { TOOLS, validateCall } from './tools.js';
 import { createTasks } from './tasks.js';
@@ -1084,7 +1084,21 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         }
         return desktopAdapter.devtools(args);
       }
-      return desktopAdapter.reloadExtension(args);
+      // The id of an unpacked extension is derived from its absolute path, so
+      // a second checkout has a different id. Prefer the id learned from the
+      // handshake; when the extension is disconnected, bind it to this
+      // project's extension/ directory from Chrome's own preferences.
+      let identity;
+      if (typeof extensionId === 'string' && /^[a-p]{32}$/.test(extensionId)) {
+        identity = { extensionId, extensionIdSource: 'extension-handshake' };
+      } else {
+        // resolveBridgeExtensionId returns `{ extensionId, source }`. Map it
+        // explicitly: spreading it directly would silently drop the source,
+        // because the reload chain expects the key `extensionIdSource`.
+        const resolved = resolveBridgeExtensionId();
+        identity = { extensionId: resolved.extensionId, extensionIdSource: resolved.source };
+      }
+      return desktopAdapter.reloadExtension({ ...args, ...identity });
     })
       .catch(() => ({ status: 'uncertain', retryable: false, reason: 'desktop_process_result_unknown', dispatched: null,
         message: 'The desktop adapter failed after launch may have started. Inspect extension connection and version before any retry.' }))
@@ -1274,7 +1288,12 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     const reloadedHost = hostId ? hosts.byId(hostId) : null;
     const remotePort = reloadedHost?.remotePort ?? extension?._socket?.remotePort ?? null;
     const owner = resolveExtensionOwner(remotePort, config.port);
-    const boundTarget = Number.isSafeInteger(owner?.pid) && owner.pid > 0 ? { processId: owner.pid } : {};
+    const clearId = typeof extensionId === 'string' && /^[a-p]{32}$/.test(extensionId)
+      ? extensionId : resolveBridgeExtensionId().extensionId;
+    const boundTarget = {
+      ...(Number.isSafeInteger(owner?.pid) && owner.pid > 0 ? { processId: owner.pid } : {}),
+      extensionId: clearId
+    };
     const attempts = [];
     let entry;
     for (let attempt = 1; attempt <= 2; attempt += 1) {

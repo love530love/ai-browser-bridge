@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { isAbsolute, join, resolve } from 'node:path';
 import { configPath, loadConfig, ROOT, stateDir } from './config.js';
 import { request } from './client.js';
@@ -6,6 +7,9 @@ import { callWithWaitingRecovery } from './auto-recovery.js';
 import { createAgentPolicy } from './policy.js';
 import { regressionSummary } from './regression-summary.js';
 import { computeBuildIdentity } from './build-identity.js';
+import { buildUpgradeCheck } from './upgrade-check.js';
+import { inferBrowserTarget } from './browser-target.js';
+import { runNativeHostTool, NATIVE_HOST_NAME } from './native-host.js';
 import { findBridgeExtension, describeExtensionState, chromeUserDataDir, sameDirectory, developerModeInEffect } from './chrome-profile.js';
 import { createDesktopAdapter } from './desktop-adapter.js';
 import { usageSummary } from './usage-summary.js';
@@ -35,11 +39,11 @@ async function doctor() {
     const manifestVersion = JSON.parse(readFileSync(join(ROOT, 'extension', 'manifest.json'), 'utf8')).version;
     const expectedBuildId = computeBuildIdentity(ROOT);
     add('service-build-current', status.buildId === expectedBuildId, { expectedBuildId, runningBuildId: status.buildId ?? null });
-    if (status.buildId !== expectedBuildId) report.recommendations.push('Service source identity differs or is unavailable. Arrange an idle service restart and verify again; matching version numbers alone do not prove current code is loaded.');
+    if (status.buildId !== expectedBuildId) report.recommendations.push('Service source identity differs or is unavailable. Arrange an idle service restart and verify again; matching version numbers alone do not prove current code is loaded. Copyable: node src/cli.js upgrade-check (ordered, read-only plan). Verify the 19387 LISTENING PID, the process command line and an idle queue before any restart; .local/server.pid is NOT proof of process identity, so never kill by it blindly. Let the watchdog (or the heartbeat allow-list) restart, then run node src/cli.js status; never stop.ps1.');
     add('deployment-current', status.version === expectedVersion && status.extensionVersion === manifestVersion && expectedVersion === manifestVersion,
       { expectedVersion, manifestVersion, serviceVersion: status.version, extensionVersion: status.extensionVersion ?? null });
-    if (status.version !== expectedVersion) report.recommendations.push(`Running service differs from disk version ${expectedVersion}; restart the service when idle.`);
-    if (status.extensionVersion !== manifestVersion) report.recommendations.push(`Loaded extension differs from disk version ${manifestVersion}; reload and verify before claiming deployment complete.`);
+    if (status.version !== expectedVersion) report.recommendations.push(`Running service differs from disk version ${expectedVersion}; restart the service when idle. Copyable: node src/cli.js upgrade-check (read-only plan with the LISTENING-PID identity check), let the watchdog restart only after that check, then verify with node src/cli.js status. Never kill by .local/server.pid alone; never stop.ps1.`);
+    if (status.extensionVersion !== manifestVersion) report.recommendations.push(`Loaded extension differs from disk version ${manifestVersion}; reload and verify before claiming deployment complete. Copyable: node src/cli.js upgrade-check, then node src/cli.js call browser_reload_extension '{"confirmation":"reload_extension_once","allowFocus":true}' (repeat per hostId when multi-host).`);
     add('service-status', status.service === 'ai-browser-bridge', { version: status.version });
     add('extension-connected', status.connected === true, { extensionVersion: status.extensionVersion ?? null, browserVersion: status.browserVersion ?? null });
     // "Not connected" and "not installed" and "Chrome disabled it" are the same
@@ -100,7 +104,7 @@ async function doctor() {
           note: 'Dry run only: nothing was launched. This is the browser and profile a real auto start would use.'
         });
         if (!target) {
-          report.recommendations.push('No browserTarget is recorded, so auto start picks a channel by heuristic. That is how the wrong browser gets opened: set browserTarget in config.json to the browser you actually use.');
+          report.recommendations.push('No browserTarget is recorded, so auto start picks a channel by heuristic. That is how the wrong browser gets opened: set browserTarget in config.json to the browser you actually use. Copyable: node src/cli.js set-browser-target --from-running-chrome (dry-run prints the suggestion + evidence); add --write to persist it, then node src/cli.js doctor.');
         }
         if ((decision.warnings ?? []).includes('recorded_target_looks_stale')) {
           const live = decision.liveCandidate ?? {};
@@ -128,6 +132,7 @@ async function doctor() {
       if (status.extensionVersion > status.version) report.recommendations.push('Extension is newer than the running service. Restart the bridge service with start.ps1 or stop.ps1 then start.ps1.');
       else report.recommendations.push('Service is newer than the loaded extension. Reload the unpacked extension from chrome://extensions.');
     }
+    report.checks.push(await nativeHostCheck());
   } catch (error) {
     add('service-status', false, { error: error.message });
     report.recommendations.push('Bridge service is not reachable on 127.0.0.1. Run start.ps1 and wait for status. If the launcher itself may have failed (missing PowerShell 7, wrong Node, port occupied, proxy swallowing loopback), run doctor-lite.bat first: it uses only node.exe, needs no pwsh.exe, and reports the host environment with copyable fixes.');
@@ -170,6 +175,137 @@ function upgradeDiagnosis() {
   report.status = errors.length || report.regressions.unexpectedFailures || report.regressions.unreadable || report.usage.frequentRestarts || report.usage.uncertainCommands || report.usage.unreadableFiles || report.usage.malformedRows || report.usage.missingFiles ? 'attention' : 'ready';
   writeFileSync(join(stateDir, 'upgrade-analysis.json'), JSON.stringify(report, null, 2), { encoding: 'utf8' });
   return report;
+}
+
+function gitFact(args) {
+  try {
+    return execFileSync('git', args, { encoding: 'utf8', cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch { return 'unknown'; }
+}
+
+function collectGit() {
+  const head = gitFact(['rev-parse', 'HEAD']);
+  const porcelain = gitFact(['status', '--porcelain']);
+  const dirty = porcelain === 'unknown' ? 'unknown' : porcelain.length > 0;
+  let behind = 'unknown';
+  let ahead = 'unknown';
+  const counts = gitFact(['rev-list', '--left-right', '--count', 'origin/main...HEAD']);
+  if (counts !== 'unknown') {
+    const m = /^(\d+)\s+(\d+)$/.exec(counts);
+    if (m) { behind = Number(m[1]); ahead = Number(m[2]); }
+  }
+  return { head, behind, ahead, dirty };
+}
+
+// Read-only fact collection for upgrade-check. It never writes a file, never
+// restarts the service and never reloads the extension. /status is copied
+// field-by-field (never echoed whole) and config is reduced to field names +
+// loadConfig() defaults, so no pairing token can ever reach the report.
+async function collectUpgradeContext() {
+  const disk = {
+    version: JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version,
+    manifestVersion: JSON.parse(readFileSync(join(ROOT, 'extension', 'manifest.json'), 'utf8')).version,
+    buildId: computeBuildIdentity(ROOT)
+  };
+  let running = null;
+  try {
+    const s = await request('/status');
+    running = {
+      version: s.version ?? null,
+      buildId: s.buildId ?? null,
+      extensionVersion: s.extensionVersion ?? null,
+      connected: s.connected ?? null,
+      extensionId: s.extensionId ?? null
+    };
+  } catch { running = null; }
+  const expected = ['browserTarget', 'uploadRoots', 'uploadMaxBytes'];
+  let config;
+  try {
+    const merged = loadConfig();
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    const missingFields = expected.filter(k => !Object.prototype.hasOwnProperty.call(raw, k));
+    // Only report defaults for fields that are actually missing; a missing
+    // field's loadConfig() value is already the safe default. Present fields
+    // (which may hold real paths) are never echoed into the report.
+    const defaults = {};
+    if (missingFields.includes('browserTarget')) defaults.browserTarget = null;
+    if (missingFields.includes('uploadRoots')) defaults.uploadRoots = merged.uploadRoots;
+    if (missingFields.includes('uploadMaxBytes')) defaults.uploadMaxBytes = merged.uploadMaxBytes;
+    config = { missingFields, defaults };
+  } catch (error) {
+    config = {
+      missingFields: [...expected],
+      defaults: { browserTarget: null, uploadRoots: [], uploadMaxBytes: 16 * 1024 * 1024 },
+      error: error.message
+    };
+  }
+  return { disk, running, config, git: collectGit(), extensionId: running?.extensionId ?? null };
+}
+
+// set-browser-target is dry-run by default: it only prints the suggestion and
+// evidence. config.json is mutated only when --write is passed explicitly, and
+// even then only after the target passes the same validation the inference did.
+function setBrowserTarget(flags) {
+  const wantsWrite = flags.includes('--write');
+  const base = {
+    command: 'node src/cli.js set-browser-target --from-running-chrome',
+    written: false,
+    dryRun: !wantsWrite,
+    doctor: 'node src/cli.js doctor'
+  };
+  const result = inferBrowserTarget();
+  if (!result.ok) {
+    return { ...base, reason: result.reason, detail: result.detail ?? null, target: result.target ?? null };
+  }
+  const target = result.target;
+  let validExe = false;
+  let validUserDataDir = false;
+  try { validExe = existsSync(target.exePath) && statSync(target.exePath).isFile(); } catch { /* boundary */ }
+  try { validUserDataDir = existsSync(target.userDataDir) && statSync(target.userDataDir).isDirectory(); } catch { /* boundary */ }
+  const validProfile = /^(Default|Profile \d+)$/.test(target.profileDirectory);
+  const validation = { exePath: validExe, userDataDir: validUserDataDir, profileDirectory: validProfile };
+  if (!wantsWrite) {
+    return { ...base, target, evidence: result.evidence, validation };
+  }
+  if (!validExe || !validUserDataDir || !validProfile) {
+    return { ...base, target, evidence: result.evidence, reason: 'validation_failed', validation };
+  }
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  config.browserTarget = target;
+  writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+  return { ...base, written: true, target, evidence: result.evidence };
+}
+
+// Information-level doctor check. Optional native capabilities must never make
+// doctor.ok false, and a registry we cannot read is reported as unknown rather
+// than as a failure. Reuses native-host.js's read-only status action.
+async function nativeHostCheck() {
+  const check = {
+    name: 'native-host',
+    ok: true,
+    optional: true,
+    registered: 'unknown',
+    usable: 'unknown',
+    installCommand: "node src/cli.js call browser_native_host_install '{\"action\":\"install\",\"confirmation\":\"modify_native_host_once\"}'",
+    note: `Native messaging host "${NATIVE_HOST_NAME}" is optional: only clipboard / native-capability tools need it, so an unregistered host never affects doctor.ok. Registration lives at HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts\\${NATIVE_HOST_NAME}.`
+  };
+  try {
+    const status = await runNativeHostTool({ action: 'status' });
+    if (status && status.status === 'success') {
+      check.registered = status.registered ?? false;
+      check.usable = status.usable ?? false;
+      check.detail = {
+        manifestExists: status.manifestExists ?? null,
+        launcherExists: status.launcherExists ?? null,
+        extensionIdMatches: status.extensionIdMatches ?? null
+      };
+    } else {
+      check.readError = status?.reason ?? status?.status ?? 'unreadable';
+    }
+  } catch (error) {
+    check.readError = String(error?.message ?? error).slice(0, 200);
+  }
+  return check;
 }
 
 try {
@@ -260,6 +396,15 @@ try {
     }
   } else if (cmd === 'status') console.log(JSON.stringify(await request('/status'), null, 2));
   else if (cmd === 'diagnose-upgrade') console.log(JSON.stringify(upgradeDiagnosis(), null, 2));
+  else if (cmd === 'upgrade-check') {
+    const context = await collectUpgradeContext();
+    const report = buildUpgradeCheck(context);
+    console.log(JSON.stringify({ ...context, ...report }, null, 2));
+  } else if (cmd === 'set-browser-target') {
+    const flags = rest.slice(1);
+    if (!flags.includes('--from-running-chrome')) throw new Error('Usage: node src/cli.js set-browser-target --from-running-chrome [--write]');
+    console.log(JSON.stringify(setBrowserTarget(flags), null, 2));
+  }
   else if (cmd === 'doctor') console.log(JSON.stringify(await doctor(), null, 2));
   else if (cmd === 'maintenance') {
     const input = name === '--stdin' ? readFileSync(0, 'utf8') : name || '{}';
@@ -274,6 +419,6 @@ try {
       ? await raw()
       : await callWithWaitingRecovery({ name, args: parsed, rawCall: rawToolCall, maxWaitMs: Number(process.env.AIB_AUTO_WAIT_MS || 120000) });
     console.log(JSON.stringify(result, null, 2));
-  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run]');
+  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | upgrade-check | set-browser-target --from-running-chrome [--write]');
 } catch (e) { console.error(e.message); process.exitCode = 1; }
 

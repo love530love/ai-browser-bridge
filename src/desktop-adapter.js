@@ -62,7 +62,7 @@ function unavailable(reason = 'desktop_adapter_unavailable') {
   return { status: 'unavailable', retryable: false, reason, dispatched: false };
 }
 
-function mapReloadResult(result, expectedVersion) {
+function mapReloadResult(result, expectedVersion, extensionId = BRIDGE_EXTENSION_ID) {
   if (!result.spawned && result.error) return {
     status: 'unavailable', retryable: false, reason: 'desktop_process_unavailable', dispatched: false,
     message: 'The fixed PowerShell UI adapter could not be started; no Chrome action was dispatched.'
@@ -73,17 +73,31 @@ function mapReloadResult(result, expectedVersion) {
   };
   if (result.code === 0) return {
     status: 'success', retryable: false, reason: 'extension_reload_verified', dispatched: true,
-    verified: true, extensionId: BRIDGE_EXTENSION_ID, expectedVersion,
+    verified: true, extensionId, expectedVersion,
     // The UI Automation path opens a temporary chrome://extensions tab so the
     // user's own tab is never navigated away. Whether it managed to close that
     // tab again is real information for the caller, and it is only knowable from
     // the script's own output.
     temporaryTabClosed: /Closed the temporary chrome:\/\/extensions tab/.test(result.stdout ?? '')
   };
-  if (result.code === 2) return {
-    status: 'not_dispatched', retryable: false, reason: 'desktop_target_not_unique_or_unavailable', dispatched: false,
-    message: 'No unique target window and Reload control were verified; no Reload was invoked.'
-  };
+  if (result.code === 2) {
+    const stdout = result.stdout ?? '';
+    const idNotBound = /extensionIdSource=unverified/.test(stdout);
+    const foregroundNotAcquired = /foregroundVerified=False/.test(stdout);
+    return {
+      status: 'not_dispatched', retryable: false,
+      reason: idNotBound ? 'extension_id_not_bound'
+        : foregroundNotAcquired ? 'foreground_not_acquired'
+          : 'desktop_target_not_unique_or_unavailable',
+      dispatched: false,
+      foregroundVerified: /foregroundVerified=True/.test(stdout),
+      message: idNotBound
+        ? 'The extension id was not bound to this project directory; no UI action was taken.'
+        : foregroundNotAcquired
+          ? 'The Chrome window could not be brought to the foreground; no keystroke was sent. Re-observe instead of retrying blindly.'
+          : 'No unique target window and Reload control were verified; no Reload was invoked.'
+    };
+  }
   return {
     status: 'uncertain', retryable: false, reason: result.code === 3 ? 'extension_reload_unverified' : 'desktop_process_result_unknown',
     dispatched: null,
@@ -178,7 +192,7 @@ export function createDesktopAdapter({
     }
   }
 
-  async function reloadExtension({ confirmation, windowHandle, processId } = {}) {
+  async function reloadExtension({ confirmation, windowHandle, processId, extensionId, extensionIdSource } = {}) {
     if (!available) return unavailable();
     if (confirmation !== RELOAD_EXTENSION_CONFIRMATION) {
       return { status: 'denied', retryable: false, reason: 'explicit_confirmation_required', dispatched: false };
@@ -187,7 +201,8 @@ export function createDesktopAdapter({
         (processId !== undefined && (!Number.isSafeInteger(processId) || processId <= 0))) {
       return { status: 'denied', retryable: false, reason: 'invalid_chrome_window_target', dispatched: false };
     }
-    const args = ['-ExtensionId', BRIDGE_EXTENSION_ID, '-ChromeWindowHandle', String(windowHandle), '-BestEffort'];
+    const resolvedId = typeof extensionId === 'string' && /^[a-p]{32}$/.test(extensionId) ? extensionId : BRIDGE_EXTENSION_ID;
+    const args = ['-ExtensionId', resolvedId, '-ChromeWindowHandle', String(windowHandle), '-BestEffort'];
     if (processId !== undefined) args.push('-ChromeProcessId', String(processId));
     let result;
     try { result = await run(args); }
@@ -195,7 +210,8 @@ export function createDesktopAdapter({
       return { status: 'uncertain', retryable: false, reason: 'desktop_process_result_unknown', dispatched: null,
         message: 'The UI adapter failed after launch may have started. Inspect extension state before any retry.' };
     }
-    return mapReloadResult(result, expectedVersion);
+    const mapped = mapReloadResult(result, expectedVersion, resolvedId);
+    return { ...mapped, extensionId: resolvedId, extensionIdSource: extensionIdSource ?? 'fallback-constant' };
   }
 
   async function devtools({ action = 'observe', windowHandle, processId, expectedUrl, panel } = {}) {

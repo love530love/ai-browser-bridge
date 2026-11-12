@@ -4,8 +4,10 @@
 # never deletes externally registered scheduled tasks, and is idempotent.
 #
 # 守卫：不会自动删除外部计划任务（用户自行注册的 AI Browser Bridge Watchdog）。
-# 该项目自带能力不创建计划任务；查不到或被沙箱拦时如实报 unknown，绝不因为
-# 查不到就声称「自启已全部清除」。
+# 仅当清单里存在由本项目 -ScheduledTask 注册的 scheduled-task 条目时才按名字删除；
+# -Heartbeat 注册的 heartbeat-watch 条目（快捷方式 / HKCU Run）同样按清单清理。
+# 查不到或被沙箱拦时如实报 unknown 并给出可复制命令，绝不因为查不到就声称
+# 「自启已全部清除」。
 $ErrorActionPreference = 'Stop'
 
 $root = $PSScriptRoot
@@ -49,7 +51,9 @@ function Read-AutostartRegistry {
 
 function Remove-AutostartEntry($e) {
   # Cleans one managed entry and returns a "removed / not-found" line that also
-  # carries the concrete path. Never touches scheduled tasks (external items).
+  # carries the concrete path. A scheduled task is deleted ONLY when it is an
+  # entry in this manifest (i.e. registered by -ScheduledTask); an externally
+  # registered task with the same name is never passed here and never deleted.
   $kind = [string]$e.kind
   if ($kind -eq 'startup-shortcut') {
     $p = if ($e.path) { [string]$e.path } else { $script:linkPath }
@@ -71,6 +75,48 @@ function Remove-AutostartEntry($e) {
       }
       return "未找到 registry entry: $k\$n"
     } catch { return "未找到/未能确认 registry entry: $k\$n（$($_.Exception.Message)）" }
+  }
+  # ---- opt-in entries added by install-autostart.ps1 (default OFF) ----
+  if ($kind -eq 'heartbeat-watch') {
+    # Remove the shortcut OR the HKCU Run value this project registered for the
+    # heartbeat --watch resident loop. Never touch anything else.
+    if ($e.path) {
+      $p = [string]$e.path
+      try {
+        if (Test-Path -LiteralPath $p) {
+          Remove-Item -LiteralPath $p -Force -ErrorAction Stop
+          return "已移除 heartbeat-watch startup shortcut: $p"
+        }
+        return "未找到 heartbeat-watch startup shortcut: $p"
+      } catch { return "未找到/未能确认 heartbeat-watch startup shortcut: $p（$($_.Exception.Message)）" }
+    }
+    if ($e.key -and $e.name) {
+      $k = [string]$e.key
+      $n = [string]$e.name
+      try {
+        if (Get-ItemProperty -LiteralPath $k -Name $n -ErrorAction SilentlyContinue) {
+          Remove-ItemProperty -LiteralPath $k -Name $n -ErrorAction Stop
+          return "已移除 heartbeat-watch registry entry: $k\$n"
+        }
+        return "未找到 heartbeat-watch registry entry: $k\$n"
+      } catch { return "未找到/未能确认 heartbeat-watch registry entry: $k\$n（$($_.Exception.Message)）" }
+    }
+    return "跳过（缺少 path/key/name，无法定位）清单项 kind=heartbeat-watch"
+  }
+  if ($kind -eq 'scheduled-task') {
+    # ONLY delete the task named in this manifest entry (project-registered).
+    # A user's external task with the same name is never passed here. On a
+    # sandbox / permission failure, report unknown and give a copyable command;
+    # never throw, so the rest of the uninstall still empties the manifest.
+    $n = if ($e.name) { [string]$e.name } else { $script:watchdogTaskName }
+    $delCmd = 'schtasks.exe /delete /tn "' + $n + '" /f'
+    try {
+      $null = & schtasks.exe /delete /tn $n /f 2>$null
+      if ($LASTEXITCODE -eq 0) { return "已移除 scheduled-task: $n" }
+      return "scheduled-task $n 删除结果：unknown（schtasks.exe exit $LASTEXITCODE）；可复制命令：$delCmd"
+    } catch {
+      return "scheduled-task $n 删除结果：unknown（$($_.Exception.Message)）；可复制命令：$delCmd"
+    }
   }
   return "跳过（不自动删除）清单项 kind=$kind：外部项交由用户自行处理"
 }

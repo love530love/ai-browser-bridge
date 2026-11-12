@@ -7,6 +7,7 @@
 // to switch it back on. Both answers are on disk, so neither has to be guessed.
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { ROOT } from './config.js';
 
 export const chromeUserDataDir = () => join(process.env.LOCALAPPDATA ?? '', 'Google', 'Chrome', 'User Data');
 
@@ -40,9 +41,13 @@ function profilesWithSettings(userDataDir) {
   return found;
 }
 
-// The id of an unpacked extension is derived from its absolute path, so it is
-// stable for this project and is the fallback key when Chrome has stripped the
-// path out of the record.
+// The id of an unpacked extension is derived from the ABSOLUTE PATH it was
+// loaded from, so it is only stable for one installation path. A second
+// checkout, a different drive letter or a moved project directory produces a
+// different id. This constant is a compatibility fallback for the case where
+// Chrome has stripped the path out of the record; never treat it as identity.
+// Prefer /status.extensionId (learned from the handshake) or
+// resolveBridgeExtensionId() (bound to this project's extension directory).
 export const BRIDGE_EXTENSION_ID = 'mmopbppoabmhliflinadkgnedjpmbgig';
 
 // Chrome compacts extension records on exit. A record that was
@@ -81,6 +86,25 @@ export function findBridgeExtension({ userDataDir = chromeUserDataDir(), extensi
   // the profile that can actually serve the bridge.
   const chosen = matches.find(match => match.enabled) ?? matches[0];
   return { found: true, ...chosen, candidates: matches.length };
+}
+
+// Resolve the extension id that belongs to THIS project directory, using the
+// path recorded in Chrome's preferences rather than a hard-coded constant.
+// The Node side performs the real path binding; the PowerShell UI adapter gets
+// a second, independent guard so an unvalidated target can never dispatch a UI
+// action. A missing/read-protected profile is not an error: the caller can
+// still use the id learned from the extension handshake, and `source` says so.
+export function resolveBridgeExtensionId(root = ROOT, userDataDir = chromeUserDataDir()) {
+  try {
+    const found = findBridgeExtension({ userDataDir, extensionDir: join(root, 'extension') });
+    const id = found?.extensionId;
+    if (found?.found === true && typeof id === 'string' && /^[a-p]{32}$/.test(id)) {
+      return { extensionId: id, source: found.matchedBy === 'path' ? 'chrome-profile-path' : 'chrome-profile-id' };
+    }
+  } catch {
+    // Evidence unavailable; fall through to the documented fallback.
+  }
+  return { extensionId: BRIDGE_EXTENSION_ID, source: 'fallback-constant' };
 }
 
 // Chrome tracks extensions.ui.developer_mode behind a signed MAC. On a machine

@@ -1,3 +1,49 @@
+## 0.39.0 — 2026-11-11（**第二份现场反馈：更新同步链路、扩展 ID 路径绑定、自助修复入口**）
+
+来源：[`docs/field-reports/LOVE-PC-WIN11-2026-11-11-deploy-upgrade.md`](docs/field-reports/LOVE-PC-WIN11-2026-11-11-deploy-upgrade.md)（`LOVE-PC-WIN11` / `D:\Project\ai-browser-bridge`，现场 0.37.4，作者已 fetch 到 v0.38.0 逐文件核对）。按 §5 的 M1→M4 完成 10 项。归档说明里记录了逐条对账结论与**三处不能照抄原文建议**的地方。
+
+### 复核更正（先纠偏再动手）
+
+- P0-2 建议「新增 `source-build-match` 检查」是重复造轮子：`src/cli.js:37` 的 `service-build-current` **已经**在比对 `status.buildId === computeBuildIdentity(ROOT)`，`:38` 也已给重启建议。真正缺的是可复制命令与「pull ≠ 升级完成」的口径。
+- P0-1 建议「PowerShell 护栏改成只校验 ID 格式」会**放宽**安全边界（现状拒绝一切非固定 ID，防止工具被诱导重载任意扩展）。改为 Node 侧用 `findBridgeExtension({extensionDir})` 做 Chrome Preferences 的 path 绑定校验，脚本侧保留第二道护栏。
+- P0-2 建议「watchdog 每 10 秒比对 buildId 直接重启」与 heartbeat 白名单前置（完全空闲 / 冷却 3 周期 / 单实例锁 / 动作后 recheck）冲突，且开发期间改 `src/*.js` 会引发反复重启、打断并行会话。改为只读 stale 报告 + 可选 `-Heartbeat` 自启开关 + `upgrade-check` 有序步骤，自动重启仍只走 heartbeat 白名单。
+
+### M1 · 两条 P0
+
+- **P0-1 扩展 ID 路径绑定**：`src/chrome-profile.js` 新增 `resolveBridgeExtensionId(root, userDataDir)`（按 `extensionDir` 从 Chrome Preferences 找真实 ID，失败回退常量并标注 `source`）；`src/server.js` 把握手保存的真实 ID 传给 `desktopAdapter.reloadExtension` 与清错链路；`src/desktop-adapter.js` 的 `mapReloadResult` 成功结果不再回显常量（**现场报告未列出的第 5 处**）；`scripts/reload-extension.ps1` 去掉硬编码默认值与「必须等于常量」判断，改为「显式 ID + `^[a-p]{32}$` + `ExpectedExtensionPath` + manifest 名称」双护栏；`scripts/clear-extension-errors.ps1` / `src/extension-errors.js` 透传同一 ID；文档里写死的 ID 改为「以 `/status.extensionId` 为准」，历史 doctor 样例原样保留并加注记。**未验证的目标绝不派发 UI 动作**这条语义保持。
+  - 真实边界测试当场抓到一处键名不一致：`resolveBridgeExtensionId()` 返回 `{extensionId, source}`，而链路期望 `extensionIdSource`，直接展开会让来源字段静默消失。改为 server 侧显式映射，并让 `test/bridge.test.js` 断言该字段必在白名单内。
+- **P0-2 升级同步闭环**：`scripts/watch-service.ps1` 增加**只读**的 `build-stale-restart-needed` 状态（带 buildId 证据、轻量缓存、node 调用失败报 unknown），不杀进程、不写 `service-paused`、不调 `stop.ps1`；`src/cli.js` 新增只读 `upgrade-check` 输出 git / disk / running / config / extensionId 差异与有序可复制步骤；`doctor` 的四条相关 recommendation 补上可复制命令。
+
+### M2 · 升级自检与配置自助修复
+
+- **P1-3**：`node src/cli.js upgrade-check`（只读，不改任何状态）；README「当前版本升级指南」从 0.5.10 重写为固定五步清单，明确「只 pull 不等于升级完成」与自动重启边界。
+- **P1-4**：`node src/cli.js set-browser-target --from-running-chrome` 从持有可见窗口的 chrome 进程推断 `exePath` / `userDataDir` / `profileDirectory`，默认 **dry-run 只打印建议与证据**，显式 `--write` 才写回；不按注册表顺序取 chrome.exe、不静默改配置。
+
+### M3 · 可观测与后台会话
+
+- **P1-5**：`doctor` 增加信息级 `native-host` 检查（`optional:true`，未注册不影响 `ok`），输出能力与安装/卸载命令；README 加「原生消息宿主（可选）」小节，说明注册表位置与 `expectedOrigin` 用真实扩展 ID。
+- **P1-6**：`reload-extension.ps1` 增加 `AttachThreadInput` / `ShowWindow` / `BringWindowToTop` 兜底并允许一次短重试，**最终仍必须校验 `GetForegroundWindow()`** 才发按键；返回 `foregroundVerified` 区分「没抢到前台」与「没找到按钮」。
+
+### M4 · 文档口径与协作细节
+
+- **P2-7**：README 顶部与 Release 说明加固定口径——`0.39.x` 工程版本号与历史 `0.5.x` 功能叙述版本号是两套标记，以 `git HEAD` / `buildId` / `doctor` 为准。
+- **P2-8**：本机现场报告约定 `docs/local/<机器>-<日期>-<主题>.md`（目录自带 `.gitignore`）；归档版改用带机器标识的文件名；README 排障表补 untracked 冲突与「拉取成功但版本仍旧」两条。
+- **P2-9**：`install-autostart.ps1` 增加可选 `-ScheduledTask`（登录触发计划任务）与 `-Heartbeat`（心跳常驻）开关，`autostart-registry.json` / `uninstall-autostart.ps1` / `-StatusOnly` 同步覆盖；沙箱或权限不足报 `unknown` 并给命令，**不中断安装、不删除外部手工注册的任务**。
+- **P2-10**：`doctor-host-env.mjs` 对 `NO_PROXY` / `no_proxy` 做大小写归并、条目去重，并对同值重复给出「来自会话注入，不影响登录进程」的说明；`ok` 判定语义不变。
+
+### 测试与验证
+
+- 新增 `test/extension-identity.test.js`（临时假 Chrome profile 的路径绑定、常量回退、5 处硬编码清除、PowerShell 双护栏、前台兜底与渲染后文案）、`test/upgrade-check.test.js`、`test/browser-target.test.js`、`test/autostart-options.test.js`、`test/no-proxy-dedup.test.js`；新增测试合计 **63/63 通过**，全部改动文件 `node --check` / PowerShell `Parser::ParseFile` 均通过。
+- **真实边界测试抓到两类缺陷并已修**：① `resolveBridgeExtensionId()` 返回 `source` 而链路期望 `extensionIdSource`，直接展开会让来源字段静默消失——改为 server 侧显式映射，并让 `test/bridge.test.js` 把 reload 参数从 `deepEqual` 改成「校验真实 ID 格式 + source 白名单」的更强契约；② `upgrade-check` 初版给用户一条「按 `.local/server.pid` 盲发 SIGTERM」的可复制命令，与「pid 文件不是进程存活证据」硬规则冲突（本机实测该文件曾指向死 PID）——改为只读复核命令（`node src/cli.js status && netstat -ano -p TCP | findstr 19387`，无 kill / 无 `node -e`）+ note 里的 LISTENING PID ↔ `server.pid` 比对、`src/server.js` 命令行、完全空闲三证，并同步修正 `doctor` 的两条 recommendation。
+- 归档报告改放在 `docs/` 根目录（带机器标识文件名），正文 7 个相对链接逐一验证可达；`docs/local/.gitignore` 只跟踪自身。
+- 最终全量 `npm test` **863/863 全绿，EXIT=0**。
+
+### 执行口径
+
+- 主工作区仍有其它会话未提交的并行改动，本轮继续在 `main` 上分批精确提交，**未创建** feature 分支；根 `.gitignore` 有他人改动，本轮**未修改它**，改用 `docs/local/.gitignore` 局部忽略，避免夹带。
+- 三个实现子代理首轮因 429 用量限制全部失败（仅 P2-10 落盘）；配额重置后重跑 2 个、主 agent 自己接手 P0-1/P1-6 这条高风险链路，避免再次集体失败。
+- 自动重启刻意保持保守：默认链路只报告不动作，这是与现场报告验收标准 1「无需人工干预」的**有意偏差**，理由见归档说明与本节开头。
+
 ## 0.38.0 — 2026-11-11（**CNIPA 四案实测反馈：上传能力、写动作可观测性、等待/读取能力、站点 recipe**）
 
 来源：`docs/UPGRADE-PLAN-20261111-cnipa-site-feedback.md` 与 `docs/FIELD-REPORT-20261111-cnipa-toas-review.md`（11-11 用本 Bridge 完成 CNIPA 4 件业务后的复盘）。按 M1→M4 全部落地。**动手前先逐条与 0.37.4 源码对账，改准了 5 处过时断言**，避免重复造轮子。

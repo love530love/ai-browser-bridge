@@ -1,5 +1,5 @@
 param(
-  [string]$ExtensionId = 'mmopbppoabmhliflinadkgnedjpmbgig',
+  [string]$ExtensionId = '',
   [int]$ChromeProcessId = 0,
   [long]$ChromeWindowHandle = 0,
   [string]$ExpectedUrlPrefix = 'chrome://extensions',
@@ -17,6 +17,13 @@ function Emit($payload) {
   exit 0
 }
 
+# The Node caller (src/extension-errors.js) binds the id to this project's
+# extension/ directory before invoking this script. Never fall back to a
+# hard-coded id, and never act on an unvalidated one.
+if ($ExtensionId -notmatch '^[a-p]{32}$') {
+  Emit @{ status = 'failed'; retryable = $false; reason = 'extension_id_not_bound'; cleared = 0; dispatched = $false
+    note = 'An explicit validated extension id is required; no UI action was taken.' }
+}
 if ([string]::IsNullOrWhiteSpace($RequireUrlContains)) { $RequireUrlContains = "errors=$ExtensionId" }
 
 Add-Type @'
