@@ -1,3 +1,31 @@
+## 0.40.0 文档增补 — 2026-11-14（**第三份现场报告逐字对账；纯文档，无版本升级**）
+
+来源：`docs/FIELD-REPORT-20261114-csdn-autopublish-blockers.md`（CSDN 自动发布阻滞复盘，报告基线写 0.39.0）。用户确认推进范围为「**只落文档**」，因此本轮**不改任何 `src/` / `extension/` 代码，不改版本号，不改 buildId**。
+
+### 交付
+
+- `docs/TROUBLESHOOTING-MATRIX.md`：8 类症状的分诊矩阵、报告里 8 条**不能照抄**的 0.39.0 断言（逐条附 0.40.0 源码反证）、一条待现场区分的替代解释、仍未落地的诊断缺口清单。
+- `docs/CDP-GATEWAY-PLAN.md`：**未实现、未 PoC、未授权**的可行性评估。核心结论是 `chrome.debugger` 为 page 级会话且只转发 CDP 域子集，与 Playwright `connect_over_cdp` 需要的 browser 级 WS + target 发现不是同一层协议；列出 5 条 PoC 前置门槛与决策记录。
+- `docs/KNOWN-LIMITATIONS.md`：窗口可见性/前台、CSP 双通道、调试横幅与 DevTools 互斥、宿主身份与内嵌 Chromium、会话轮换与累计计数、服务/PID 判定、其它已实测但无法绕过的事实。
+- `skills/csdn-publish/{SKILL.md,README.md}`：报告附录 B 的 CSDN 发布语义（`saveArticle` 只存草稿、真按钮 `button.btn-b-red`、摘要 ≥10 字静默阻塞、唯一成功判据是 `creation/success/<id>` 或「发布成功」提示）。**明确标注验证状态**：来自一次 Playwright + 独立调试配置实测，Bridge 全链路发布当次未完成，未在 Bridge 上重放验收。
+- `README.md` 文档索引补充四行。
+
+### 逐字对账结论（为什么大量建议不能照抄）
+
+报告把当时现场的机制推断写成了「缺失能力」，但当前 0.40.0 源码里已存在且更严格：主注入通道是 `chrome.scripting.executeScript({world:'MAIN', func})` 而非字符串 eval（`extension/worker.js:1290`）；CSP 命中返回明确 `eval_blocked_by_page_csp` 而非静默回退（`eval-main.js:171-180`）；一次性 CDP 回退有 `finally detach`（`cdp.js:13-14`）；长活会话退出前先 `Debugger.resume` 再 detach 且有 `autoResumeInMs`（`cdp-session.js:100-117`）；`browser_debugger` 已有 `open/close/list/status`（`worker.js:1334-1342`、`cdp-session.js:290`）；`browser_close {force:true}` 走 `chrome.tabs.remove`，本就不依赖页面响应（`worker.js:1241-1254`）；`browser_tabs` 已有 `origin/urlContains/titleContains/fields/limit` 过滤（`tools.js:59`）；后台标签可用性由 `capability-guide.js` 的 `backgroundSafe:true` 与 `advisoryOnlyStates` 明文保证；`hostKind` / `hostKindObserved` / `features.uiAutomationLikely` 已存在（`host-registry.js:66-120`、`server.js:1649`）。
+
+报告 P0-1 的「CSP → 回退 → attach 残留」链在 0.40.0 的一次性路径上不成立；`worker.js:854-872` 的 `tab_paused_by_debugger` 守卫能产生**完全相同**的四种现象（全超时 / 横幅 / `already_attached` / close 卡住）。文档把它写成「可验证的假设，不是结论」，并要求先 `browser_debugger action:"list"` 取证。
+
+### 边界与已知缺口（本轮**未实现**，只登记）
+
+`operationId` / `browser_operation_status`、hosts 的 `reconnectCount` / `disconnectReason` / `flapRate`、`browser_debugger action:"recover"` 与 SW 残留 attach 自检、统一错误码表、`hostId:tabKey`、`interactive`/`hasVisibleWindow`/`isDefaultProfile` 与默认宿主选择策略、CDP Gateway——**均未在本次交付中实现**，不得写成已有能力。
+
+### 部署影响
+
+`src/build-identity.js` 的 `computeBuildIdentity()` 只 hash `package.json`、`package-lock.json`、`skills/ai-browser-bridge/SKILL.md` 与 `src/**/*.{js,mjs,cjs,json}`；`docs/` 与 `skills/csdn-publish/` 不在范围内 ⇒ **buildId 不变**，不会触发 `build_stale` / `version_skew`，**无需重启服务、无需按 hostId 重载扩展**。工作区他人并行改动一律不夹带提交；现场报告本身作为用户提供的输入文件，不在本次提交清单内。
+
+---
+
 ## 0.40.0 — 2026-11-14（**心跳巡检误报修复：累计派发差不再冒充瞬时 in-flight 泄漏**）
 
 来源：本机 `.local/heartbeat/incidents/2026-11-14T06-23-37-596Z-12ff3a6f.md`（cycle `12ff3a6f`，`inflight_leak`）与 `…06-44-29-635Z-6225ed5b.md`（cycle `6225ed5b`，`service_unreachable`），以及 `output/HEARTBEAT-INSPECTION-2026-11-14-1424.md` 的 AAR。上一轮因「单轮样本、证据不足以安全修复」保留现状；本轮取得用户授权后按可复算源码根因修复并发版。

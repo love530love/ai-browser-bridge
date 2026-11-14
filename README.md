@@ -397,7 +397,11 @@ npm run test:native
 | `uninstall-autostart.ps1` | 按 `autostart-registry.json` 逐项撤销并输出「已移除 / 未找到」；不擅自删除外部计划任务 |
 | `.local/runtime.json` · `.local/autostart-registry.json` | 固化的二进制路径与本次注册项清单，供诊断与卸载对账 |
 | `test/` | 服务测试和真实扩展端到端测试 |
-| `docs/HANDOFF.md` | 后续开发交接与已知限制 |
+| `docs/HANDOFF.md` | 后续开发交接与已知限制（早期记录，涉及未完成项可能已过时） |
+| `docs/KNOWN-LIMITATIONS.md` | **当前版本**的已知限制与硬边界：窗口可见性 / 不抢前台、CSP 双通道、调试横幅与 DevTools 互斥、宿主身份与内嵌 Chromium、累计计数不是瞬时状态 |
+| `docs/TROUBLESHOOTING-MATRIX.md` | 症状分诊矩阵（服务级 OK + 页面级超时 / 横幅 / 宿主误选），附现场报告哪些断言不能照抄的逐条源码反证 |
+| `docs/CDP-GATEWAY-PLAN.md` | CDP Gateway 可行性评估：**未实现、未 PoC、未授权**，列架构障碍与 5 条前置门槛 |
+| `skills/csdn-publish/` | CSDN 发布站点配方：`saveArticle` 只存草稿、真发布按钮与唯一成功判据；**未在 Bridge 上重放验收** |
 
 停止后台服务：`.\stop.ps1`。不设置开机自启、不修改现有 AI 客户端配置。若要完全停用，也可在 Chrome 中禁用扩展。
 
