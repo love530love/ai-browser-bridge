@@ -1,3 +1,42 @@
+## 0.40.0 文档增补 2 — 2026-11-14（**Qoder 链路纠偏 + 真实环境只读取证 + 旁路决策；纯文档，无版本升级**）
+
+来源：用户 2026-11-14 在四档推进选项中选择「**以上都做**」，并补充 Qoder 关于 CSDN 自动发布阻滞的两段回复（「错误经验留在 skill 里比没有更危险」「建议把 5.8 落成排障矩阵、5.1 落成 CDP 网关评估并跑 PoC」）。基线：HEAD `b4ad8d0`、版本 0.40.0、`origin/main...HEAD 0/0`、tag `v0.40.0` / `v0.40.0-docs.1`。
+
+本轮**不改 `src/` / `extension/`、不改版本号、不改 buildId、不执行 PoC、不启动 Playwright、不克隆或解析任何 Chrome profile / `Cookies` / `Login Data`、不改 `browserTarget`、不抢前台**。
+
+### 交付（5 新增 + 6 修订，共 11 文件）
+
+- **新增** `docs/LOCAL-EVIDENCE-20261114-runtime.md`：2026-11-14 21:07 GMT+8 的服务四证（LISTENING PID `37712`=node、TCP OK、裸 `/status` 带端口 `401`、带 token `status` 返回 0.40.0）、buildId/四处版本对账、看门狗观察项、**CSDN 编辑器取证前提不成立**、以及一条文档路径缺陷的真机反证。
+- **新增** `docs/PLAYWRIGHT-FALLBACK-DECISION.md`：授权范围、`AGENTS.md` 逐字冲突表、PoC 门槛 0–5、决策记录。明确「用户授权的是文档与门槛，不是运行 PoC」。
+- **新增** `skills/csdn-publish/snippets/{README.md,publish-contract.md,verify-success.mjs}`：把 Qoder 链路里的业务规则从 Python + Playwright 驱动中剥离；6 阶段语言无关流程、已证伪结论清单（逐条带证据行号）、零依赖纯函数判据。
+- **修订** `skills/csdn-publish/SKILL.md`：固化 Qoder 5 条中的第 1–4 条（发布判据、草稿恢复、原生插图、弹窗必填项），新增「§0.1 已证伪勿回退」「§0.2 环境准备」「§7 通道选择：一次现场观察，不是永久禁区」；第 5 条通道建议**不照抄**。
+- **修订** `skills/csdn-publish/README.md`、`docs/TROUBLESHOOTING-MATRIX.md`、`docs/KNOWN-LIMITATIONS.md`、`README.md`、`CHANGELOG.md`（本段）。
+
+### 逐字对账与纠偏（本轮最有价值的四件事）
+
+1. **「无 Python 的机器」范围纠偏**：不是项目运行时缺 Python（`package.json` 只有 Node 依赖，`python/bridge_worker.py` 是零引用孤儿侧车），而是**外部发布链路**绑死 `D:/A/python.exe` + Python Playwright + 独立调试配置，换机即失效。结论仍是**不引入嵌入式 Python**；正解是业务契约与环境值分层，而不是给基座加运行时。
+2. **`AGENTS.md` 行号纠偏**：上一轮口头记作 `:10/:14`。按当前工作树逐字复核，`:10` = 不启第二浏览器/fresh Playwright context、`:12` = Playwright/CDP 的「桥不可用 + 明确授权」双前提、`:16` = 禁止克隆/解析 profile 与 Cookies、第二调试 profile 不得当登录 workaround；`:14` 只是「Failure containment and secrets」节标题。后续引用统一用 `:10/:12/:16`，另加 `:17`（凭据不进报告/脚本/日志）。
+3. **发现并修正「文档承诺但真机走不通」的调用路径**：`src/tools.js:371-386` 的 `browser_debugger` 必填是 `['tabId','action']`，**所有 15 个 action 都要 `tabId`**；`extension/worker.js:1334-1342` 的 `list` 分支虽不消费它，服务层仍先解析标签。真机逐字证据：`Missing argument: tabId. … required: tabId, action` 与 `No tab with id: 1.`。上一轮写进 `TROUBLESHOOTING-MATRIX.md`（§1 与 §3）、`KNOWN-LIMITATIONS.md`（§3）、`skills/csdn-publish/SKILL.md`（§4）的不带 `tabId` 写法（**修订前**的章节定位，不标行号以免漂移）已全部改为 `browser_debugger {action:"list", tabId:<真实 tabId>}`，并在排障矩阵 §0 新增第 6 条判定纪律。**不改 `src/` / `extension/`**：放宽 schema 会改变工具契约并触发版本/buildId 变更，修文档调用形态才是最小正确解。按「旧标题错不回改」约定，上一轮的历史段落（`CHANGELOG.md` 0.40.0 文档增补 §逐字对账）不回改，纠偏记录写在本段。
+4. **旧结论残留不照抄**：Qoder 个人 skill 里 `S:104` 声称 `simulation-button` 旧结论已被推翻，但 `S:131/135/106` 仍有未同步的历史表述；本轮只把**已证伪结论 + 勿回退标记**写进仓库 skill，不修改个人目录任何文件。CSDN 编辑器「⛔ 不可用于扩展桥」也**不照抄**：0.40.0 源码反证 + 本轮无标签前提不成立 + 产品方向「不设能力禁区」。
+
+### 验证
+
+- `node skills/csdn-publish/snippets/verify-success.mjs --self-test` → **`SELF_TEST_OK 7/7`**（真实 Node 进程边界；纯函数零依赖、不联网、不调浏览器、不碰 Playwright）。入口守卫输出正常。
+- 服务四证全通（见 `LOCAL-EVIDENCE` §1）；在线 `status.buildId = 5b705286…77a` 与 0.40.0 部署记录一致；四处版本均 0.40.0。
+- 本次文件全在 `docs/` 与 `skills/csdn-publish/` 下，不在 `computeBuildIdentity()` 哈希范围 ⇒ **buildId 不变**，不触发 `build_stale` / `version_skew`，**无需重启服务、无需按 `hostId` 重载扩展**。
+- `docs/local/` 被其自身 `.gitignore` 的 `*` 排除，故取证报告按 `README.md` 的另一种约定用 `docs/LOCAL-` 前缀归档，才能纳入版本库留痕。
+
+### 明确未完成 / 未宣称
+
+- **CSDN 编辑器现场现象未复现、未排除**：`browser_tabs`（含显式 `hostId`）返回 `{"result": []}`，`browser_hosts` 显示 1 个宿主 `connected:true`。排障矩阵 §3 的四步归因本轮**一步未执行**，不伪造证据、不擅自打开用户真实登录态页面。
+- **PoC 未执行、未通过、未获运行授权**：`AGENTS.md:12` 的「桥不可用」前提在四证全通下不成立；门槛 1–5 见 `docs/CDP-GATEWAY-PLAN.md` §4。
+- 看门狗 `.local/watchdog-status.json` 为 `state:"port-occupied-or-service-unresponsive"` / `failures:34`（累计值）/ `21:03:51+08:00`。四证全通 ⇒ 只登记、不重启、不杀 PID、不猜诱因。
+- 现场报告与 Qoder 个人目录均为**本机输入文件**，未纳入版本库、未修改；其中路径仅作证据定位，不构成可执行配置。
+- 工作区他人并行改动（`.gitignore`、`AGENTS.md`、`docs/AGENT-HANDOFF-HUMAN-UI.md`、`.aep/`、`coordination/`、现场报告）**一律不夹带提交**。
+- 交叉复核发现 **2 处历史段落既有断链**：`README.md` 与 `CHANGELOG.md` 的历史段指向 `docs/field-reports/LOVE-PC-WIN11-2026-11-11-deploy-upgrade.md`，实际文件名是 `docs/FIELD-REPORT-LOVE-PC-WIN11-2026-11-11-deploy-upgrade.md`（目录与大小写均不符）。**非本轮引入**，位于历史段落；按「不夹带、旧内容不回改」本轮**只登记不修改**，需单独决定是否统一归档路径。本轮新增/修订文档的相对链接 105 条中，除这两条历史断链外全部解析成功。
+
+---
+
 ## 0.40.0 文档增补 — 2026-11-14（**第三份现场报告逐字对账；纯文档，无版本升级**）
 
 来源：`docs/FIELD-REPORT-20261114-csdn-autopublish-blockers.md`（CSDN 自动发布阻滞复盘，报告基线写 0.39.0）。用户确认推进范围为「**只落文档**」，因此本轮**不改任何 `src/` / `extension/` 代码，不改版本号，不改 buildId**。

@@ -401,7 +401,9 @@ npm run test:native
 | `docs/KNOWN-LIMITATIONS.md` | **当前版本**的已知限制与硬边界：窗口可见性 / 不抢前台、CSP 双通道、调试横幅与 DevTools 互斥、宿主身份与内嵌 Chromium、累计计数不是瞬时状态 |
 | `docs/TROUBLESHOOTING-MATRIX.md` | 症状分诊矩阵（服务级 OK + 页面级超时 / 横幅 / 宿主误选），附现场报告哪些断言不能照抄的逐条源码反证 |
 | `docs/CDP-GATEWAY-PLAN.md` | CDP Gateway 可行性评估：**未实现、未 PoC、未授权**，列架构障碍与 5 条前置门槛 |
-| `skills/csdn-publish/` | CSDN 发布站点配方：`saveArticle` 只存草稿、真发布按钮与唯一成功判据；**未在 Bridge 上重放验收** |
+| `docs/PLAYWRIGHT-FALLBACK-DECISION.md` | Playwright 旁路决策记录：用户授权范围、`AGENTS.md` 逐字冲突、PoC 门槛 0–5；**PoC 未执行、未通过、未获运行授权** |
+| `docs/LOCAL-EVIDENCE-20261114-runtime.md` | 0.40.0 本机只读取证：服务四证、CSDN 编辑器取证前提不成立、`browser_debugger` 必填 `tabId` 的真机反证 |
+| `skills/csdn-publish/` | CSDN 发布站点配方：`saveArticle` 只存草稿、真发布按钮与唯一成功判据、`simulation-button` 已证伪勿回退；含语言无关契约与 `snippets/`；**未在 Bridge 上重放验收** |
 
 停止后台服务：`.\stop.ps1`。不设置开机自启、不修改现有 AI 客户端配置。若要完全停用，也可在 Chrome 中禁用扩展。
 

@@ -42,7 +42,7 @@
 - **横幅只在长活会话期间出现**：`browser_debugger`（`src/tools.js:371`）明写「session 开着时 Chrome 显示调试提示条，期间 DevTools 无法附加」。一次性 CDP 回退**不会**留下横幅——`extension/cdp.js:13-14` 是 `try/finally { chrome.debugger.detach }`。
 - **关闭路径是安全的**：`extension/cdp-session.js:100-117` 每条退出路径先 `Debugger.resume` 再 detach；暂停且无人查看的会话按 `session.paused.autoResumeInMs` 自动恢复。暂停期间其它页面工具返回结构化 `waiting / tab_paused_by_debugger`，而不是静默超时（自 0.6.0 起）。
 - **`devtools_already_attached` 是真实死胡同**：`cdp-session.js:143-149` 返回 `retryable:false`、`dispatched:false`、要求人去关该标签上的 DevTools 或换标签。**扩展无权 detach 别的调试器持有的会话**，当前也没有 `action:"recover"` 或 SW 启动时的残留 attach 自检。这是已知缺口，不是已修复项。
-- **扩展重载不清横幅**：`browser_reload_extension` 不会替你关闭长活会话。要清，用 `browser_debugger action:"list"` → `status` → `close`；若 attach 属于别人，只能人工在横幅上点「取消」或关 DevTools。
+- **扩展重载不清横幅**：`browser_reload_extension` 不会替你关闭长活会话。要清，用 `browser_debugger {action:"list", tabId:<真实 tabId>}` → `status` → `close`（**`tabId` 必填**，见 `docs/LOCAL-EVIDENCE-20261114-runtime.md` §5）；若 attach 属于别人，只能人工在横幅上点「取消」或关 DevTools。
 - **CDP override 可能比会话活得更久**：`README.md` 0.23.0 段实测视口 override 在 detach、扩展重载、服务重启后仍残留，只有**导航/刷新该标签**才还原。`clear` 命令被接受 ≠ override 消失；`browser_emulation` 因此用 set 前 baseline + 回读页面判定 `verified` / `stillInEffect`。
 
 ---

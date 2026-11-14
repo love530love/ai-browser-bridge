@@ -15,6 +15,7 @@
 3. **不确定结果的写操作绝不重放**：超时返回 `status:uncertain` / `dispatched:true` / `verified:false` 时，先重新观测，不要重试同一个写。
 4. **能力存在 ≠ 走得通**：文档里写的工具名必须真在 `src/tools.js`、`src/tool-index.js` 与扩展侧分发表都能走到。扩展侧有**两类**分发：`extension/worker.js` 的 `if (name === 'browser_xxx')` 主链（如 `browser_close` / `browser_eval`），以及 `extension/browser-authority.js:888` 的 `HANDLERS` 表（如 `browser_windows_control`，经 `worker.js:829` 的 `runAuthorityTool` 委托）。漏接任一类就是真机 `Unknown command`，而单测全绿。
 5. **不抢前台、不启 GUI、不改 `browserTarget`**：这些不是「更好的修复」，是项目硬边界，见 `docs/KNOWN-LIMITATIONS.md`。
+6. **文档里的调用形态要能在真机走到**：`browser_debugger` 的 `list` 分支虽不消费 `tabId`（`extension/worker.js:1341`；`:1340` 是 `close`），但入口 schema 把 `['tabId','action']` 列为必填（`src/tools.js:386`），服务层还会先解析该标签。不带 `tabId` 真机返回 `Missing argument: tabId`，传不存在的 id 返回 `No tab with id: N.` ⇒ 查长活会话必须先 `browser_tabs` 取真实 `tabId`，写成 `browser_debugger {action:"list", tabId:<真实 tabId>}`。这是「能力存在但文档路径走不到」的一个变体；逐字证据见 `docs/LOCAL-EVIDENCE-20261114-runtime.md` §5。
 
 ---
 
@@ -22,8 +23,8 @@
 
 | # | 症状 | 先查（工具 / 字段） | 在 0.40.0 里的可验证解释 | 处置 | 禁止动作 |
 |---|---|---|---|---|---|
-| 1 | 服务级全正常，页面级 eval/read/screenshot/close 全超时 | `browser_health`（`tab.active` / `windowFocused` / `pageProbe.visibilityState` / `hasFocus`）；`browser_debugger action:"list"` | 标签被**长期调试会话暂停**：`extension/worker.js:854-872` 的 `tab_paused_by_debugger` 守卫会让所有页面命令返回 `waiting` + `nextPollTool:"browser_debugger"` + `nextPollArgs:{action:"status"}`，而不是裸超时 | 按指引 `browser_debugger action:"status"` → `frames` → `resume` / `close` | 不要先归因 CSP；不要据一次超时重启服务 |
-| 2 | Chrome 顶部有「…开始调试此浏览器」横幅 | `browser_debugger action:"list"` / `status` | 横幅来自**长活会话**（`browser_debugger`，`src/tools.js:371` 明写「banner 会一直显示到 close」）。`browser_eval` 的一次性 CDP 回退**不会**留下横幅：`extension/cdp.js:13-14` 是 `try/finally { chrome.debugger.detach }` | 找到自己的会话就 `action:"close"`；关闭路径会先 `Debugger.resume` 再 detach（`extension/cdp-session.js:100-117`），暂停页还有 `autoResumeInMs` 兜底 | 不要靠 `browser_reload_extension` 清横幅——重载扩展不会替你关闭长活会话 |
+| 1 | 服务级全正常，页面级 eval/read/screenshot/close 全超时 | `browser_health`（`tab.active` / `windowFocused` / `pageProbe.visibilityState` / `hasFocus`）；`browser_debugger {action:"list", tabId:<真实 tabId>}` | 标签被**长期调试会话暂停**：`extension/worker.js:854-872` 的 `tab_paused_by_debugger` 守卫会让所有页面命令返回 `waiting` + `nextPollTool:"browser_debugger"` + `nextPollArgs:{action:"status"}`，而不是裸超时 | 按指引 `browser_debugger action:"status"` → `frames` → `resume` / `close` | 不要先归因 CSP；不要据一次超时重启服务 |
+| 2 | Chrome 顶部有「…开始调试此浏览器」横幅 | `browser_debugger {action:"list", tabId:<真实 tabId>}` / `status` | 横幅来自**长活会话**（`browser_debugger`，`src/tools.js:371` 明写「banner 会一直显示到 close」）。`browser_eval` 的一次性 CDP 回退**不会**留下横幅：`extension/cdp.js:13-14` 是 `try/finally { chrome.debugger.detach }` | 找到自己的会话就 `action:"close"`；关闭路径会先 `Debugger.resume` 再 detach（`extension/cdp-session.js:100-117`），暂停页还有 `autoResumeInMs` 兜底 | 不要靠 `browser_reload_extension` 清横幅——重载扩展不会替你关闭长活会话 |
 | 3 | `browser_debugger action:"open"` 返回 `devtools_already_attached` | 同一返回体的 `retryable` / `message` | `extension/cdp-session.js:143-149`：attach 抛「another debugger is already attached」时返回 `status:denied`、`retryable:false`、`dispatched:false`、明确「Nothing was attached」。**这是 Chrome 事实**：扩展无权 detach 别的 DevTools / 别的扩展持有的会话 | 如实报「不可由桥恢复」；由人关掉该标签上的 DevTools，或换一个标签 | 不要假装能 `recover`；不要无限重试 `open` |
 | 4 | 强 CSP 站点（编辑器 / SaaS 后台）`browser_eval` 返回 `channel:"cdp"` | 返回体的 `channel` / `reason` / `mainWorldFailure` | 主路径是 `chrome.scripting.executeScript({world:'MAIN', func})`（`extension/worker.js:1290`）；只有 `first.reason === 'eval_blocked_by_page_csp'` 才进 CDP（`worker.js:1302`），命中时 `extension/eval-main.js:171-180` 会**明确**返回 `eval_blocked_by_page_csp` + "Retry once through the debugger channel" | 读 `channel` 判断实际走哪条；两通道都失败时返回 `debugger_channel_failed` 并明说「Nothing is known about whether the expression ran; do not repeat it blindly」（`worker.js:1327-1331`） | 不要说「桥静默回退」；不要重放表达式 |
 | 5 | `browser_close` 超时 | `browser_health` 的宿主连通性 | 当前实现只查 ownership + `chrome.tabs.remove`（`extension/worker.js:1241-1254`），**完全不跟页面通信**；`force:true` 已存在（`src/tools.js:370`） | 先查宿主 / 会话是否还活着，再定位超时发生在哪一层 | 不要因为「close 也超时」就新增 `Target.closeTarget` 强杀——见 `docs/CDP-GATEWAY-PLAN.md` 的架构障碍 |
@@ -58,7 +59,7 @@
 
 这是**可验证的假设，不是结论**。要在真实 CSDN 编辑器上按以下顺序取证，不能跳过：
 
-1. `browser_debugger action:"list"` —— 有没有本扩展持有的长活会话、是否 `paused`；
+1. `browser_debugger {action:"list", tabId:<真实 tabId>}` —— 有没有本扩展持有的长活会话、是否 `paused`；
 2. `browser_health` —— `pageProbe` 的 `visibilityState` / `hasFocus` 与 `windowFocused` 分别是什么（三者是**不同状态**，见 `src/tools.js:297`）；
 3. `browser_eval` 的返回体 —— 是 `channel:"main_world"` / `channel:"cdp"`，还是 `waiting/tab_paused_by_debugger`；
 4. 只在证据齐备后，才谈 CSP、遮挡、宿主 flap 或会话粘滞。
