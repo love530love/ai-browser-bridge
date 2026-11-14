@@ -1,3 +1,32 @@
+## 0.40.0 — 2026-11-14（**心跳巡检误报修复：累计派发差不再冒充瞬时 in-flight 泄漏**）
+
+来源：本机 `.local/heartbeat/incidents/2026-11-14T06-23-37-596Z-12ff3a6f.md`（cycle `12ff3a6f`，`inflight_leak`）与 `…06-44-29-635Z-6225ed5b.md`（cycle `6225ed5b`，`service_unreachable`），以及 `output/HEARTBEAT-INSPECTION-2026-11-14-1424.md` 的 AAR。上一轮因「单轮样本、证据不足以安全修复」保留现状；本轮取得用户授权后按可复算源码根因修复并发版。
+
+### 修复（有可复算源码根因）
+
+- **`inflight_leak` 误报**：`src/heartbeat.js` 原判据把 `Σ max(0, commandsDispatched − commandsCompleted)`（**自上次宿主重连起的累计差**）与瞬时 `inFlightHosts` 比较。`src/server.js:670` 派发 +1，仅 `:1982` 收到响应 +1；`:671-682` 的读/写超时 drop 与 `ws.close(4000)` 都不补 `commandsCompleted`，宿主重连还会把计数归零。因此完全空闲的机队只要留着历史 gap 就会误报（现场实测 gap=3、activeCount=0、inFlightHosts=0）。改为只比较**同一状态快照内**由同一个 `inFlight` Map 构造的 `activeCount` / `activeByHost` / `hosts[].inFlight`（数量 + hostId 集合）；累计差改名 `cumulativeDispatchGap` 降级为观察字段，evidence 明确写「is NOT a trigger」。`host_inflight_stuck` 仍只用它判断「计数是否变化」，语义正确、保持不变。
+- **不再伪造 clean / 也不吞掉真错配**：真实账目错配首轮即报 `warn` + `report_only`，`provenClean:false`；升 `critical` 仍需 3 轮去抖。`state.json` 的 `lastSnapshot` 新增 `activeByHostIds` / `inFlightHostIds` 两个可复核字段（向后兼容）。
+- **`service_unreachable` 证据口径**：evidence 增加 `pidSource` 与 note，明确一次 8 秒采集超时是采集侧观察、`.local/server.pid` 不是存活证据，判存活以 LISTENING PID + TCP 探针 + doctor 为准。判定语义（critical + `report_only` + 零动作）与安全边界**不变**，不改超时预算、不加自动重启。
+
+### 验证
+
+- 新增 3 条回归：`test/heartbeat.test.js` 25/25。其中一条起真实 `node:http` 服务，用带 Bearer 的真实 `probeStatus` 取回含历史 gap 的 `/status` 再喂给 `evaluateSnapshot`（不自己构造结果对象）；另一条断言事故报告**渲染后文本**含 `cumulativeDispatchGap` 与 `is NOT a trigger`，防止下一轮再按 0.39.0 的方式误读。
+- 全量回归（`node --test --test-concurrency=1 test/*.test.js`，102 个文件）：`test/heartbeat.test.js` 25/25 在 Bash 与独立 PowerShell 两个通道各通过一次；`version.test.js` 的四处版本一致性检查通过；其余用例全绿。**8 条失败全部是本机 `pwsh` 子进程前提不成立的环境性失败**，集中在 `autostart-options` / `autostart-registry` / `bounded-process` / `startup-mutex` / `stop-timeout` / `upgrade-preflight`(2) / `watchdog` 这 7 个文件（`pwsh -StatusOnly` 返回 null、`Service identity query timed out`、`pwsh.exe -NoProfile -File …` 失败），与本次改动的文件无交集。测试期间 `npm test` 经管道/重定向缓冲还造成过「看似卡住」的假象，改用无管道后台输出后才拿到可复算结果。
+
+### 部署验证（2026-11-14 18:00 GMT+8）
+
+- 服务在部署前已停止，且 `.local/server.pid` 的 `8096` **已被复用为 `WmiPrvSE`**（PID 不是存活证据）⇒ 未杀任何 PID。执行 `start.ps1` 后新服务 `136668` 监听 `127.0.0.1:19387`，`/status` 为 0.40.0、`buildId 5b70528…` 与磁盘一致；TCP 探针 `TCP_CONNECT_OK`、裸 `/status` 带端口 401（预期鉴权）。
+- 唯一在线宿主 `h-0b47a521c4384e90beb4` 按 `hostId` 经 `chrome.runtime.reload` 重载成功（`verified:true`、`dispatched:true`、无抢前台），`extensionVersion` 升到 0.40.0；另一宿主 `h-b76b872f85d347a49e00` 当时未连接，按「不静默切到另一个浏览器」**未向别的浏览器派发重载**（`dispatched:false`）。`errorListCleared:false` / `no_chrome_window` ⇒ 扩展报错列表「未清除、状态未知」。
+- `doctor ok:true` 13/13、`notOk:[]`、`recommendations:[]`；`upgrade-check ok:true`，version-sync / service / extension / config / git 五层全一致；`/status` 完全空闲、`dispatchGap=0`。
+- 部署后单次 `heartbeat --no-remediate` 为 `uncertain`（`service_unreachable` 采集侧 8 秒超时、critical、`report_only`、零动作），**不是 clean**：四证全通，判为采集侧瞬时超时；按设计禁止据一次超时重启。闭环仍待下一轮单次 clean + `counters` 清空 + 状态实证，本版不写「已修复闭环」。新 incident 已回显 0.40.0 的 `pidSource` / note / message，证明修复代码确在运行。
+- 观察项（只报告、不猜测）：看门狗 `31176` 在 17:22–17:58 反复 `starting-service`→`recovery-failed-check-server-logs`（failures 累积到 19），但服务实际可达；宿主数 2→1（重启后一宿主未重连）。不启 GUI、不抢前台、不切 browserTarget。
+
+### 升级步骤与已知限制
+
+- 改了 `src/*.js` ⇒ 必须重启服务；改了 `extension/manifest.json` ⇒ 必须按 `hostId` 重载扩展，否则 `version_skew`。重启按三重取证（LISTENING PID / 命令行 / `/status` 完全空闲），从当前 `.local/server.pid` 重新取值后交看门狗拉起，**不用 `stop.ps1`**、不盲杀 PID。
+- 本轮**不修** 8 秒采集超时本身：单次样本、四证全通、诱因未定；调大预算或据一次超时自动重启都会放宽安全边界。保留 `report_only` 与人工复核，闭环只认下一轮单次 clean + 状态实证。
+- 不改 `browserTarget`、不启 GUI、不抢前台、不重放不确定写；工作区他人并行改动一律不夹带提交。
+
 ## 0.39.0 — 2026-11-11（**第二份现场反馈：更新同步链路、扩展 ID 路径绑定、自助修复入口**）
 
 来源：[`docs/field-reports/LOVE-PC-WIN11-2026-11-11-deploy-upgrade.md`](docs/field-reports/LOVE-PC-WIN11-2026-11-11-deploy-upgrade.md)（`LOVE-PC-WIN11` / `D:\Project\ai-browser-bridge`，现场 0.37.4，作者已 fetch 到 v0.38.0 逐文件核对）。按 §5 的 M1→M4 完成 10 项。归档说明里记录了逐条对账结论与**三处不能照抄原文建议**的地方。

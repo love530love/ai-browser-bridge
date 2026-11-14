@@ -4,6 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -383,4 +384,97 @@ test('health claims require every registered host to be connected', () => {
     null, { now: () => T0 });
   assert.equal(broken.provenClean, false);
   assert.equal(broken.verdict, 'uncertain', 'a disconnected host must not be reported as healthy');
+});
+
+// 0.40.0: field cycle 12ff3a6f (2026-11-14T06:24Z) reported `inflight_leak`
+// with activeCount=0 / inFlightHosts=0 / dispatchGap=3. The gap came from
+// commandsDispatched 24 vs commandsCompleted 21 on a host that had just
+// reconnected - a cumulative counter, not a live job.
+test('a historical dispatch/completion gap on an idle fleet is not an in-flight leak', () => {
+  const idleWithHistory = statusOk({
+    hosts: [host({ commandsDispatched: 24, commandsCompleted: 21 })],
+    activeByHost: []
+  });
+  const at = T0 + 60000;
+  const prevState = {
+    version: 1,
+    lastSnapshot: { ts: new Date(T0).toISOString(), hostIds: ['h-a'], dispatchGap: 0 },
+    counters: {}
+  };
+  const result = evaluateSnapshot(
+    { ...snap({ status: idleWithHistory }), ts: new Date(at).toISOString(), atMs: at },
+    prevState, { now: () => at, intervalMs: 60000 });
+  assert.equal(result.findings.some(item => item.code === 'inflight_leak'), false,
+    'a cumulative gap must never be compared with the instantaneous in-flight count');
+  assert.equal(result.verdict, 'clean');
+  assert.equal(result.provenClean, true);
+  assert.equal(result.nextState.lastSnapshot.dispatchGap, 3, 'the gap stays visible as an observation');
+  assert.deepEqual(result.nextState.lastSnapshot.activeByHostIds, []);
+  assert.deepEqual(result.nextState.lastSnapshot.inFlightHostIds, []);
+});
+
+test('a real instantaneous mismatch is reported with honest, rendered evidence', async () => {
+  const mismatch = statusOk({
+    activeCount: 1,
+    activeByHost: [{ hostId: 'h-a', id: 'cmd-1', tool: 'browser_click', ageMs: 10 }],
+    hosts: [host({ inFlight: false })]
+  });
+  const evaluation = evaluateSnapshot(snap({ status: mismatch }), null, { now: () => T0 });
+  const leak = evaluation.findings.find(item => item.code === 'inflight_leak');
+  assert.ok(leak, 'the service built activeCount and inFlight from the same Map, so this is a real mismatch');
+  assert.equal(leak.severity, 'warn');
+  assert.equal(leak.action.kind, 'report_only');
+  assert.deepEqual(leak.evidence.activeByHostIds, ['h-a']);
+  assert.deepEqual(leak.evidence.inFlightHostIds, []);
+  assert.equal(evaluation.provenClean, false, 'an unresolved mismatch cannot be called clean');
+
+  const dir = tempState();
+  const result = await runHeartbeat({
+    stateDir: dir, probe: async () => mismatch, diskFacts: diskOk(),
+    now: () => T0, remediate: false
+  });
+  assert.equal(result.verdict, 'attention');
+  assert.ok(result.incidentPath);
+  const text = readFileSync(result.incidentPath, 'utf8');
+  assert.match(text, /inflight_leak/);
+  assert.match(text, /cumulativeDispatchGap/);
+  // Source literal -> projection -> rendered text: the note must survive into
+  // the report, otherwise the next reader repeats the 0.39.0 misreading.
+  assert.match(text, /is NOT a trigger/);
+  assert.match(text, /"kind":"report_only"/);
+});
+
+test('a real HTTP status reply with a historical gap never becomes a leak', async () => {
+  const payload = statusOk({
+    hosts: [host({ commandsDispatched: 24, commandsCompleted: 21 })],
+    activeByHost: []
+  });
+  let seenAuth = null;
+  const server = createServer((req, res) => {
+    seenAuth = req.headers.authorization ?? null;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(payload));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const token = 't'.repeat(64);
+    const snapshot = await collectSnapshot({
+      config: { port: server.address().port, agentToken: token },
+      diskFacts: diskOk(), now: () => T0, timeoutMs: 3000
+    });
+    assert.equal(snapshot.error, null);
+    assert.equal(snapshot.schemaOk, true);
+    assert.equal(snapshot.status.hosts[0].commandsDispatched, 24);
+    assert.equal(snapshot.status.hosts[0].commandsCompleted, 21);
+    assert.equal(snapshot.status.activeCount, 0);
+    assert.equal(seenAuth, `Bearer ${token}`, 'this boundary must use the real authenticated probe');
+    const evaluation = evaluateSnapshot(snapshot, null, { now: () => T0 });
+    assert.equal(evaluation.findings.some(item => item.code === 'inflight_leak'), false);
+    assert.equal(evaluation.verdict, 'clean');
+    assert.equal(evaluation.provenClean, true);
+    assert.equal(evaluation.summary.dispatchGap, 3);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise(resolve => server.close(resolve));
+  }
 });

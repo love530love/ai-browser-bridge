@@ -15,6 +15,9 @@
 //     is behind. Everything else (lost hosts, stuck in-flight commands,
 //     unreadable error lists) is reported with evidence and left to the agent,
 //     because a guess could replay an unknown write or open a GUI window.
+//  3. A cumulative counter is not an instantaneous state. Comparing the
+//     dispatch/completion gap with the current in-flight count produced a
+//     false `inflight_leak` on an idle fleet (0.40.0).
 
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync,
@@ -169,7 +172,13 @@ function summarize(status, nowMs) {
     activeCount: status.activeCount ?? 0,
     queued: status.queued ?? 0,
     maxQueuedAgeMs: (status.queuedJobs ?? []).reduce((max, job) => Math.max(max, job.ageMs ?? 0), 0),
+    // Cumulative since the last host reconnect: read/write timeouts and
+    // ws.close(4000) drop a job without incrementing commandsCompleted.
+    // Observation only - never a leak signal (0.40.0).
     dispatchGap: dispatchGap(status),
+    activeByHostIds: (Array.isArray(status.activeByHost) ? status.activeByHost : [])
+      .map(entry => entry?.hostId).filter(Boolean).sort(),
+    inFlightHostIds: hosts.filter(host => host.inFlight).map(host => host.hostId).filter(Boolean).sort(),
     extensionOwner: status.extensionOwner?.pid ?? null,
     hasTaskLease: !!status.taskLease,
     hasDesktopOperation: !!status.desktopOperation,
@@ -187,8 +196,10 @@ function buildRules(ctx) {
   const rules = [];
   if (snapshot.error) {
     rules.push(finding('service_unreachable', 'critical',
-      { error: snapshot.error, pid: disk.pid, durationMs: snapshot.durationMs },
-      'The status endpoint could not be read. No remediation is attempted because a collection-side fault is indistinguishable from a hung service, and restarting could truncate an in-flight write.',
+      { error: snapshot.error, pid: disk.pid, durationMs: snapshot.durationMs,
+        pidSource: '.local/server.pid is an identifier, not liveness proof',
+        note: 'One bounded collection timeout is a collection-side observation, not proof the service is down. Verify with the LISTENING PID, a TCP probe and doctor before any action.' },
+      'The status endpoint could not be read within the bounded timeout. A collection-side fault is indistinguishable from a hung service at this point, and restarting could truncate an in-flight write, so no remediation is attempted.',
       { kind: 'report_only', nextStep: 'Check the service PID and the watchdog, then re-run heartbeat once.' }));
     return rules;
   }
@@ -252,12 +263,29 @@ function buildRules(ctx) {
       { kind: 'report_only' }));
   }
 
-  const inFlightHosts = hostsOf(status).filter(host => host.inFlight).length;
-  const leak = summary.activeCount !== inFlightHosts || summary.dispatchGap > inFlightHosts;
-  if (leak && prev && summary.dispatchGap >= (prev.dispatchGap ?? 0)) {
+  // 0.40.0: `commandsDispatched - commandsCompleted` is a cumulative counter
+  // since the last host reconnect. Read/write timeouts and ws.close(4000)
+  // deliberately finish a job without incrementing commandsCompleted, so a
+  // historical gap (measured in the field: 3 on a completely idle fleet) is
+  // NOT evidence of a current leak. The service builds activeCount,
+  // activeByHost and hosts[].inFlight from the same inFlight Map in one status
+  // snapshot; only those instantaneous accounts can be compared. A mismatch
+  // is a warn with no action; escalation still needs three consecutive cycles.
+  const activeByHost = Array.isArray(status.activeByHost) ? status.activeByHost : null;
+  const activeIds = new Set((activeByHost ?? []).map(entry => entry?.hostId).filter(Boolean));
+  const inFlightIds = new Set(hostsOf(status).filter(host => host.inFlight).map(host => host.hostId).filter(Boolean));
+  const sameIds = activeIds.size === inFlightIds.size && [...activeIds].every(id => inFlightIds.has(id));
+  const accountingMismatch = activeByHost
+    ? (status.activeCount ?? 0) !== activeByHost.length || activeByHost.length !== inFlightIds.size || !sameIds
+    : (status.activeCount ?? 0) !== inFlightIds.size;
+  if (accountingMismatch) {
     rules.push(finding('inflight_leak', 'warn',
-      { activeCount: summary.activeCount, inFlightHosts, dispatchGap: summary.dispatchGap, previousDispatchGap: prev.dispatchGap },
-      'In-flight accounting does not line up. This needs a code fix and a runtime regression test, not a restart.',
+      { activeCount: summary.activeCount, activeByHostIds: [...activeIds].sort(),
+        inFlightHostIds: [...inFlightIds].sort(), inFlightHosts: inFlightIds.size,
+        cumulativeDispatchGap: summary.dispatchGap,
+        previousCumulativeDispatchGap: prev?.dispatchGap ?? null,
+        note: 'cumulativeDispatchGap is historical and is NOT a trigger; timeouts/ws.close(4000) do not increment commandsCompleted' },
+      'In-flight accounting disagrees within one status snapshot. The cumulative dispatch/completion gap is historical and must not be treated as a leak signal; this needs a code fix and a runtime regression test, not a restart.',
       { kind: 'report_only' }));
   }
 
