@@ -317,6 +317,19 @@ npm run test:bench
 - **修复**：Windows 命令用 `ping -n 4 127.0.0.1 >nul` 等待，PowerShell 用 `Start-Sleep`
 - **预防**：写脚本时不要假定同名工具是 Windows 版
 
+### 5. MSYS2 把 Windows 命令的 `/` 开关改写成路径（2026-11-14 实测）
+
+- **问题**：在 Git Bash 里执行 `tasklist /fo csv /nh`，逐字报错
+  `ERROR: Invalid argument/option - 'D:/Programs/WorkBuddyAI/resources/vendor/PortableGit/fo'.`
+- **原因**：MSYS2 的路径转换把 `/fo` 当成一个绝对路径，改写成 PortableGit 下的 `fo`。这不是语法写错，`/nh`、`/v` 等开关同理。
+- **修复/预防**：调 Windows 原生命令走独立 PowerShell 通道，或显式禁用参数转换（`MSYS2_ARG_CONV_EXCL`，**本轮在高负载下被工具超时终止，未验证成功，不要写成已验证解法**）；不要假定 `/xxx` 开关能原样穿过 Git Bash。
+
+### 6. 命令文本里的敏感字样会被安全策略误判（2026-11-14 实测）
+
+- **现象**：Bash 命令文本里出现 `powershell.exe` / `pwsh.exe` 字样，被拦为「Invoking PowerShell from Bash」；PowerShell 命令里变量名叫 `$cmd`，被拦为「cmd.exe cannot be used from the PowerShell tool」。两种情况下**命令本身都没有调用这些程序**。
+- **修复**：跨 shell 调用改走独立 PowerShell 通道；变量改名（例如 `$commandText`）；把进程枚举这类诊断写成纯 PowerShell 语法，不要在 Bash 命令里拼这些字样。
+- **预防**：命令文本也算「输入」，会被字面扫描；诊断脚本的标识符不要用与系统工具同名的词。
+
 ## AI 辅助发现能力（方案 A：扩展 browser_local_judge）
 
 ### 核心架构

@@ -403,6 +403,7 @@ npm run test:native
 | `docs/CDP-GATEWAY-PLAN.md` | CDP Gateway 可行性评估：**未实现、未 PoC、未授权**，列架构障碍与 5 条前置门槛 |
 | `docs/PLAYWRIGHT-FALLBACK-DECISION.md` | Playwright 旁路决策记录：用户授权范围、`AGENTS.md` 逐字冲突、PoC 门槛 0–5；**PoC 未执行、未通过、未获运行授权** |
 | `docs/LOCAL-EVIDENCE-20261114-runtime.md` | 0.40.0 本机只读取证：服务四证、CSDN 编辑器取证前提不成立、`browser_debugger` 必填 `tabId` 的真机反证 |
+| `docs/PROCESS-OWNERSHIP-AND-RUNTIME-DECISION.md` | 进程归属取证：第三方 MCP 实例与本桥**不同源**、按命令行认领进程；以及为何不改用 Python / Rust、脚本层最小稳定化路线 |
 | `skills/csdn-publish/` | CSDN 发布站点配方：`saveArticle` 只存草稿、真发布按钮与唯一成功判据、`simulation-button` 已证伪勿回退；含语言无关契约与 `snippets/`；**未在 Bridge 上重放验收** |
 
 停止后台服务：`.\stop.ps1`。不设置开机自启、不修改现有 AI 客户端配置。若要完全停用，也可在 Chrome 中禁用扩展。

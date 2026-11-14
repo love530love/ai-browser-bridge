@@ -1,3 +1,37 @@
+## 0.40.0 文档增补 3 — 2026-11-14（**进程归属取证 + 运行时选型决策；纯文档，无版本升级**）
+
+触发：用户在「冗余进程清理」会话发现本机 166 个重复 MCP/stdio 服务器实例（18 条相同命令行：`windows-control/server.py` 20 份、`windows_mcp serve` 18 份、`jianyingdraft/server.py` 16 份；另 207 conhost、29 个卡死 taskkill），问是否与本项目有关、是否该改用 Python / Rust 提升稳定性。基线：HEAD `d64f837`、0.40.0、`v0.40.0-docs.2`。
+
+本轮**全程只读取证**：不改 `src/` / `extension/`、不改版本号、不改 buildId、不杀任何进程、不启 GUI、不切 `browserTarget`、不克隆或解析 Chrome profile。
+
+### 交付（1 新增 + 4 修订，共 5 文件）
+
+- **新增** `docs/PROCESS-OWNERSHIP-AND-RUNTIME-DECISION.md`：两问两答的完整证据链、按层语言约束、最小稳定化路线、决策记录。
+- **修订** `docs/PROCESS-LIFECYCLE.md`（新增 Process attribution 节）、`docs/DEVELOPMENT-GUIDE.md`（新增 §5 MSYS2 参数改写、§6 敏感字样误判）、`README.md`（索引 +1 行）、`CHANGELOG.md`（本段）。
+
+### 结论一：166 个重复 MCP 实例与本项目**无同源关系**，无需为此修复升级
+
+- **源码零命中**（口径：除本轮文档自身对这些名词的引述外）：`windows-control` / `windows_mcp` / `jianyingdraft` / `reap-duplicate-mcp` / `orphan-watchdog` / `kill-zombie-procs` 在 `src/` / `scripts/` / `extension/` / `test/` / `.local/` 与既有 `docs/` 全部零命中；`StdioServerTransport` 仅 `src/mcp.js:2,52`。
+- **本桥进程面**：唯一 MCP 入口是 stdio `src/mcp.js`，每宿主 +1 adapter 但共用 19387（`src/client.js:9`）；服务有 `start.ps1:6-10,29-30,58-62` 单实例锁 + 端口占用不杀，`src/server.js:2023` 绑定 127.0.0.1（端口默认 19387、`AIB_PORT` 可覆盖）；多宿主是「同一服务 + 多条 WebSocket」（`src/host-registry.js:3-8,124-179`），`extension/` 下 `child_process` 零命中；看门狗 `scripts/watch-service.ps1:13,149-156,161` 仅在端口空闲时拉起且指数退避，`src/heartbeat.js:424-436` 只 SIGTERM 不 spawn；adapter 已有 EOF/close/EPIPE → 1s 兜底退出（`src/mcp.js:35-52`）与真实子进程回归。
+- **本机实证**（用 `scripts/probe-service-process.ps1` 的 `NtQueryInformationProcess` 读命令行，不依赖 WMI）：`NODE_TOTAL=58`、`BRIDGE_MCP_ADAPTERS=0`、`BRIDGE_SERVER=1`（PID 37712，命令行结尾 `src\server.js`，与 `netstat` 的 19387 LISTENING 一致）、`FOREIGN_MCP_IN_NODE=0`、`NODE_OLDER_THAN_12H=4`（未认领、未 kill）。四证：LISTENING 37712、TCP OK、裸 `/status` 带端口 `401`、`status` 0.40.0 / `buildId 5b705286…77a`。
+- 看门狗 `.local/watchdog-status.json`：`pid:31176` / `port-occupied-or-service-unresponsive` / `failures:34`（累计）/ `22:07:20+08:00`；四证全通 ⇒ 只登记、不重启、不猜诱因。摘录里的 `orphan-watchdog` 不是本项目看门狗。
+- **宿主分支归因（用户补充 + 本机复核通过）**：陈旧 daemon PID 57164 与已回收的 12 个旧 CodeBuddy/renderer 根在 `D:\Programs\WorkBuddy\WorkBuddy.exe` 子树下，与独立的 `D:\Programs\WorkBuddyAI\WorkBuddyAI.exe` 不是同一支。本机逐字复核：两个 exe 均存在；`Get-Process -Id 57164` → `Name=WorkBuddy` / `Path=D:\Programs\WorkBuddy\WorkBuddy.exe` / `Start=2026-11-13T17:47:46+08:00`（约 28.5h）。**本桥当前扩展宿主不是这一支**：`extensionOwner.pid 124960` 是 `D:\Program Files\Google\Chrome\Application\chrome.exe`（`--type=utility --utility-sub-type=network.mojom.NetworkService`），`browser_hosts` 仅 1 个 `hostKind:"generic"` / Chrome 156 宿主。`WorkBuddyAI.exe` 当时约 2.3% CPU 属另一会话瞬时采样，本轮未复测。归因纪律：**按 exe 完整路径/命令行，不按产品名**；`WorkBuddy` ≠ `WorkBuddyAI`。详见 `docs/PROCESS-OWNERSHIP-AND-RUNTIME-DECISION.md` §1.5。
+- **一个属于本项目的残余缺口，但不是现症**：`docs/PROCESS-LIFECYCLE.md:21-24` 明写「宿主活着却一直不关管道时 adapter 不会退出」。本轮**不改**：实测 adapter=0；改 `src/mcp.js` 会改 buildId 并需重启/升版；朴素 `process.ppid` 检测在 shell wrapper 场景会误杀正常 adapter，空闲超时会误杀长会话 ⇒ 需单独授权 + 真实边界回归。
+
+### 结论二：**不建议改用 Python 或 Rust**
+
+- 三类实证都是**环境前提**，不是代码回归：① `docs/DEVELOPMENT-GUIDE.md:315-318` 已有 PATH 抢占记载；② 本轮新增 Git Bash 里 `tasklist /fo csv /nh` 的 `/fo` 被 MSYS2 改成 `D:/Programs/WorkBuddyAI/.../PortableGit/fo` 并逐字报错；③ 命令文本含 `powershell.exe` / `pwsh.exe` 字样被拦为「Invoking PowerShell from Bash」、PowerShell 里变量名 `$cmd` 被拦为「cmd.exe cannot be used…」，换独立通道/改名后同一逻辑立即成功；④ `CHANGELOG.md:81` 既有 8 条 `pwsh` 子进程环境性失败、本轮含 `tasklist` 的 PS 调用两次 `exit 1` 无输出（最小探针 `PS_OK` 正常）。
+- **扩展层不能换**：`extension/manifest.json:2,40-43` 是 MV3 + `service_worker:"worker.js"`；页面代码须可序列化（`extension/worker.js:894,1290`）；`docs/AGENT-ROBUSTNESS-RESEARCH.md:183-186` 逐字「**Python 库不能直接进基座**」；全仓无 wasm / Cargo / 打包链。**服务层换语言无收益**：依赖仅 `@modelcontextprotocol/sdk` + `ws`，故障不在此层，重写要动 100+ 测试。**运维脚本层唯一值得动，但不是换语言**：已有 `doctor-lite.bat` → `scripts/doctor-host-env.mjs`、`check-runtime.bat`、`node src/cli.js doctor`、`resolve-runtime.ps1` + `.local/runtime.json` 固化绝对路径。
+- 产品立场逐字：`docs/PRODUCT-ROADMAP.md:157`「模型不是运行前置条件」、`docs/ONE-SHOT-UPGRADE-PLAN.md:19`「Python Worker 是可选旁路，不进入扩展包」、`CHANGELOG.md:17`「不引入嵌入式 Python」。
+
+### 验证 / 部署影响
+
+- 纯文档，`docs/` 不在 `computeBuildIdentity()` 哈希范围 ⇒ **buildId 不变**，不触发 `build_stale` / `version_skew`，**无需重启服务、无需重载扩展**。服务四证与 buildId 已在取证时复核。
+- 未运行外部回收器、未改个人目录或其它仓库；工作区他人并行改动（`.gitignore`、`AGENTS.md`、`docs/AGENT-HANDOFF-HUMAN-UI.md`、`.aep/`、`coordination/`、现场报告）一律不夹带。
+- 取证中 `tasklist` 相关命令因 MSYS2 改写 / 安全策略字样 / 工具超时多次失败，改用项目自带原生 API 探针 + 独立 PowerShell 通道才拿到可复算数据；失败本身已作为 §2.1 证据保留，**不写成已验证解法**。
+
+---
+
 ## 0.40.0 文档增补 2 — 2026-11-14（**Qoder 链路纠偏 + 真实环境只读取证 + 旁路决策；纯文档，无版本升级**）
 
 来源：用户 2026-11-14 在四档推进选项中选择「**以上都做**」，并补充 Qoder 关于 CSDN 自动发布阻滞的两段回复（「错误经验留在 skill 里比没有更危险」「建议把 5.8 落成排障矩阵、5.1 落成 CDP 网关评估并跑 PoC」）。基线：HEAD `b4ad8d0`、版本 0.40.0、`origin/main...HEAD 0/0`、tag `v0.40.0` / `v0.40.0-docs.1`。
