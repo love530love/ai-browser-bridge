@@ -98,6 +98,10 @@ function Report-State([string]$name, [hashtable]$evidence = @{}) {
 try {
   try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
   if (-not $owned) { exit 0 }
+  # Claim file for `node src/cli.js processes`. It is a convenience record, not
+  # proof of identity: the inventory probes liveness and never kills by pid.
+  $watchdogPidFile = Join-Path $state 'watchdog.pid'
+  $PID | Set-Content -LiteralPath $watchdogPidFile -Encoding ascii
   do {
     try {
       if (Test-Path -LiteralPath (Join-Path $state 'watchdog-disabled')) { Report-State 'disabled'; break }
@@ -160,4 +164,10 @@ try {
     } catch { $failures++; Report-State 'recovery-failed-check-server-logs' }
     if (-not $Once) { Start-Sleep -Seconds ([Math]::Min(60, $IntervalSec * [Math]::Pow(2, [Math]::Min(3,$failures)))) }
   } while (-not $Once)
-} finally { if ($owned) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
+} finally {
+  if ($owned) {
+    try { Remove-Item -LiteralPath (Join-Path $state 'watchdog.pid') -Force -ErrorAction SilentlyContinue } catch { }
+    $mutex.ReleaseMutex()
+  }
+  $mutex.Dispose()
+}

@@ -763,30 +763,35 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     // Deliberately answered before the tab gate: this is about the browser, not
     // about any document, and it has to work while the tab that would be gated
     // is mid-reload.
+    //
+    // Opening this page used to activate it, which is a focus change inside the
+    // browser window even when the OS foreground belongs to another app. The
+    // page itself is only needed by a later UI Automation read or clear, and
+    // both can reach a background tab, so activation is now opt-in. Reload is
+    // skipped too unless the page was already active: reloading a background
+    // chrome://extensions page discards the old render without proving anything
+    // the caller can see, while the UI Automation step re-reads the live list.
     const url = `chrome://extensions/?errors=${chrome.runtime.id}`;
+    const wantActive = args.active === true;
     const existing = (await chrome.tabs.query({})).find(item => (item.url || '').startsWith('chrome://extensions'));
     if (existing) {
       try {
-        await chrome.tabs.update(existing.id, { url, active: true });
-        // Navigating to the URL the tab is already on creates no new document, so
-        // the page could still be showing a list rendered before this reload.
-        // Reloading it guarantees the list on screen belongs to the current
-        // extension instance. It does NOT make the page readable to a later UI
-        // Automation client: Chrome enables its accessibility engine per document
-        // and only while a client is attached, so the clearing step reloads the
-        // page again inside its own process.
-        await chrome.tabs.reload(existing.id);
-        return { status: 'success', tabId: existing.id, url, reused: true, activated: true, reloaded: true,
-          note: 'Reused the open extensions page, pointed it at this extension\'s error list and reloaded it so the list on screen belongs to the current extension instance.' };
+        await chrome.tabs.update(existing.id, { url, ...(wantActive ? { active: true } : {}) });
+        return { status: 'success', tabId: existing.id, url, reused: true, activated: wantActive, reloaded: false,
+          note: wantActive
+            ? 'Reused the open extensions page, pointed it at this extension\'s error list and made it active because the caller asked for active:true.'
+            : 'Reused the open extensions page and pointed it at this extension\'s error list in the background. No tab was activated and no window was moved to the front.' };
       } catch {
         // Navigating an existing tab to chrome:// can be refused. Opening a new
         // one is the fallback; reporting a failure here would block the reload
         // that the caller actually asked for.
       }
     }
-    const tab = await chrome.tabs.create({ url, active: true });
-    return { status: 'success', tabId: tab.id, url, reused: false, activated: true, reloaded: false,
-      note: 'Opened the extensions page at this extension\'s error list.' };
+    const tab = await chrome.tabs.create({ url, active: wantActive });
+    return { status: 'success', tabId: tab.id, url, reused: false, activated: wantActive, reloaded: false,
+      note: wantActive
+        ? 'Opened the extensions page at this extension\'s error list and activated it because the caller asked for active:true.'
+        : 'Opened the extensions page at this extension\'s error list in a background tab. Nothing was activated.' };
   }
   if (name === 'browser_reload_extension') {
     // chrome.runtime.reload() restarts this extension in place. No window is

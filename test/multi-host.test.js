@@ -18,6 +18,7 @@ import {
   scopeKey, parseScopeKey, compareVersions, featureFlagsFor, isValidHostId,
   recommendHost, SERVICE_PROTOCOL_VERSION
 } from '../src/host-registry.js';
+import { createAgentPolicy } from '../src/policy.js';
 
 const config = { port: 0, agentToken: 'a'.repeat(64), extensionToken: 'b'.repeat(64) };
 const ORIGIN = `chrome-extension://${'a'.repeat(32)}`;
@@ -196,6 +197,65 @@ test('default-target recommendation ranks embedded browsers last and flags ambig
   assert.equal(recommendHost([], {}).defaultHostId, null);
 });
 
+test('read-only work has its own lane: parallel within a host, never on a busy tab', () => {
+  const job = (id, extra = {}) => ({ id, hostId: 'h-a', priority: 10, created: 1000, args: { tabId: 1 }, readOnly: true, ...extra });
+  const now = 5000;
+  const write = { id: 'w', hostId: 'h-a', priority: 10, created: now, args: { tabId: 9 }, readOnly: false };
+  // A write on tab 9 must not hold a read on tab 2 hostage.
+  const free = pickDispatchable([job('r2', { args: { tabId: 2 } })], new Map([['h-a', write]]), {
+    now, availableHostIds: new Set(['h-a']), readCounts: new Map([['h-a', 0]]), maxReadsPerHost: 2
+  });
+  assert.equal(free.job.id, 'r2');
+  // But the same tab is exclusive: a read cannot observe while a write is mid-flight there.
+  const sameTab = pickDispatchable([job('r9', { args: { tabId: 9 } })], new Map([['h-a', write]]), {
+    now, availableHostIds: new Set(['h-a']), busyTabKeys: new Set([scopeKey('h-a', 9)]), maxReadsPerHost: 2
+  });
+  assert.equal(sameTab, null);
+  // Two reads are enough per host; a third waits instead of piling up.
+  const capped = pickDispatchable([job('r3', { args: { tabId: 3 } })], new Map(), {
+    now, availableHostIds: new Set(['h-a']), readCounts: new Map([['h-a', 2]]), maxReadsPerHost: 2
+  });
+  assert.equal(capped, null);
+  // A write waits for in-flight reads on the same host, because they may be
+  // reading the very tab it is about to change.
+  const writeBlocked = pickDispatchable([write], new Map(), {
+    now, availableHostIds: new Set(['h-a']), readCounts: new Map([['h-a', 1]])
+  });
+  assert.equal(writeBlocked, null);
+  // The lane is per host: another host's reads never block this host's write.
+  const otherHost = pickDispatchable([write], new Map(), {
+    now, availableHostIds: new Set(['h-a']), readCounts: new Map([['h-b', 2]])
+  });
+  assert.equal(otherHost.job.id, 'w');
+});
+
+test('agent queue priority biases ordering without becoming a starvation tool', () => {
+  const policy = createAgentPolicy({ file: null });
+  policy.set('short-task', { queuePriority: -50 });
+  policy.set('bulk-task', { queuePriority: 40 });
+  policy.set('clamped', { queuePriority: -900 });
+  assert.equal(policy.priorityOffset('short-task'), -50);
+  assert.equal(policy.priorityOffset('bulk-task'), 40);
+  assert.equal(policy.priorityOffset('clamped'), -100);
+  assert.equal(policy.priorityOffset('unregistered'), 0);
+  assert.equal(policy.priorityOffset(null), 0);
+  assert.equal(policy.evaluate({ name: 'browser_click', agent: 'short-task' }).queuePriority, -50);
+  // The bias is applied to the base priority by the server; here it only has to
+  // outrank the bulk agent at equal age, and aging must still rescue the bulk
+  // agent eventually.
+  const now = 100000;
+  const biased = [
+    { id: 'bulk', hostId: 'h-a', priority: 10 + 40, created: now, args: { agent: 'bulk-task' } },
+    { id: 'short', hostId: 'h-b', priority: 10 - 50, created: now, args: { agent: 'short-task' } }
+  ];
+  assert.equal(pickDispatchable(biased, new Map(), { now }).job.id, 'short');
+  const aged = [
+    { id: 'bulk', hostId: 'h-a', priority: 50, created: now - 120000, args: { agent: 'bulk-task' } },
+    { id: 'short', hostId: 'h-b', priority: -40, created: now, args: { agent: 'short-task' } }
+  ];
+  assert.equal(pickDispatchable(aged, new Map(), { now }).job.id, 'bulk', 'aging must eventually serve the bulk agent');
+});
+
 // ── Lease scoping ─────────────────────────────────────────────────────────
 
 test('the same tab id in two browsers holds two independent leases', () => {
@@ -272,6 +332,62 @@ test('each host has its own in-flight slot: a stalled browser cannot block its p
   }
   await Promise.all(calls);
   for (const id of Object.keys(hosts)) hosts[id].ws.close();
+});
+
+test('a long write does not hold short reads hostage, but the same tab stays exclusive', async t => {
+  const { b, wsUrl } = await setup(t);
+  const host = await connectHost(wsUrl, { hostId: 'h-a' });
+  const commands = collectCommands(host.ws);
+  const write = b.call('browser_click', { tabId: 1, ref: 'e1' });
+  assert.ok(await until(() => commands.length === 1));
+  assert.equal(commands[0].name, 'browser_click');
+  // A caller with a 10s budget must be able to read another tab while a slow
+  // write is still in flight, otherwise its own timeout aborts the task.
+  const readOther = b.call('browser_read', { tabId: 2 });
+  assert.ok(await until(() => commands.length === 2), 'the read lane must dispatch on a different tab');
+  assert.equal(commands[1].name, 'browser_read');
+  // Reading the tab a write is currently mutating would produce a torn snapshot.
+  const readSame = b.call('browser_read', { tabId: 1 });
+  await sleep(40);
+  assert.equal(commands.length, 2, 'a read on the busy write tab must wait');
+  const status = b.status();
+  assert.equal(status.activeCount, 2);
+  assert.deepEqual(status.activeByHost.map(job => job.lane).sort(), ['read', 'write']);
+  reply(host.ws, commands[0]);
+  await write;
+  assert.ok(await until(() => commands.length === 3), 'the waiting read dispatches once the tab frees');
+  reply(host.ws, commands[1]);
+  reply(host.ws, commands[2]);
+  await Promise.all([readOther, readSame]);
+  host.ws.close();
+});
+
+test('a write waits for in-flight reads on its host, but only on its host', async t => {
+  const { b, wsUrl } = await setup(t);
+  const host = await connectHost(wsUrl, { hostId: 'h-a' });
+  const commands = collectCommands(host.ws);
+  const firstRead = b.call('browser_read', { tabId: 2 });
+  const secondRead = b.call('browser_read', { tabId: 3 });
+  assert.ok(await until(() => commands.length === 2));
+  // Reads may not be overtaken by a write: they are the caller's evidence.
+  const write = b.call('browser_click', { tabId: 4, ref: 'e1' });
+  const capped = b.call('browser_read', { tabId: 5 });
+  await sleep(40);
+  assert.equal(commands.length, 2, 'the write and the third read must both wait');
+  assert.equal(b.status().queued, 2);
+  reply(host.ws, commands[0]);
+  await firstRead;
+  assert.ok(await until(() => commands.length === 3));
+  // The cap freed one read slot, so the third read goes before the write.
+  assert.equal(commands[2].name, 'browser_read');
+  reply(host.ws, commands[1]);
+  reply(host.ws, commands[2]);
+  await Promise.all([secondRead, capped]);
+  assert.ok(await until(() => commands.length === 4), 'the write dispatches after the reads drain');
+  assert.equal(commands[3].name, 'browser_click');
+  reply(host.ws, commands[3]);
+  await write;
+  host.ws.close();
 });
 
 test('a result from the wrong host cannot finish another host\'s job', async t => {
@@ -398,8 +514,10 @@ test('extension reload verification is host-scoped, not a primary-mirror compari
   assert.match(source, /staleHosts/);
   assert.doesNotMatch(source, /extension && extensionVersion === VERSION && extensionSessionId && extensionSessionId !== previousSession/);
   // The UIA error-list walk must bind to the reloaded host, not the primary.
-  assert.match(source, /clearExtensionErrorsViaUia\(result\.hostId \?\? args\.hostId \?\? null\)/);
-  assert.match(source, /const reloadedHost = hostId \? hosts\.byId\(hostId\) : null/);
+  const reloaded = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+  assert.match(reloaded, /const reloadedHostId = result\.hostId \?\? args\.hostId \?\? null/);
+  assert.match(reloaded, /clearExtensionErrorsViaUia\(reloadedHostId\)/);
+  assert.match(reloaded, /const reloadedHost = hostId \? hosts\.byId\(hostId\) : null/);
 });
 
 test('a legacy extension without hostId still works and is not refused', async t => {

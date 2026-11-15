@@ -120,11 +120,13 @@ test('a malformed arguments payload degrades safely instead of throwing', async 
 
 test('conflict evidence is advisory and visible on queued jobs', async t => {
   // Short read timeouts let both promises resolve without any extension
-  // result, so the observation stays side-effect free and fast.
+  // result, so the observation stays side-effect free and fast. The second read
+  // targets the tab the first read is already observing: the read lane allows
+  // parallel reads on distinct tabs, so only a same-tab job actually queues.
   const { b, wsUrl } = await setup(t, { timeoutMs: 80 });
   const ws = await connectHost(wsUrl, 'conflicts');
   const first = b.call('browser_read', { tabId: 1 });
-  const second = b.call('browser_read', { tabId: 2 });
+  const second = b.call('browser_read', { tabId: 1 });
   const snapshot = b.status();
   assert.equal(snapshot.queued, 1);
   assert.ok(Object.hasOwn(snapshot.queuedJobs[0], 'conflictEvidence'), 'projection must not drop the new field');

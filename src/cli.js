@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, delimiter, isAbsolute, join, resolve } from 'node:path';
 import { configPath, loadConfig, ROOT, stateDir } from './config.js';
 import { request } from './client.js';
 import { callWithWaitingRecovery } from './auto-recovery.js';
@@ -16,6 +16,7 @@ import { usageSummary } from './usage-summary.js';
 import { listInstances, createInstance, removeInstance, enableInstance, disableInstance } from './instance-config.js';
 import { startInstance, stopInstance, statusInstance, listAllInstances, startAllInstances, stopAllInstances } from './instance-manager.js';
 import { listAdapters, pruneStaleAdapters } from './adapter-registry.js';
+import { isProcessAlive, probeParentName, SHELL_PARENT_NAMES } from './mcp-parent-guard.js';
 
 async function rawToolCall(name, args) {
   return await request('/call', { name, arguments: args });
@@ -432,8 +433,145 @@ try {
       if (!Number.isFinite(hours) || hours < 0) throw new Error('--older-than-hours must be a non-negative number');
       console.log(JSON.stringify(pruneStaleAdapters({ stateDir, olderThanMs: hours * 3600000, dryRun: flags.includes('--dry-run') }), null, 2));
     } else {
-      console.log(JSON.stringify(listAdapters({ stateDir, ...(staleMs === undefined ? {} : { staleMs }) }), null, 2));
+      const inventory = listAdapters({ stateDir, ...(staleMs === undefined ? {} : { staleMs }) });
+      if (flags.includes('--liveness')) {
+        for (const record of inventory.records) {
+          record.alive = isProcessAlive(record.pid);
+          record.parentAlive = isProcessAlive(record.ppid);
+          record.orphanedCandidate = record.alive && !record.parentAlive;
+        }
+        inventory.liveness = 'checked';
+        inventory.live = inventory.records.filter(record => record.alive).length;
+        inventory.orphanedCandidates = inventory.records.filter(record => record.orphanedCandidate).length;
+        inventory.livenessNote = 'Liveness is a probe of the recorded pid/parent, not proof of identity. Nothing was signalled or killed.';
+      }
+      console.log(JSON.stringify(inventory, null, 2));
     }
+  } else if (cmd === 'processes') {
+    // One bounded inventory of what this project actually started. It never
+    // enumerates the machine by process name (that is how unrelated Node apps
+    // get blamed or killed) and it never signals anything. Pid files are treated
+    // as claims to verify, not identity: a stale pid may already belong to an
+    // unrelated process.
+    const readPid = name => {
+      try {
+        const pid = Number(readFileSync(join(stateDir, name), 'utf8').trim());
+        return Number.isInteger(pid) && pid > 0 ? pid : null;
+      } catch { return null; }
+    };
+    const servicePid = readPid('server.pid');
+    const watchdogPid = readPid('watchdog.pid');
+    const inventory = listAdapters({ stateDir });
+    // One PowerShell probe per adapter, in parallel: a serial probe made this
+    // report take seconds on a fleet with several registered adapters.
+    const records = await Promise.all(inventory.records.map(async record => {
+      const parentName = await probeParentName(record.ppid);
+      const alive = isProcessAlive(record.pid);
+      const parentAlive = isProcessAlive(record.ppid);
+      return {
+        ...record,
+        alive,
+        parentAlive,
+        parentName,
+        parentIsShell: parentName ? SHELL_PARENT_NAMES.has(parentName) : null,
+        orphanedCandidate: alive && !parentAlive && (!parentName || !SHELL_PARENT_NAMES.has(parentName))
+      };
+    }));
+    const output = {
+      schema: 'ai-browser-bridge-processes-v1',
+      checkedAt: new Date().toISOString(),
+      service: {
+        pid: servicePid,
+        alive: isProcessAlive(servicePid),
+        pidSource: join(stateDir, 'server.pid'),
+        identityNote: 'The pid file is a claim, not proof of identity. Verify the LISTENING pid and command line before any restart; never kill by pid file alone.'
+      },
+      watchdog: {
+        pid: watchdogPid,
+        alive: isProcessAlive(watchdogPid),
+        pidSource: join(stateDir, 'watchdog.pid')
+      },
+      adapters: {
+        count: records.length,
+        live: records.filter(record => record.alive).length,
+        orphanedCandidates: records.filter(record => record.orphanedCandidate).length,
+        records
+      },
+      processCount: [servicePid, watchdogPid].filter(pid => isProcessAlive(pid)).length + records.filter(record => record.alive).length,
+      action: 'report-only',
+      notes: [
+        'Only processes this project registered are listed. No machine-wide name scan was performed.',
+        'orphanedCandidate means the adapter is alive while its recorded parent is gone and the parent was not a shell/launcher. It is evidence for an operator decision, not an instruction to kill.',
+        'Registry files can be pruned with node src/cli.js adapters --prune --dry-run; no process is ever killed by this command.'
+      ]
+    };
+    console.log(JSON.stringify(output, null, 2));
+  } else if (cmd === 'runtime') {
+    // Cross-device preflight. The bridge itself needs Node only; everything
+    // else is an optional capability. Reporting them one by one stops a new
+    // machine from being declared "not supported" because a Python or Rust
+    // toolchain happens to be absent - and stops a missing optional runtime
+    // from being mistaken for the cause of a browser failure.
+    const findOnPath = names => {
+      for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+        const base = dir.replace(/^"|"$/g, '');
+        if (!base) continue;
+        for (const name of names) {
+          const candidate = join(base, name);
+          if (existsSync(candidate)) return candidate;
+        }
+      }
+      return null;
+    };
+    const probe = (names, args = ['--version']) => {
+      const path = findOnPath(names);
+      if (!path) return { found: false, path: null, version: null };
+      // Node cannot execFile a .cmd/.bat shim without a shell; the binary being
+      // present is the fact that matters here, so do not invent a failure.
+      if (/\.(cmd|bat)$/i.test(path)) return { found: true, path, version: null, probed: false };
+      try {
+        const output = execFileSync(path, args, {
+          encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
+        });
+        return { found: true, path, version: output.trim().split(/\r?\n/)[0]?.slice(0, 120) ?? null };
+      } catch (error) {
+        const text = String(error?.stdout ?? error?.stderr ?? '').trim().split(/\r?\n/)[0];
+        return { found: true, path, version: text ? text.slice(0, 120) : null, probed: false };
+      }
+    };
+    const nodeMajor = Number.parseInt(process.versions.node.split('.')[0], 10);
+    const optional = {
+      npm: probe(['npm.cmd', 'npm']),
+      pwsh: probe(['pwsh.exe', 'pwsh']),
+      powershell: probe(['powershell.exe', 'powershell']),
+      python: probe(['python.exe', 'python3.exe', 'python', 'python3']),
+      go: probe(['go.exe', 'go'], ['version']),
+      rustc: probe(['rustc.exe', 'rustc']),
+      rea: probe(['rea.cmd', 'rea.exe', 'rea.bat', 'rea'])
+    };
+    const report = {
+      schema: 'ai-browser-bridge-runtime-v1',
+      checkedAt: new Date().toISOString(),
+      platform: process.platform,
+      arch: process.arch,
+      core: {
+        node: { version: process.versions.node, ok: nodeMajor >= 22, requirement: '>=22' },
+        note: 'The browser bridge is a Node.js service plus a Manifest V3 extension. Nothing else is required to control Chrome.'
+      },
+      optional,
+      policy: {
+        requiredRuntimes: ['node>=22'],
+        embeddedRuntimes: false,
+        optionalNote: 'Python, Go, Rust and REA are optional operator tools. A missing optional runtime is reported here, never treated as a browser or bridge failure.',
+        pwshNote: 'pwsh is used only for chrome://extensions error-list maintenance; page control does not need it.'
+      },
+      recommendations: []
+    };
+    if (nodeMajor < 22) report.recommendations.push('Upgrade Node to 22 or newer; the service will refuse to run correctly on older runtimes.');
+    if (!optional.pwsh.found && !optional.powershell.found) report.recommendations.push('No PowerShell found. Page control still works; clearing the chrome://extensions error list needs pwsh (PowerShell 7).');
+    if (!optional.python.found) report.recommendations.push('Python is absent. This does not block the bridge; optional Python workers and REA-style offline analysis stay unavailable until it is installed.');
+    if (!optional.rea.found) report.recommendations.push('REA is not on PATH. It is an optional reverse-engineering MCP peer, not a runtime requirement; install it only when offline page/bundle analysis is needed.');
+    console.log(JSON.stringify(report, null, 2));
   } else if (cmd === 'heartbeat') {
     // Continuous inspection is a separate command so an operator or a scheduler
     // can run one cycle without starting a daemon. --watch is opt-in and is
@@ -486,6 +624,6 @@ try {
       ? await raw()
       : await callWithWaitingRecovery({ name, args: parsed, rawCall: rawToolCall, maxWaitMs: Number(process.env.AIB_AUTO_WAIT_MS || 120000) });
     console.log(JSON.stringify(result, null, 2));
-  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | adapters [--stale-ms N] [--prune [--older-than-hours N] [--dry-run]] | cdp-probe [--tab-id N] [--host-id ID] [--out FILE] | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | usage [--hours N] | upgrade-check | set-browser-target --from-running-chrome [--write]');
+  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | adapters [--stale-ms N] [--prune [--older-than-hours N] [--dry-run]] | processes | runtime | cdp-probe [--tab-id N] [--host-id ID] [--out FILE] | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | usage [--hours N] | upgrade-check | set-browser-target --from-running-chrome [--write]');
 } catch (e) { console.error(e.message); process.exitCode = 1; }
 

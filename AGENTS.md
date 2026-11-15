@@ -48,6 +48,14 @@ Only two remediations are automated: restarting a service whose source build ide
 - Verified writes are valid in background tabs; re-observe to confirm instead of focusing. Duplicate suppression (`status:"duplicate_suppressed"`, `dispatched:false`) is a safety refusal, not a failure; pass `allowRepeat:true` only when a repeat is genuinely intended.
 - Evidence commands: `npm run test:focus` and `npm run test:background`. See [docs/FALLBACK-CHANNELS.md](docs/FALLBACK-CHANNELS.md) §7.
 
+## Scheduling, priority, and lifecycle (0.42.2)
+
+- Read-only jobs run in a separate lane: up to 2 concurrent reads per host on distinct tabs, alongside a write on another tab. A write waits until that host's reads drain; the same tab is always exclusive; other hosts are never blocked. Do not invent a second browser session to get parallelism.
+- Agent policy `queuePriority` (-100..100) lowers the score and forms a real fast lane for short tasks. Aging (+1/s, capped) and the switch-fairness bonus keep bulk work from starving, so do not fake priority by reconnecting or resubmitting.
+- The service owns queued and in-flight jobs: an MCP client timeout does not cancel them. Reconnect, re-observe the page, and use `commandId` to retrieve a recorded outcome instead of replaying a write.
+- `browser_reload_extension` and `browser_extension_errors` answer from the bridge error journal by default (`errorJournal`, no Chrome window required); a reload touches no page unless `clearErrors:true`. `none_recorded` is absence of evidence, not a clean panel.
+- Evidence commands: `node src/cli.js processes` (report-only inventory; never kills), `node src/cli.js runtime` (cross-device preflight). Adapter cleanup is EOF/EPIPE plus the parent guard; see [docs/PROCESS-LIFECYCLE.md](docs/PROCESS-LIFECYCLE.md).
+
 ## Action rules
 
 - Use `browser_prepare_action` and `browser_find_element` before clicks, fills, selections, uploads, or downloads.

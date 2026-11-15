@@ -31,6 +31,40 @@ test('a receipt says what changed, and says nothing changed rather than nothing 
   assert.match(unchanged.note, /not evidence that the action failed/);
 });
 
+test('a same-length DOM mutation is caught by the revision, and the duplicate key stays stable', () => {
+  // Measured failure: a counter going 0 -> 1 changes no url/title/length, so the
+  // digest was identical and the receipt said changed:false. A weak caller then
+  // clicked again. The revision must move the verdict, but it must NOT move the
+  // duplicate key: a retry against an unchanged page has to stay suppressible.
+  const before = fp({ digest: 'aaaaaaaa', revision: 3, textLength: 1000 });
+  const after = fp({ digest: 'aaaaaaaa', revision: 4, textLength: 1000 });
+  const receipt = describeChange(before, after);
+  assert.equal(receipt.changed, true);
+  assert.equal(receipt.revisionChanged, true);
+  assert.equal(receipt.revisionMeasured, true);
+  assert.equal(receipt.revisionBefore, 3);
+  assert.equal(receipt.revisionAfter, 4);
+  assert.match(receipt.note, /same-length/);
+
+  const args = { tabId: 3, ref: 'e1' };
+  assert.equal(
+    duplicateKey('browser_click', 3, args, before.digest),
+    duplicateKey('browser_click', 3, args, after.digest),
+    'the page digest is the key, so an unchanged digest must stay one action'
+  );
+
+  // Neither side carrying a revision is a measured "no change" with an honest note.
+  const still = describeChange(fp({ revision: 3 }), fp({ revision: 3 }));
+  assert.equal(still.changed, false);
+  assert.equal(still.revisionChanged, false);
+  assert.match(still.note, /mutation revision/);
+  // Missing revision on one side: the note must say same-length changes were not ruled out.
+  const unknown = describeChange(fp(), fp());
+  assert.equal(unknown.changed, false);
+  assert.equal(unknown.revisionMeasured, false);
+  assert.match(unknown.note, /same-length text changes could not be ruled out/);
+});
+
 test('a missing fingerprint is reported as missing evidence, never as no change', () => {
   const receipt = describeChange(null, fp());
   assert.equal(receipt.changed, null);

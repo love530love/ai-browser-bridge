@@ -70,6 +70,10 @@ function normalize(entry = {}) {
   const judge = JUDGE_MODES.includes(entry.judge) ? entry.judge : 'off';
   return {
     scopes: [...new Set(scopes)],
+    // Queue priority is an operator-set bias, not a security boundary: negative
+    // values overtake normal work, positive values yield to it. It only reorders
+    // this service's queue and never bypasses leases, policy or verification.
+    ...(Number.isFinite(entry.queuePriority) ? { queuePriority: Math.max(-100, Math.min(100, Math.trunc(entry.queuePriority))) } : {}),
     ...(Array.isArray(entry.origins) && entry.origins.length ? { origins: entry.origins.map(String) } : {}),
     ...(Number.isFinite(entry.maxLeaseMs) ? { maxLeaseMs: Math.trunc(entry.maxLeaseMs) } : {}),
     ...normalizeTools(entry.tools ?? {}),
@@ -178,6 +182,7 @@ export function createAgentPolicy({ file = null, requireIdentity = false } = {})
     const judged = judge !== 'off' && (scope === 'write' || scope === 'upload');
     return {
       allowed: true, scope, agent: identity, registered: true, grantedScopes: entry.scopes,
+      ...(Number.isFinite(entry.queuePriority) ? { queuePriority: entry.queuePriority } : {}),
       ...(entry.maxLeaseMs ? { maxLeaseMs: entry.maxLeaseMs } : {}),
       ...(judged ? { judge, judgeTtlMs: entry.judgeTtlMs ?? DEFAULT_JUDGE_TTL_MS, judgeRequired: judge === 'require' } : {}),
       ...(typeof entry.contentBoundaries === 'boolean' ? { contentBoundaries: entry.contentBoundaries } : {})
@@ -188,6 +193,14 @@ export function createAgentPolicy({ file = null, requireIdentity = false } = {})
 
   return {
     evaluate,
+    // Queue bias for a named agent. Unregistered agents get 0; the queue still
+    // has aging and fairness, so a bias is never a starvation mechanism.
+    priorityOffset: name => {
+      if (typeof name !== 'string' || !name) return 0;
+      refresh();
+      const entry = agents.get(name);
+      return Number.isFinite(entry?.queuePriority) ? entry.queuePriority : 0;
+    },
     requireIdentity: () => requireIdentity,
     get: name => { refresh(); return agents.has(name) ? normalize(agents.get(name)) : null; },
     list: () => { refresh(); return [...agents.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, entry]) => ({ agent: name, ...normalize(entry) })); },

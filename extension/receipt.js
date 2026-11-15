@@ -105,10 +105,20 @@ export function describeChange(before, after) {
   }
   const state = stateDelta(before, after);
   const toggled = state?.stateChanged === true;
-  const changed = before.digest !== after.digest || toggled;
+  // A same-length text swap (a counter 0 -> 1, a status word of equal length)
+  // leaves every value that feeds `digest` identical. The revision is the only
+  // signal that catches it, and it stays out of the duplicate key so a retry
+  // against a genuinely unchanged page is still suppressed.
+  const revisionMeasured = Number.isInteger(before.revision) && Number.isInteger(after.revision);
+  const revisionChanged = revisionMeasured && before.revision !== after.revision;
+  const changed = before.digest !== after.digest || toggled || revisionChanged;
   return {
     measured: true,
     changed,
+    revisionBefore: before.revision ?? null,
+    revisionAfter: after.revision ?? null,
+    revisionChanged,
+    revisionMeasured,
     urlChanged: before.url !== after.url,
     titleChanged: before.title !== after.title,
     textDelta: after.textLength - before.textLength,
@@ -126,8 +136,12 @@ export function describeChange(before, after) {
     note: changed
       ? toggled && before.digest === after.digest
         ? `The control changed (${state.stateFieldsChanged.join(', ')}) even though the page digest did not. Read stateAfter for the observed value; that is a DOM reading, not proof the site accepted it.`
-        : 'The page differed immediately after the action. A difference is evidence that something happened, not proof that it was the intended thing.'
-      : 'No change was observed immediately after the action. An asynchronous update may not have rendered yet, so this is not evidence that the action failed: use browser_wait or read the page before concluding anything.'
+        : revisionChanged && before.digest === after.digest
+          ? `The DOM mutated (${after.revision - before.revision} observed change(s)) even though the semantic digest did not. That is how a same-length text change such as a counter 0 -> 1 is caught; it proves the page reacted, not that it reacted correctly.`
+          : 'The page differed immediately after the action. A difference is evidence that something happened, not proof that it was the intended thing.'
+      : revisionMeasured
+        ? 'No change was observed immediately after the action: neither the semantic digest nor the DOM mutation revision moved. An asynchronous update may not have rendered yet, so this is not evidence that the action failed: use browser_wait or read the page before concluding anything.'
+        : 'No semantic change was observed immediately after the action, and the DOM revision instrument was unavailable on one side, so same-length text changes could not be ruled out. That is not evidence that the action failed: read the page before concluding anything.'
   };
 }
 

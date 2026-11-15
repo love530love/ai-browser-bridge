@@ -14,7 +14,7 @@ import { errorCategory } from './diagnostics.js';
 import { createLeaseStore, LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
 import {
   HostRegistry, CommandLedger, negotiateHandshake, pickDispatchable,
-  recommendHost,
+  recommendHost, scopeKey,
   SERVICE_PROTOCOL_VERSION
 } from './host-registry.js';
 import { createSchedulerBridge } from './scheduler-bridge.js';
@@ -26,6 +26,7 @@ import { capabilityGuide } from './capability-guide.js';
 import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
 import { clearExtensionErrors, describeErrorList, readExtensionErrors } from './extension-errors.js';
+import { readExtensionErrorJournal } from './extension-error-journal.js';
 import { analyzeRequest, validateVerifySpec } from './request-risk.js';
 import { withNextStep, nextStepForError } from './next-step.js';
 import { toolIndex } from './tool-index.js';
@@ -154,7 +155,41 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // every pre-0.36 status consumer keeps working. The registry is the source of
   // truth: all connected browsers are peers, each with its own in-flight slot.
   const hosts = new HostRegistry({ serviceVersion: VERSION });
+  // Write/exclusive lane: one job per host, the only lane that can have an
+  // unprovable side effect. Read-only jobs live in readsInFlight and may run in
+  // parallel on different tabs, so a short read does not queue behind a long
+  // write. Keeping the write lane separate means the timeout/drop contract for
+  // writes is unchanged.
   const inFlight = new Map();
+  const readsInFlight = new Map(); // hostId -> Map(jobId, job)
+  const MAX_READS_PER_HOST = 2;
+  const readJobsFor = hostId => readsInFlight.get(hostId) ?? null;
+  const readCountFor = hostId => readJobsFor(hostId)?.size ?? 0;
+  const readCounts = () => new Map([...readsInFlight].map(([hostId, jobs]) => [hostId, jobs.size]));
+  function allInFlightJobs() {
+    return [...inFlight.values(), ...[...readsInFlight.values()].flatMap(jobs => [...jobs.values()])];
+  }
+  function hostActivity(hostId) {
+    const write = inFlight.get(hostId) ?? null;
+    const reads = [...(readsInFlight.get(hostId)?.values() ?? [])];
+    const primary = write ?? reads[0] ?? null;
+    return {
+      inFlight: !!primary,
+      activeCommand: primary ? {
+        id: primary.id, tool: primary.name, ageMs: Math.max(0, Date.now() - primary.created),
+        readOnly: !write
+      } : null,
+      readInFlight: reads.length,
+      activeReads: reads.map(job => ({ id: job.id, tool: job.name, tabId: Number.isInteger(job.args?.tabId) ? job.args.tabId : null, ageMs: Math.max(0, Date.now() - job.created) }))
+    };
+  }
+  function busyTabKeys() {
+    const keys = new Set();
+    for (const job of allInFlightJobs()) {
+      if (Number.isInteger(job.args?.tabId)) keys.add(scopeKey(job.hostId, job.args.tabId));
+    }
+    return keys;
+  }
   const commandLedger = new CommandLedger();
   const hostGrace = new Map();
   let lastAgent = null;
@@ -455,17 +490,12 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     // (no netstat per host); browser_hosts adds the process-owner details.
     hostCount: hosts.size(),
     recommendedHostId: recommendHost(hosts.snapshot(), { primaryHostId: hosts.primaryHostId }).recommendedHostId,
-    hosts: hosts.snapshot().map(host => ({
-      ...host,
-      inFlight: inFlight.has(host.hostId),
-      activeCommand: inFlight.has(host.hostId) ? {
-        id: inFlight.get(host.hostId).id,
-        tool: inFlight.get(host.hostId).name,
-        ageMs: Date.now() - inFlight.get(host.hostId).created
-      } : null
+    hosts: hosts.snapshot().map(host => ({ ...host, ...hostActivity(host.hostId) })),
+    activeCount: allInFlightJobs().length,
+    activeByHost: allInFlightJobs().map(job => ({
+      hostId: job.hostId, id: job.id, tool: job.name, ageMs: Math.max(0, Date.now() - job.created),
+      lane: inFlight.get(job.hostId) === job ? 'write' : 'read'
     })),
-    activeCount: inFlight.size,
-    activeByHost: [...inFlight.entries()].map(([hostId, job]) => ({ hostId, id: job.id, tool: job.name, ageMs: Date.now() - job.created })),
     // Derived from the registry rather than the primary compatibility mirror:
     // `connected` above describes one host, these describe the whole fleet.
     hostsConnected: hosts.list().filter(host => host.ws.readyState === WebSocket.OPEN).length,
@@ -567,10 +597,15 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   function finish(job, error, result) {
     clearTimeout(job.timer);
     if (inFlight.get(job.hostId) === job) inFlight.delete(job.hostId);
-    // `current` is the legacy single-active-job mirror. With several hosts it
-    // must represent *any* live job: finishing the newest command must not
-    // leave a stale pointer that makes the service look permanently busy.
-    current = inFlight.values().next().value ?? null;
+    const hostReads = readsInFlight.get(job.hostId);
+    if (hostReads?.get(job.id) === job) {
+      hostReads.delete(job.id);
+      if (hostReads.size === 0) readsInFlight.delete(job.hostId);
+    }
+    // `current` is the legacy single-active-job mirror. With several hosts and
+    // two lanes it must represent *any* live job: finishing the newest command
+    // must not leave a stale pointer that makes the service look permanently busy.
+    current = allInFlightJobs()[0] ?? null;
     if (job.commandId) commandLedger.record(job.commandId, {
       hostId: job.hostId, tool: job.name,
       outcome: error ? 'error' : result?.status ?? 'unknown',
@@ -609,12 +644,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       // ownerFor runs during snapshot(); read the persisted observation after
       // it, so a first-time detection is reflected in this same reply.
       hostKindObserved: hosts.byId(host.hostId)?.hostKindObserved ?? host.hostKindObserved ?? host.hostKind,
-      inFlight: inFlight.has(host.hostId),
-      activeCommand: inFlight.has(host.hostId) ? {
-        id: inFlight.get(host.hostId).id,
-        tool: inFlight.get(host.hostId).name,
-        ageMs: Date.now() - inFlight.get(host.hostId).created
-      } : null
+      ...hostActivity(host.hostId)
     }));
   }
 
@@ -622,13 +652,31 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // host's in-flight job is resolved; its queued jobs keep their place in line
   // for a bounded reconnect window instead of being failed for someone else's
   // network problem.
+  function finishReadsForHost(hostId) {
+    const jobs = readJobsFor(hostId);
+    if (!jobs) return 0;
+    let count = 0;
+    for (const job of [...jobs.values()]) {
+      // A read has no side effect, so a lost host is a retryable waiting state,
+      // not an uncertain write. The caller keeps its task alive.
+      finish(job, null, {
+        status: 'waiting', retryable: true, reason: 'extension_disconnected', hostId, tool: job.name,
+        dispatched: null, suggestedDelayMs: 2000,
+        nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 15000, idle: true },
+        recommendedNextAction: 'The browser disconnected while this read was in flight. Nothing was written. Wait for reconnect, then repeat the read.'
+      });
+      count += 1;
+    }
+    return count;
+  }
+
   function dropHostOnly(hostId, reason) {
     const active = inFlight.get(hostId);
     if (active) {
-      const possiblyDispatchedWrite = !active.tool.annotations?.readOnlyHint;
-      finish(active, reason, possiblyDispatchedWrite ? { status: 'uncertain' } : undefined);
+      finish(active, reason, { status: 'uncertain' });
       inFlight.delete(hostId);
     }
+    finishReadsForHost(hostId);
     clearTimeout(hostGrace.get(hostId));
     const grace = setTimeout(() => {
       hostGrace.delete(hostId);
@@ -655,15 +703,18 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   function drop(reason, { keepQueued = false, hostId = null } = {}) {
     const peers = hosts.list().filter(host => host.hostId !== hostId);
     if (hostId && peers.length > 0) { dropHostOnly(hostId, reason); return; }
-    const active = hostId ? inFlight.get(hostId) : current;
+    // This path only owns the write lane. Reads are finished separately as
+    // retryable waiting states; treating one as `current` here would manufacture
+    // an uncertain write out of a harmless read.
+    const active = hostId ? inFlight.get(hostId) : inFlight.values().next().value ?? null;
     if (active) {
       // A disconnected or stopped extension may have accepted a write before its
       // result was lost. Preserve the transport error while separately recording
       // the action outcome as uncertain; never infer a safe retry from rejection.
-      const possiblyDispatchedWrite = !active.tool.annotations?.readOnlyHint;
-      finish(active, reason, possiblyDispatchedWrite ? { status: 'uncertain' } : undefined);
+      finish(active, reason, { status: 'uncertain' });
       inFlight.delete(active.hostId);
     }
+    for (const id of [...readsInFlight.keys()]) finishReadsForHost(id);
     if (peers.length === 0) {
       extension = null;
       extensionVersion = null;
@@ -694,12 +745,18 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   };
 
   function dispatchJob(job, host) {
-    inFlight.set(job.hostId, job);
+    const readOnly = !!job.tool.annotations?.readOnlyHint;
+    if (readOnly) {
+      if (!readsInFlight.has(job.hostId)) readsInFlight.set(job.hostId, new Map());
+      readsInFlight.get(job.hostId).set(job.id, job);
+    } else {
+      inFlight.set(job.hostId, job);
+    }
+    job.lane = readOnly ? 'read' : 'write';
     current = job;
     lastAgent = job.args?.agent ?? null;
     host.commandsDispatched += 1;
     job.timer = setTimeout(() => {
-      const readOnly = !!job.tool.annotations?.readOnlyHint;
       if (readOnly) {
         finish(job, null, { status: 'waiting', retryable: true, reason: 'read_timeout', tool: job.name, hostId: job.hostId, suggestedDelayMs: 1000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 5000, idle: true }, recommendedNextAction: 'Keep the task alive. Retry the read with mode:"cheap" or smaller budgets; do not treat this as bridge failure.' });
         pump();
@@ -718,10 +775,14 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     const available = new Set(hosts.list()
       .filter(host => host.ws.readyState === WebSocket.OPEN && !host.paused)
       .map(host => host.hostId));
-    // One in-flight command per host, not one for the whole service. A browser
-    // that stalls can no longer hold every other browser's work hostage.
+    // One write per host (plus a bounded read lane on other tabs), not one for
+    // the whole service. A browser that stalls can no longer hold every other
+    // browser's work hostage, and a short read can overtake a long write.
     while (true) {
-      const pick = pickDispatchable(queue, inFlight, { now: Date.now(), lastAgent, availableHostIds: available });
+      const pick = pickDispatchable(queue, inFlight, {
+        now: Date.now(), lastAgent, availableHostIds: available,
+        readCounts: readCounts(), busyTabKeys: busyTabKeys(), maxReadsPerHost: MAX_READS_PER_HOST
+      });
       if (!pick) break;
       const [job] = queue.splice(pick.index, 1);
       const host = hosts.byId(job.hostId);
@@ -1152,12 +1213,19 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     });
     return new Promise((resolve, reject) => {
       const priority = priorityFor(tool, name);
+      const readOnly = !!tool.annotations?.readOnlyHint;
+      const offset = policy.priorityOffset(routeArgs?.agent ?? null);
       const explicitHost = typeof routeArgs?.hostId === 'string';
       const job = {
-        id: randomUUID(), name, tool, args: prepared,
+        id: randomUUID(), name, tool, args: prepared, readOnly,
         hostId: explicitHost ? routeArgs.hostId : (defaultTargetHostId() ?? hosts.primaryHostId ?? 'primary'),
         explicitHost, commandId,
-        created: Date.now(), priority: priority.value, priorityName: priority.name, resolve, reject
+        // The offset is an agent-level bias. It may push a job below zero so an
+        // operator can give one agent a genuine fast lane; aging still lifts
+        // everything else, so no class of work is starved indefinitely.
+        created: Date.now(), priority: Math.max(-100, priority.value + offset),
+        basePriority: priority.value, priorityOffset: offset,
+        priorityName: priority.name, resolve, reject
       };
       const index = queue.findIndex(item => item.priority > job.priority);
       if (index === -1) queue.push(job); else queue.splice(index, 0, job);
@@ -1217,10 +1285,11 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       recommendedNextAction: 'Do not retry blindly. Decide whether interrupting the user is acceptable; if it is not, ask them to reload the extension, then call this again with confirmation.',
       ...extra
     });
-    // allowFocus is a service-level policy switch, not a desktop-adapter
-    // argument: the adapter must keep receiving exactly the fields it validates,
-    // and the decision to raise a window belongs to the caller of this tool.
-    const { allowFocus, ...desktopArgs } = args;
+    // allowFocus and clearErrors are service-level policy switches, not
+    // desktop-adapter arguments: the adapter must keep receiving exactly the
+    // fields it validates, and the decision to raise a window or touch
+    // chrome://extensions belongs to the caller of this tool.
+    const { allowFocus, clearErrors, ...desktopArgs } = args;
     const native = Boolean(extension) && !stopped;
     if (!native) {
       if (args.allowFocus !== true) return recordDesktopAudit(name, args, focusEscalation('extension_disconnected'), startedAt);
@@ -1230,23 +1299,21 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     }
     // Reloading while a write is in flight would kill the reply mid-action and
     // leave an unknown outcome behind. Wait instead.
-    if (current || queue.length) {
+    if (allInFlightJobs().length > 0 || queue.length) {
       return recordDesktopAudit(name, args, { status: 'waiting', retryable: true, reason: 'service_busy', dispatched: false,
         nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 30000, idle: true },
         recommendedNextAction: 'Let the in-flight browser command finish, then reload. A reload during a write loses the reply and leaves an unknown outcome.', queue: queueSnapshot() }, startedAt);
     }
-    // The error list has to be put in front BEFORE the worker is torn down,
-    // because that is the only part of clearing it the extension can do. Chrome
-    // keeps those errors across a reload, so "reload to pick up the new build"
-    // otherwise leaves the previous build's failures on screen and the panel
-    // keeps saying the bridge is broken. This is best effort on purpose: a
-    // failure to open the page must never turn a successful reload into an error.
-    const errorsPage = await call('browser_extension_errors', {
-      action: 'open',
-      ...(typeof args.hostId === 'string' ? { hostId: args.hostId } : {}),
-      ...(typeof args.agent === 'string' && args.agent ? { agent: args.agent } : {})
-    })
-      .catch(error => ({ status: 'failed', reason: 'extension_errors_page_unavailable', message: String(error?.message ?? error).slice(0, 200) }));
+    // Reload and error-list clearing are separate capabilities with different
+    // disturbance budgets. The reload itself touches nothing: the worker calls
+    // chrome.runtime.reload() and the service waits for the new session.
+    // Opening chrome://extensions used to happen unconditionally before every
+    // reload, which activated that tab inside the browser - the exact internal
+    // focus change this release removes. The page is now touched only when the
+    // caller explicitly asks for clearErrors:true, and even then it is opened in
+    // the background (active:false) and only after the new worker reconnects.
+    // Default-response evidence comes from the bridge error journal instead.
+    const reloadStartedIso = new Date(startedAt).toISOString();
     // A reload belongs to one host. Snapshot every connected session so a
     // different browser being promoted to primary cannot be mistaken for the
     // worker we just reloaded.
@@ -1277,17 +1344,44 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     }
     const result = await waitForReload({ previousSession, previousSessions, startedAt, hostId: args.hostId ?? null });
     desktopOperation = null;
-    // Clear the list the reload left behind. The page was already brought
-    // forward above, and the new worker has reconnected by now, so the error
-    // list has been re-rendered against the new session.
-    const errors = await clearExtensionErrorsViaUia(result.hostId ?? args.hostId ?? null);
+    const reloadedHostId = result.hostId ?? args.hostId ?? null;
+    // Post-reload evidence that needs no window at all: everything the new
+    // worker (or the old one before teardown) recorded after this reload began.
+    const errorJournal = readExtensionErrorJournal(join(stateDir, 'logs'), {
+      hostId: reloadedHostId, since: reloadStartedIso, windowHours: 1
+    });
+    if (clearErrors !== true) {
+      return recordDesktopAudit(name, args, {
+        ...result,
+        errorJournal,
+        errorListCleared: null,
+        errorList: {
+          status: 'not_attempted', cleared: null, reason: 'clear_errors_not_requested',
+          basis: 'bridge-journal', panelInspected: false
+        },
+        foregroundTaken: false,
+        nextStep: errorJournal.state === 'errors_present'
+          ? 'The reload is verified, but the bridge journal recorded extension errors after it began; read journalEntries and act on them. Nothing was clicked and no tab was opened. Clearing the on-screen panel needs an explicit later call with clearErrors:true.'
+          : 'The reload is verified and the bridge journal recorded no new extension error after it began. No tab was opened and no window or foreground was touched. This is journal evidence, not an inspection of the on-screen panel.'
+      }, startedAt);
+    }
+    // Opt-in clearing path. Opening chrome://extensions is itself a tab change,
+    // so it is created in the background; UI Automation is then bound to the
+    // process that actually holds this host, exactly as before. A refusal or
+    // unreadable panel leaves the journal evidence intact instead of wiping it.
+    const errorsPage = await call('browser_extension_errors', {
+      action: 'open',
+      active: false,
+      ...(typeof reloadedHostId === 'string' ? { hostId: reloadedHostId } : {}),
+      ...(typeof args.agent === 'string' && args.agent ? { agent: args.agent } : {})
+    })
+      .catch(error => ({ status: 'failed', reason: 'extension_errors_page_unavailable', message: String(error?.message ?? error).slice(0, 200) }));
+    const errors = await clearExtensionErrorsViaUia(reloadedHostId);
     const described = describeErrorList(errors);
-    // A verified reload with a red error list still on screen is not a clean
-    // success: the panel is what the user reads, and it would keep saying the
-    // bridge is broken. partial is how this service already says "the part you
-    // asked for worked, the follow-up did not".
+    // partial is reserved for a caller who explicitly asked to clear and did
+    // not get it. A reload that was never asked to touch the panel is complete.
     return recordDesktopAudit(name, args, {
-      ...result, ...described, errorsPage,
+      ...result, ...described, errorsPage, errorJournal, uiAutomationUsed: true,
       ...(described.errorListCleared ? {} : { partial: true })
     }, startedAt);
   }
@@ -1355,10 +1449,19 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     return result;
   }
 
-  // Read-only verdict for the extension error list. The page is read through
-  // the same one-process UIA path as the clear step, but nothing is invoked:
-  // "empty" requires a verified chrome://extensions page and a readable
-  // document, and "errors_present" carries the actual entry names.
+  // Read-only verdict for the extension error list, in two layers.
+  //
+  // Default: the bridge's own diagnostic journal. extension/error-journal.js
+  // persists events before a worker teardown and the service writes them into
+  // logs/audit.jsonl, so the answer needs no Chrome window, no chrome://extensions
+  // tab and no accessibility engine. That is what removes the old
+  // "state:unknown because no_chrome_window" dead end: an agent-embedded browser
+  // can be unreachable for UI Automation and still report its recorded errors.
+  //
+  // includePanel:true adds the on-screen UIA read. The panel is the only source
+  // that can say "the list is empty right now"; the journal is the only source
+  // that works without a window. When the panel is unreadable the journal verdict
+  // survives instead of collapsing to unknown, and both are reported separately.
   async function extensionErrorsReadCall(args) {
     const startedAt = Date.now();
     const requested = typeof args.hostId === 'string' ? hosts.byId(args.hostId) : null;
@@ -1369,6 +1472,35 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       recommendedNextAction: 'Nothing was read. Call browser_hosts, then retry with an available hostId or omit it to use the default target.'
     };
     const host = requested ?? hosts.byId(defaultTargetHostId()) ?? hosts.primary();
+    const hostBinding = host ? { hostId: host.hostId, hostKindObserved: host.hostKindObserved ?? host.hostKind } : null;
+    const journal = readExtensionErrorJournal(join(stateDir, 'logs'), {
+      hostId: host?.hostId ?? args.hostId ?? null,
+      windowHours: Number.isFinite(args.windowHours) ? args.windowHours : 24,
+      since: typeof args.since === 'string' ? args.since : null,
+      now: startedAt
+    });
+    // `entries`/`count` are renamed so they never collide with the panel's own
+    // errorEntries when both layers are present.
+    const journalView = {
+      ...journal,
+      journalEntries: journal.entries,
+      journalCount: journal.count,
+      journalState: journal.state
+    };
+    delete journalView.entries;
+    delete journalView.count;
+    if (args.includePanel !== true) {
+      return recordDesktopAudit('browser_extension_errors', { ...args, hostId: host?.hostId ?? args.hostId ?? null }, {
+        ...journalView,
+        status: 'success',
+        read: true,
+        dispatched: false,
+        ...(hostBinding ? { hostBinding } : {}),
+        recommendedNextAction: journal.state === 'errors_present'
+          ? 'The bridge journal recorded extension errors; journalEntries carries them. Report them, and use includePanel:true only when the on-screen chrome://extensions list itself must be inspected. Nothing was clicked.'
+          : 'No extension diagnostic was recorded in this window. This is absence of evidence, not proof that the panel is empty; use includePanel:true when the on-screen list must be read. Do not report the panel as clean on the journal alone.'
+      }, startedAt);
+    }
     const remotePort = host?.remotePort ?? extension?._socket?.remotePort ?? null;
     const owner = resolveExtensionOwner(remotePort, config.port);
     const readId = typeof extensionId === 'string' && /^[a-p]{32}$/.test(extensionId)
@@ -1386,16 +1518,30 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
           state: 'unknown', hasErrors: null, dispatched: false,
           message: String(error?.message ?? error).slice(0, 200) };
       }
+      const panelKnown = result.state === 'errors_present' || result.state === 'empty';
       const enriched = {
-        ...result,
-        read: true,
-        ...(host ? { hostBinding: { hostId: host.hostId, hostKindObserved: host.hostKindObserved ?? host.hostKind } } : {}),
+        ...journalView,
+        panelInspected: true,
+        panelState: result.state ?? 'unknown',
+        panelKnown,
+        panel: result,
+        state: panelKnown ? result.state : journal.state,
+        hasErrors: panelKnown ? result.state === 'errors_present' : journal.hasErrors,
+        ...(panelKnown ? {} : { panelReason: result.reason ?? null }),
+        ...(typeof result.errorEntries !== 'undefined' ? { errorEntries: result.errorEntries } : {}),
+        ...(Array.isArray(result.errorEntryNames) ? { errorEntryNames: result.errorEntryNames } : {}),
+        ...(hostBinding ? { hostBinding } : {}),
         ...(owner ? { extensionOwner: { ...owner, nonChromeHost: isNonChromeHost(owner) } } : {}),
+        status: 'success',
+        read: true,
+        dispatched: false,
         recommendedNextAction: result.state === 'errors_present'
-          ? 'The list is non-empty. errorEntryNames carries the actual messages; relay or act on them and do not report the panel as clean. Clearing is a separate action.'
+          ? 'The panel is non-empty. errorEntryNames carries the actual messages; relay or act on them and do not report the panel as clean. Clearing is a separate action.'
           : result.state === 'empty'
-            ? 'The list was read as empty on a verified chrome://extensions page with a readable document. This is evidence from the page, not an inference from a reload.'
-            : 'The list state is unknown and nothing was clicked. Open the error page in this same host with browser_extension_errors action:"open", then read again. Do not report the panel as clean.'
+            ? 'The panel was read as empty on a verified chrome://extensions page with a readable document. journalState separately reports whether the bridge recorded errors in this window.'
+            : journal.state === 'errors_present'
+              ? 'The panel could not be read, but the bridge journal recorded errors; journalEntries carries them. Nothing was clicked. This is not an unknown state.'
+              : 'Neither layer found evidence: the panel was unreachable and no journal diagnostic was recorded. That is still absence of evidence, not proof the panel is empty.'
       };
       return recordDesktopAudit('browser_extension_errors', { ...args, hostId: host?.hostId ?? args.hostId ?? null }, enriched, startedAt);
     } finally { desktopOperation = null; }
@@ -2060,8 +2206,11 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
           // or forged reply from another browser must never finish someone
           // else's job, free their in-flight slot or be reported as their own.
           const hostId = hosts.hostIdFor(ws);
-          const job = hostId ? inFlight.get(hostId) : null;
-          if (!job || msg.id !== job.id) return;
+          const write = hostId ? inFlight.get(hostId) : null;
+          const job = hostId
+            ? (write?.id === msg.id ? write : readJobsFor(hostId)?.get(msg.id) ?? null)
+            : null;
+          if (!job) return;
           const host = hosts.byId(hostId);
           if (host) host.commandsCompleted += 1;
           finish(job, typeof msg.error === 'string' ? msg.error.slice(0, 1000) : null, msg.result);

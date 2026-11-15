@@ -820,6 +820,42 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       valueLength: typeof el.value === 'string' ? el.value.length : null
     };
   };
+  // Counts DOM mutations between two fingerprints. The digest above deliberately
+  // stays semantic (URL/title/counts/controls) because duplicate suppression
+  // keys on it and must not turn page noise into a "different action". That is
+  // also why it could not see a counter rendered as 0 -> 1: the text length and
+  // every count stayed identical, so the receipt said changed:false and invited
+  // a second click.
+  //
+  // A monotonic revision from one MutationObserver supplies exactly that missing
+  // signal. It is installed once per document and kept on globalThis, which
+  // survives every chrome.scripting.executeScript injection in this isolated
+  // world (the transient store already relies on that). Only childList and
+  // characterData are observed; style/class animation churn would make every
+  // receipt look changed, while controlState already covers aria/toggle values.
+  const ensureRevisionStore = () => {
+    try {
+      const existing = globalThis.__aibRevision;
+      if (existing?.observer) return existing;
+      if (!document.documentElement) return null;
+      const store = { revision: 0, lastAt: 0, observer: null };
+      const observer = new MutationObserver(records => {
+        let count = 0;
+        for (const record of records) {
+          if (record.type === 'characterData') { count += 1; continue; }
+          for (const node of record.addedNodes) if (node.nodeType === 1 || node.nodeType === 3) count += 1;
+          for (const node of record.removedNodes) if (node.nodeType === 1 || node.nodeType === 3) count += 1;
+        }
+        if (count > 0) { store.revision += count; store.lastAt = Date.now(); }
+      });
+      observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
+      store.observer = observer;
+      globalThis.__aibRevision = store;
+      return store;
+    } catch {
+      return null;
+    }
+  };
   const pageFingerprint = (options = {}) => {
     const body = document.body;
     const textLength = body ? (body.textContent || '').length : 0;
@@ -834,6 +870,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     } catch { dialog = null; }
     const controls = controlState();
     const watch = watchState(options.watchRef);
+    const revision = ensureRevisionStore();
     let hash = 2166136261;
     const feed = value => {
       const text = String(value);
@@ -851,6 +888,12 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       dialog,
       controlState: controls,
       ...(watch ? { watch } : {}),
+      // Outside `digest` on purpose: the digest is the duplicate-suppression
+      // key and must stay stable across unrelated DOM churn. The revision is
+      // compared before/after one action only.
+      revision: revision ? revision.revision : null,
+      revisionAt: revision ? revision.lastAt : null,
+      revisionBasis: revision ? 'mutation-observer' : 'unavailable',
       scroll: { x: Math.round(scrollX || 0), y: Math.round(scrollY || 0) },
       digest: (hash >>> 0).toString(16).padStart(8, '0')
     };

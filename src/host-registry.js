@@ -285,19 +285,36 @@ export class HostRegistry {
 }
 
 // Choose the next job that can actually be dispatched. A host with an in-flight
-// command is skipped, not waited on, so one stalled browser cannot hold every
-// other browser's work hostage. Aging prevents a low-priority task from being
-// starved by a stream of cheap reads; the fairness bonus rotates agents.
-export function pickDispatchable(queue, inFlight, { now = Date.now(), lastAgent = null, availableHostIds = null } = {}) {
+// write is skipped for other writes, not waited on, so one long browser write
+// cannot hold every other browser's work hostage. Aging prevents a low-priority
+// task from being starved by a stream of cheap reads; the fairness bonus rotates
+// agents.
+//
+// Read-only jobs get a separate short-task lane. They run in parallel with a
+// write on a DIFFERENT tab (a read cannot corrupt a write's tab), and several
+// reads may share a host, but a write must wait until that host's reads drain.
+// The tab key is scoped by hostId because tab 7 exists in every browser.
+export function pickDispatchable(queue, inFlight, {
+  now = Date.now(), lastAgent = null, availableHostIds = null,
+  readCounts = null, busyTabKeys = null, maxReadsPerHost = 2
+} = {}) {
   let best = null;
   for (let index = 0; index < queue.length; index += 1) {
     const job = queue[index];
-    if (inFlight.has(job.hostId)) continue;
     if (availableHostIds && !availableHostIds.has(job.hostId)) continue;
+    const readOnly = job.readOnly === true || job.tool?.annotations?.readOnlyHint === true;
+    const writeBusy = inFlight.has(job.hostId);
+    const reads = readCounts?.get(job.hostId) ?? 0;
+    if (writeBusy && !readOnly) continue;
+    if (!readOnly && reads > 0) continue;
+    if (readOnly && reads >= maxReadsPerHost) continue;
+    if (busyTabKeys && Number.isInteger(job.args?.tabId) && busyTabKeys.has(scopeKey(job.hostId, job.args.tabId))) continue;
     const waitedMs = Math.max(0, now - job.created);
     const aging = Math.min(100, Math.floor(waitedMs / 1000));
     const agent = job.args?.agent ?? null;
     const fairness = lastAgent && agent && agent !== lastAgent ? 15 : 0;
+    // A negative queuePriority (agent policy) is a genuine fast lane; it can go
+    // below zero, while priority itself stays a class value.
     const score = job.priority - aging - fairness;
     if (!best || score < best.score || (score === best.score && job.created < best.job.created)) {
       best = { index, job, score };
