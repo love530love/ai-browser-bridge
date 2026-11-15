@@ -36,12 +36,17 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
 });
 // This stdio adapter belongs to one client, not to the shared bridge service.
 // EOF means its owner is gone. Outstanding HTTP sockets must not keep it alive.
-const adapterRegistry = createAdapterRegistry();
+// The registry carries the guard's mode so an operator can see active vs
+// passive protection without attaching to the adapter.
+let parentGuard = null;
+const adapterRegistry = createAdapterRegistry({
+  status: () => ({ guard: parentGuard?.snapshot() ?? null })
+});
 try { adapterRegistry.start(); } catch {}
 // An adapter whose client vanished without closing the pipe would otherwise
-// live forever. The guard arms only after it can name a non-shell parent, and
-// then exits this adapter when that exact parent dies.
-const parentGuard = createParentGuard({ onOrphan: () => closeClient() });
+// live forever. The guard walks launcher/wrapper-shell ancestors to a stable
+// client and exits this adapter when that exact process dies.
+parentGuard = createParentGuard({ onOrphan: () => closeClient() });
 try { parentGuard.start(); } catch {}
 process.once('exit', () => { try { adapterRegistry.stop(); } catch {} try { parentGuard.stop(); } catch {} });
 let closing = false;

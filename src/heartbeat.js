@@ -30,6 +30,7 @@ import { computeBuildIdentity } from './build-identity.js';
 import { VERSION } from './version.js';
 import { request as defaultRequest } from './client.js';
 import { RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
+import { recordLifecycle, readLifecycle } from './service-lifecycle.js';
 import { usageSummary } from './usage-summary.js';
 
 export const HEARTBEAT_DEFAULTS = {
@@ -43,7 +44,8 @@ export const HEARTBEAT_DEFAULTS = {
   auditSpikeMin: 5,
   auditSpikeRatio: 3,
   clockTolerance: 0.2,
-  cooldownCycles: 3
+  cooldownCycles: 3,
+  lifecycleWindowMs: 24 * 60 * 60 * 1000
 };
 
 const clampInt = (value, min, max, fallback) => {
@@ -109,11 +111,22 @@ export function readDiskFacts(root = ROOT, stateDir = defaultStateDir, nowMs = D
   let diskBuildId = null;
   try { diskBuildId = computeBuildIdentity(root); }
   catch { /* unreadable source tree is reported as unknown */ }
+  let lifecycle = null;
+  try {
+    const ledger = readLifecycle(stateDir);
+    lifecycle = {
+      file: ledger.file,
+      lastExit: ledger.lastExit,
+      lastEventAt: ledger.events.at(-1)?.time ?? null,
+      totalRecorded: ledger.totalRecorded
+    };
+  } catch { /* lifecycle evidence is optional; never fail collection for it */ }
   return {
     version: VERSION,
     manifestVersion,
     diskBuildId,
     pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null,
+    lifecycle,
     audit: readAuditWindows(join(stateDir, 'logs', 'audit.jsonl'), nowMs),
     // Aggregate counters only: tool names, hostIds, error categories and
     // durations. Never page text, URLs, headers or credentials.
@@ -222,6 +235,22 @@ function buildRules(ctx) {
       { runningBuildId: status.buildId, diskBuildId: disk.diskBuildId, pid: disk.pid },
       'The running process was started from a different source tree. Restart it through the watchdog so the new code takes effect.',
       { kind: 'build_restart' }));
+  }
+
+  // A previous run that ended without a recorded restart intent is the only
+  // way an operator can see a crash or an unattributed SIGTERM after the fact.
+  // `unrecorded_exit` means the process left no exit record at all (hard kill
+  // or power loss) - absence of evidence, never proof of a crash.
+  const lastExit = disk.lifecycle?.lastExit;
+  const exitAt = lastExit?.at ? Date.parse(lastExit.at) : NaN;
+  if (lastExit && ['crash', 'unrecorded_exit', 'signal_shutdown_unattributed'].includes(lastExit.classification) &&
+      (!Number.isFinite(exitAt) || nowMs - exitAt <= cfg.lifecycleWindowMs)) {
+    rules.push(finding('service_exit_unattributed', 'warn',
+      { classification: lastExit.classification, at: lastExit.at, pid: lastExit.pid,
+        exitCode: lastExit.exitCode ?? null, signal: lastExit.signal ?? null,
+        ledger: disk.lifecycle?.file ?? null },
+      'A previous service run ended without a recorded restart intent. The lifecycle ledger distinguishes a crash, an unattributed signal and a missing exit record; it never invents a cause that was not observed.',
+      { kind: 'report_only', nextStep: 'Run node src/cli.js service-history and inspect the listed records before concluding the service crashed.' }));
   }
 
   if (prev && prev.hostIds) {
@@ -496,16 +525,38 @@ export async function executeRemediation(plan, options = {}) {
   const reload = options.reloadFn ?? ((hostId) => defaultReload(hostId, options.requestFn ?? defaultRequest));
   const results = [];
   let acted = false;
+  const lifecycleDir = options.stateDir ?? null;
   for (const action of plan.actions) {
     if (!action.executed) { results.push({ ...action, outcome: 'skipped' }); continue; }
     const actionId = randomUUID();
+    const lifecycleNow = typeof options.now === 'function' ? () => new Date(options.now()) : undefined;
+    if (action.kind === 'build_restart' && lifecycleDir) {
+      // Write the intent BEFORE the signal. Without this record a later
+      // operator cannot distinguish a planned watchdog restart from a crash.
+      recordLifecycle(lifecycleDir, {
+        event: 'restart_intent', intentId: actionId, requestedBy: 'heartbeat',
+        pid: action.pid, method: 'SIGTERM', reason: 'build_stale',
+        runningBuildId: action.runningBuildId ?? null, diskBuildId: action.diskBuildId ?? null
+      }, lifecycleNow ? { now: lifecycleNow } : {});
+    }
     try {
       const outcome = action.kind === 'build_restart'
         ? await restart({ pid: action.pid })
         : await reload(action.hostId ?? null);
       acted = acted || outcome?.ok === true;
+      if (action.kind === 'build_restart' && outcome?.ok !== true && lifecycleDir) {
+        recordLifecycle(lifecycleDir, {
+          event: 'restart_intent_cancelled', intentId: actionId,
+          reason: outcome?.reason ?? 'dispatch_failed'
+        }, lifecycleNow ? { now: lifecycleNow } : {});
+      }
       results.push({ ...action, actionId, outcome: outcome?.ok ? 'dispatched' : 'failed', detail: outcome });
     } catch (error) {
+      if (action.kind === 'build_restart' && lifecycleDir) {
+        recordLifecycle(lifecycleDir, {
+          event: 'restart_intent_cancelled', intentId: actionId, reason: 'dispatch_threw'
+        }, lifecycleNow ? { now: lifecycleNow } : {});
+      }
       results.push({ ...action, actionId, outcome: 'failed', detail: { message: String(error?.message ?? error) } });
     }
   }
@@ -630,7 +681,7 @@ export async function runHeartbeat(options = {}) {
         thresholds: options.thresholds });
     const plan = await planRemediation(evaluation, snapshot, evaluation.nextState,
       { ...options, now, intervalMs: options.intervalMs ?? cfg.intervalMs, thresholds: options.thresholds });
-    const remediation = await executeRemediation(plan, options);
+    const remediation = await executeRemediation(plan, { ...options, stateDir });
     const cooldowns = { ...(evaluation.nextState.cooldowns ?? {}) };
     for (const item of remediation.results) if (item.executed) cooldowns[item.kind] = { at: new Date(now()).toISOString(), actionId: item.actionId ?? null };
     evaluation.nextState.cooldowns = cooldowns;

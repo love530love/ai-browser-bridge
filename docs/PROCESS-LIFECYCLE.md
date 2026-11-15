@@ -109,3 +109,68 @@ normalization, PowerShell-first with tasklist fallback). `node src/cli.js
 runtime` additionally reports which optional runtimes are present on a new
 machine; only Node >=22 is required.
 
+
+## Lifecycle ledger and ancestor guard (0.42.3)
+
+### Why the ledger exists
+
+The 2026-11-15 regression window exposed a forensic gap, not a crash. The
+18:04 service exit was the heartbeat allow-list action `build_restart`
+(incident `55831f65`, actionId `06848c8f-59e7-40c9-88cf-6a992435f422`, SIGTERM
+pid 203752), but the service kept no durable shutdown record, so after the
+fact a planned restart and a crash produced the same visible evidence: a new
+pid and a watchdog `starting-service` line.
+
+`.local/service-lifecycle.jsonl` is append-only (2 MB rotation). The service
+writes `service_started` after listen, `shutdown_requested` before it closes
+on SIGINT/SIGTERM, `service_exited` from a synchronous exit handler with the
+exit code, and `service_fatal` for an uncaught exception. The heartbeat writes
+`restart_intent` BEFORE `process.kill(pid, 'SIGTERM')` and
+`restart_intent_cancelled` when the signal could not be dispatched, so a failed
+kill is never later credited as the cause of an unrelated exit.
+
+On startup the service classifies the previous run before writing its own
+start record:
+
+| classification | evidence |
+| --- | --- |
+| `planned_restart` | a `restart_intent` for that pid precedes the end |
+| `crash` | non-zero exit code or a recorded `service_fatal` |
+| `signal_shutdown_unattributed` | SIGINT/SIGTERM with no recorded intent |
+| `clean_exit_unattributed` | exit code 0 with no recorded intent |
+| `unrecorded_exit` | a newer run exists but the old one left no exit record |
+| `first_start` / `running` | no prior run / the latest run has not ended |
+
+`unrecorded_exit` is absence of evidence, not a crash verdict. The heartbeat
+raises `service_exit_unattributed` (warn, report-only, 24 h window) only for
+`crash`, `unrecorded_exit` and `signal_shutdown_unattributed`. Read it with:
+
+```
+node src/cli.js service-history [--limit N]
+node src/cli.js processes        # includes lifecycle.lastExit
+```
+
+### Ancestor guard
+
+The old guard read only the direct parent and disarmed when that parent was a
+shell. That is the normal shape of an MCP adapter launched through a wrapper:
+the shell is expected to exit, and the client is one or more levels above it.
+
+The guard now performs one bounded lookup of the ancestor chain, using
+PowerShell 7's `Process.Parent` (measured ~0.8 s on this host; Get-CimInstance
+measured >10 s and timed out, so CIM is only a Windows PowerShell 5.1
+fallback). It skips launchers (`bash.exe`, `cmd.exe`, `node.exe`, terminal
+hosts, ...) and session roots (`explorer.exe`, `services.exe`, ...), then
+anchors on the first stable ancestor's `pid + creation time`. Measured live:
+`bash.exe -> bash.exe -> bash.exe -> qoder.exe`, anchor `qoder.exe`.
+
+- Anchor death -> adapter closes (reason `anchor_process_gone`).
+- Same pid with a different creation time -> `anchor_identity_replaced`.
+- Three unreadable identity probes -> `passive`; the adapter stays registered
+  but no orphan decision is made. No stable ancestor -> `passive` too.
+- The mode, anchor and reason are written into the adapter registry record and
+  surfaced by `node src/cli.js processes` as `guardMode` / `guardAnchor`.
+
+`passive` is not protection. It is an explicit statement that the guard could
+not verify a stable ancestor, kept visible so it cannot be mistaken for an
+armed guard.

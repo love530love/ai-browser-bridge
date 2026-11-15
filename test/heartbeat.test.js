@@ -13,6 +13,7 @@ import {
   evaluateSnapshot, safeToAct, planRemediation, executeRemediation,
   runHeartbeat, createHeartbeatRunner
 } from '../src/heartbeat.js';
+import { readLifecycle } from '../src/service-lifecycle.js';
 
 const T0 = Date.parse('2026-11-06T15:00:00.000Z');
 const host = (over = {}) => ({
@@ -237,6 +238,56 @@ test('watch mode stops after maxCycles without launching a detached process', as
   assert.equal(results.length, 2);
   assert.ok(results.every(item => item.status === 'completed'));
   runner.stop();
+});
+
+test('an unattributed service exit is a finding; a planned restart is not', () => {
+  const at = new Date(T0 - 60000).toISOString();
+  const crash = evaluateSnapshot(snap({ disk: diskOk({ lifecycle: { lastExit: { classification: 'crash', at, pid: 1, exitCode: 1 } } }) }), null, { now: () => T0 });
+  const finding = crash.findings.find(item => item.code === 'service_exit_unattributed');
+  assert.ok(finding);
+  assert.equal(finding.action.kind, 'report_only');
+  assert.equal(finding.evidence.classification, 'crash');
+
+  const planned = evaluateSnapshot(snap({ disk: diskOk({ lifecycle: { lastExit: { classification: 'planned_restart', at, pid: 1 } } }) }), null, { now: () => T0 });
+  assert.ok(!planned.findings.some(item => item.code === 'service_exit_unattributed'));
+
+  const old = new Date(T0 - 25 * 3600000).toISOString();
+  const expired = evaluateSnapshot(snap({ disk: diskOk({ lifecycle: { lastExit: { classification: 'crash', at: old, pid: 1 } } }) }), null, { now: () => T0 });
+  assert.ok(!expired.findings.some(item => item.code === 'service_exit_unattributed'), 'the finding is bounded to a recent window');
+});
+
+test('a heartbeat restart writes its intent before dispatch and cancels on failure', async () => {
+  const dir = tempState();
+  await executeRemediation({ actions: [{ kind: 'build_restart', pid: 999, executed: true }] }, {
+    stateDir: dir, now: () => T0,
+    restartFn: async () => ({ ok: false, reason: 'kill_failed' })
+  });
+  const failed = readLifecycle(dir);
+  assert.deepEqual(failed.events.map(event => event.event), ['restart_intent', 'restart_intent_cancelled']);
+  assert.equal(failed.events[0].requestedBy, 'heartbeat');
+  assert.equal(failed.events[0].pid, 999);
+  assert.equal(failed.events[1].intentId, failed.events[0].intentId);
+
+  const dir2 = tempState();
+  await executeRemediation({ actions: [{ kind: 'build_restart', pid: 998, executed: true }] }, {
+    stateDir: dir2, now: () => T0,
+    restartFn: async () => ({ ok: true, pid: 998, method: 'SIGTERM' })
+  });
+  const dispatched = readLifecycle(dir2);
+  assert.deepEqual(dispatched.events.map(event => event.event), ['restart_intent']);
+});
+
+test('a full cycle records the restart intent in the ledger', async () => {
+  const dir = tempState();
+  const result = await runHeartbeat({
+    stateDir: dir, probe: async () => statusOk(), diskFacts: diskOk({ diskBuildId: 'build-b' }),
+    now: () => T0, remediate: true,
+    restartFn: async ({ pid }) => ({ ok: true, pid, method: 'SIGTERM', delegatedTo: 'watchdog' })
+  });
+  assert.ok(result.remediation.some(item => item.kind === 'build_restart' && item.outcome === 'dispatched'));
+  const ledger = readLifecycle(dir);
+  assert.equal(ledger.events[0].event, 'restart_intent');
+  assert.equal(ledger.events[0].intentId, result.remediation[0].actionId);
 });
 
 // ── Audit regressions (0.37.1) ───────────────────────────────────────────

@@ -27,11 +27,13 @@ import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
 import { clearExtensionErrors, describeErrorList, readExtensionErrors } from './extension-errors.js';
 import { readExtensionErrorJournal } from './extension-error-journal.js';
+import { buildErrorClaims } from './extension-error-claims.js';
 import { analyzeRequest, validateVerifySpec } from './request-risk.js';
 import { withNextStep, nextStepForError } from './next-step.js';
 import { toolIndex } from './tool-index.js';
 import { filterTabs } from './tab-filter.js';
 import { setDevToolsState } from './devtools-menu.js';
+import { recordLifecycle, summarizeLifecycleBeforeStart } from './service-lifecycle.js';
 import { lookupCredential, credentialOriginHash, CREDENTIAL_LOOKUP_CONFIRMATION } from './credential-store.js';
 import { revealSavedPassword, passwordManagerSiteHash, PASSWORD_MANAGER_CONFIRMATION } from './password-manager.js';
 import { runCertificateStore, CERTIFICATE_STORES } from './certificate-store.js';
@@ -119,7 +121,7 @@ function withContentBoundaries(result) {
   }
   return next;
 }
-export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true, browserTarget = config.browserTarget ?? null, uploadConfigPath = configPath } = {}) {
+export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true, browserTarget = config.browserTarget ?? null, uploadConfigPath = configPath, lifecycleStartup = null } = {}) {
   config = { ...config, uploadRoots: config.uploadRoots ?? [], uploadMaxBytes: config.uploadMaxBytes ?? DEFAULT_UPLOAD_MAX_BYTES };
   // Upload policy is read from disk on demand, cached by mtime. The old code
   // snapshotted config once at boot: `allow-upload-root` DID write the file,
@@ -467,6 +469,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     service: 'ai-browser-bridge',
     version: VERSION,
     buildId: BUILD_ID,
+    ...(lifecycleStartup ? { startup: lifecycleStartup } : {}),
     extensionVersion,
     extensionId,
     nativeHostName: NATIVE_HOST_NAME,
@@ -1490,8 +1493,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     delete journalView.entries;
     delete journalView.count;
     if (args.includePanel !== true) {
+      // Journal-only. `none_recorded` is absence of evidence, so the explicit
+      // claims object can never say the panel is clean without inspecting it.
+      const claims = buildErrorClaims({ journalState: journal.state, panelState: 'not_inspected' });
       return recordDesktopAudit('browser_extension_errors', { ...args, hostId: host?.hostId ?? args.hostId ?? null }, {
         ...journalView,
+        panelState: 'not_inspected',
+        claims,
         status: 'success',
         read: true,
         dispatched: false,
@@ -1519,11 +1527,16 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
           message: String(error?.message ?? error).slice(0, 200) };
       }
       const panelKnown = result.state === 'errors_present' || result.state === 'empty';
+      // Only a readable panel plus no recorded journal error is a clean claim.
+      // Every combination is an explicit enum so no caller has to infer that
+      // `none_recorded` was only an absence of evidence.
+      const claims = buildErrorClaims({ journalState: journal.state, panelState: result.state ?? 'unknown' });
       const enriched = {
         ...journalView,
         panelInspected: true,
         panelState: result.state ?? 'unknown',
         panelKnown,
+        claims,
         panel: result,
         state: panelKnown ? result.state : journal.state,
         hasErrors: panelKnown ? result.state === 'errors_present' : journal.hasErrors,
@@ -2323,8 +2336,45 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     };
   }
   
-  const bridge = createBridge(config, { audit: appendAuditLog, maintenanceStateFile: join(stateDir, 'maintenance.json') });
+  const startedAtMs = Date.now();
+  // Classify the previous run BEFORE writing our own start record. A planned
+  // heartbeat restart and a crash look identical from the outside otherwise.
+  const previousExit = summarizeLifecycleBeforeStart(stateDir);
+  const startRecord = recordLifecycle(stateDir, {
+    event: 'service_started', pid: process.pid, ppid: process.ppid,
+    buildId: BUILD_ID, version: VERSION, port: config.port, previousExit
+  });
+  const lifecycleStartup = startRecord
+    ? { at: startRecord.time, pid: process.pid, previousExit }
+    : { at: null, pid: process.pid, previousExit, ledgerUnwritable: true };
+  const lifecycleState = { reason: null };
+  process.once('exit', code => {
+    recordLifecycle(stateDir, {
+      event: 'service_exited', pid: process.pid, buildId: BUILD_ID, version: VERSION,
+      exitCode: Number.isInteger(code) ? code : null,
+      reason: lifecycleState.reason ?? 'process_exit',
+      uptimeMs: Date.now() - startedAtMs, startId: startRecord?.id ?? null
+    });
+  });
+  process.on('uncaughtException', error => {
+    lifecycleState.reason = 'uncaught_exception';
+    recordLifecycle(stateDir, {
+      event: 'service_fatal', pid: process.pid, reason: 'uncaught_exception',
+      message: String(error?.message ?? error).slice(0, 300)
+    });
+    console.error(error);
+    process.exit(1);
+  });
+
+  const bridge = createBridge(config, { audit: appendAuditLog, maintenanceStateFile: join(stateDir, 'maintenance.json'), lifecycleStartup });
   await bridge.listen();
   console.log(`AI Browser Bridge listening on 127.0.0.1:${config.port}`);
-  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => bridge.close().then(() => process.exit(0)));
+  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
+    lifecycleState.reason = `signal:${signal}`;
+    recordLifecycle(stateDir, {
+      event: 'shutdown_requested', pid: process.pid, signal,
+      buildId: BUILD_ID, uptimeMs: Date.now() - startedAtMs
+    });
+    bridge.close().then(() => process.exit(0));
+  });
 }

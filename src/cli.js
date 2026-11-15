@@ -17,6 +17,7 @@ import { listInstances, createInstance, removeInstance, enableInstance, disableI
 import { startInstance, stopInstance, statusInstance, listAllInstances, startAllInstances, stopAllInstances } from './instance-manager.js';
 import { listAdapters, pruneStaleAdapters } from './adapter-registry.js';
 import { isProcessAlive, probeParentName, SHELL_PARENT_NAMES } from './mcp-parent-guard.js';
+import { readLifecycle } from './service-lifecycle.js';
 
 async function rawToolCall(name, args) {
   return await request('/call', { name, arguments: args });
@@ -474,12 +475,24 @@ try {
         parentAlive,
         parentName,
         parentIsShell: parentName ? SHELL_PARENT_NAMES.has(parentName) : null,
-        orphanedCandidate: alive && !parentAlive && (!parentName || !SHELL_PARENT_NAMES.has(parentName))
+        guardMode: record.guard?.mode ?? null,
+        guardAnchor: record.guard?.anchor ?? null,
+        orphanedCandidate: alive && !parentAlive && (!parentName || !SHELL_PARENT_NAMES.has(parentName)) &&
+          record.guard?.mode !== 'active'
       };
     }));
     const output = {
       schema: 'ai-browser-bridge-processes-v1',
       checkedAt: new Date().toISOString(),
+      lifecycle: (() => {
+        const ledger = readLifecycle(stateDir, { limit: 20 });
+        return {
+          file: ledger.file,
+          lastExit: ledger.lastExit,
+          lastEventAt: ledger.events.at(-1)?.time ?? null,
+          totalRecorded: ledger.totalRecorded
+        };
+      })(),
       service: {
         pid: servicePid,
         alive: isProcessAlive(servicePid),
@@ -502,10 +515,33 @@ try {
       notes: [
         'Only processes this project registered are listed. No machine-wide name scan was performed.',
         'orphanedCandidate means the adapter is alive while its recorded parent is gone and the parent was not a shell/launcher. It is evidence for an operator decision, not an instruction to kill.',
+        'guard.mode is active when a stable ancestor (pid + creation time) is watched, and passive when no stable ancestor could be verified. passive is not protection; it is recorded so it is never mistaken for one.',
         'Registry files can be pruned with node src/cli.js adapters --prune --dry-run; no process is ever killed by this command.'
       ]
     };
     console.log(JSON.stringify(output, null, 2));
+  } else if (cmd === 'service-history') {
+    // Read-only lifecycle evidence. `planned_restart` is written by the
+    // heartbeat BEFORE it signals the pid; a missing intent is what makes an
+    // exit unattributed, so this command never guesses a cause.
+    const limitAt = rest.indexOf('--limit');
+    const limit = limitAt >= 0 ? Number(rest[limitAt + 1]) : 100;
+    if (!Number.isFinite(limit) || limit <= 0 || limit > 2000) throw new Error('--limit must be between 1 and 2000');
+    const ledger = readLifecycle(stateDir, { limit });
+    console.log(JSON.stringify({
+      schema: 'ai-browser-bridge-service-history-v1',
+      file: ledger.file,
+      count: ledger.count,
+      totalRecorded: ledger.totalRecorded,
+      lastExit: ledger.lastExit,
+      events: ledger.events,
+      unreadable: ledger.unreadable,
+      notes: [
+        'planned_restart means a heartbeat restart_intent covered that exit; it is not a crash.',
+        'unrecorded_exit means the run left no exit record: absence of evidence, not proof of a crash.',
+        'History begins when this ledger was introduced; earlier exits have no record here.'
+      ]
+    }, null, 2));
   } else if (cmd === 'runtime') {
     // Cross-device preflight. The bridge itself needs Node only; everything
     // else is an optional capability. Reporting them one by one stops a new
@@ -624,6 +660,6 @@ try {
       ? await raw()
       : await callWithWaitingRecovery({ name, args: parsed, rawCall: rawToolCall, maxWaitMs: Number(process.env.AIB_AUTO_WAIT_MS || 120000) });
     console.log(JSON.stringify(result, null, 2));
-  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | adapters [--stale-ms N] [--prune [--older-than-hours N] [--dry-run]] | processes | runtime | cdp-probe [--tab-id N] [--host-id ID] [--out FILE] | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | usage [--hours N] | upgrade-check | set-browser-target --from-running-chrome [--write]');
+  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | adapters [--stale-ms N] [--prune [--older-than-hours N] [--dry-run]] | processes | service-history [--limit N] | runtime | cdp-probe [--tab-id N] [--host-id ID] [--out FILE] | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | usage [--hours N] | upgrade-check | set-browser-target --from-running-chrome [--write]');
 } catch (e) { console.error(e.message); process.exitCode = 1; }
 

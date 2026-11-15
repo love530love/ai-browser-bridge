@@ -1,3 +1,32 @@
+## 0.42.3 — 2026-11-15（**退出可归因 / 祖先进程守卫 / 面板判定可机读**）
+
+触发：用户要求对 0.42.2 遗留的三条诚实边界「详细调查根因并永久解决」——回归窗口内旧服务退出原因未取证、wrapper-shell 父进程场景不武装守卫、`none_recorded` 是「无证据」而非「面板已清空」。
+
+### 根因
+
+- **18:04 旧服务退出不是崩溃**：`.local/heartbeat/incidents/2026-11-15T10-04-27-240Z-55831f65.md` 记录 verdict `critical`、findings `version_skew` + `build_stale`、remediation `build_restart`（actionId `06848c8f-59e7-40c9-88cf-6a992435f422`，SIGTERM pid 203752，`delegatedTo:"watchdog"`）；`.local/heartbeat/state.json` 的 `cooldowns.build_restart.at` 与 actionId 同源；`.local/watchdog.jsonl` 随后 `starting-service` → `connected`。这是心跳白名单的**计划重启**，不是未取证崩溃。此前服务没有持久退出记录，所以事后无法区分二者。
+- **wrapper-shell 守卫空窗**：旧守卫只读直接父进程名，遇到 `cmd.exe`/`bash.exe`/`node.exe` 等 launcher 就解除武装；而客户端经 wrapper 启动 adapter 是正常形态，导致会话失去孤儿保护。
+- **面板语义只写在说明里**：`includePanel:false` 时返回 `state:none_recorded`，虽然 `recommendedNextAction` 已注明「absence of evidence」，但结果里没有机读字段，调用方仍可能把它当作「面板干净」。
+
+### 交付
+
+- **生命周期账本**：新增 `src/service-lifecycle.js`，`.local/service-lifecycle.jsonl` 追加 `service_started` / `shutdown_requested` / `service_exited`（含退出码）/ `service_fatal` / `restart_intent` / `restart_intent_cancelled`。心跳在 SIGTERM **之前**写 intent 并带 actionId；服务启动先分类上一轮：`planned_restart`、`crash`、`signal_shutdown_unattributed`、`clean_exit_unattributed`、`unrecorded_exit`、`first_start`。`unrecorded_exit` 明确表示「没有退出记录」，不是「崩溃」。新增 `node src/cli.js service-history [--limit N]`；`processes` 与 `/status.startup` 携带 `previousExit`。
+- **心跳规则**：新增 `service_exit_unattributed`（warn，report-only，24h 窗口），只有 `crash` / `unrecorded_exit` / `signal_shutdown_unattributed` 才出现；计划重启不告警。
+- **祖先进程守卫**：`src/mcp-parent-guard.js` 改为一次读取完整祖先链（PowerShell 7 的 `Get-Process.Parent`，实测本机 ~0.8s；`Get-CimInstance` 本机 >10s 超时，仅作 Windows PowerShell 5.1 回退），跳过 shell/launcher 与会话根（`explorer.exe`、`services.exe` 等），锚定第一个稳定祖先的 `pid + creation time`。wrapper-shell 场景现在会武装到真实客户端（本机实测链：`bash.exe → bash.exe → bash.exe → qoder.exe`，anchor `qoder.exe` pid 132968）。同一 pid 复用由 creation time 识别；身份探测连续不可读 3 次降为 `passive`，不猜、不杀。无稳定祖先或链不可读时 `passive`，并写入 adapter registry 的 `guard` 字段，`processes` 可见。
+- **面板判定可机读**：新增 `src/extension-error-claims.js`，`browser_extension_errors` 两种路径都返回 `claims: {basis,panel,journal,overall,cleanClaim,note}`。`cleanClaim:true` 仅当面板实际读为空**且**日志窗口内无错误；journal-only 永远 `cleanClaim:false`；面板空但日志有历史错误返回 `journal_errors_panel_clean`。`none_recorded` 不再有任何路径可被解释为「面板已清空」。
+
+### 验收
+
+- 定向测试 60/60；新增 `test/service-lifecycle.test.js`、`test/extension-error-claims.test.js`，重写 `test/mcp-parent-guard.test.js`（wrapper 链、被动、pid 复用、瞬时探测失败）。
+- 全量 `npm test` → **930/930**（exit 0，约 146s）。
+- 真实链探测：`probeProcessChain(process.ppid)` 825ms，链含 3 层 `bash.exe` 后命中 `qoder.exe`，anchor 为 `qoder.exe`；不读命令行、不读环境变量。
+
+### 边界
+
+- 账本从本版开始有记录；此前的退出没有历史条目，只能用现存 incident/watchdog 证据回溯（18:04 已用上述证据归因为计划重启）。
+- `passive` 不是保护，只是「无法验证稳定祖先」的显式状态；adapter 仍可见，仍可能靠 EOF 退出。
+- 面板仍是唯一能证明「此刻为空」的来源；本版只保证不含糊其辞，不声称无窗口也能读到面板。
+
 ## 0.42.2 — 2026-11-15（**三条诚实边界根因修复 / 进程治理 / 读快车道 / 运行时预检**）
 
 触发：用户要求对 0.42.1 遗留的三条诚实边界「详细调查根因并永久解决」，并同时治理 MCP 进程生命周期、强化多 agent 优先级调度、评估 REA 等跨设备能力与常驻形态。

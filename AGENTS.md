@@ -70,6 +70,12 @@ Only two remediations are automated: restarting a service whose source build ide
 - Keep polling in the background. Never open the extension settings page as part of a retry or health check.
 - For multiple agents, always pass a stable agent identity and respect service leases.
 
+## Attributable exits and error-panel claims (0.42.3)
+
+- A service exit is not "unexplained" while the ledger can speak. `.local/service-lifecycle.jsonl` records `service_started` / `shutdown_requested` / `service_exited` / `service_fatal`, and the heartbeat records `restart_intent` before SIGTERM. Read `node src/cli.js service-history` before concluding a crash. `planned_restart` covers a heartbeat restart; `unrecorded_exit` means the run left no exit record (hard kill/power loss), which is absence of evidence, not proof of a crash. History starts with this version.
+- Adapter orphan protection anchors on the first stable ancestor (pid + creation time) after skipping shells/launchers and session roots. `guard.mode:"active"` is protection; `"passive"` means no stable ancestor could be verified and no orphan decision will be made. Both are visible in `node src/cli.js processes`; passive is never described as protected.
+- `browser_extension_errors` carries `claims`. `cleanClaim:true` requires the chrome://extensions panel to be read as empty **and** no journal error in the window. Journal-only results always have `cleanClaim:false`; `none_recorded` is absence of evidence, never "the panel is clear". `journal_errors_panel_clean` means the panel is empty now but earlier errors were recorded.
+
 ## AI-Assisted Discovery
 
 When `nextStep.aiAssisted === true` (returned by `nextStepFor` after all deterministic rules fail), use `browser_local_judge({mode: 'discovery', ...})` to obtain AI-powered page understanding, tool recommendation, and action guidance.

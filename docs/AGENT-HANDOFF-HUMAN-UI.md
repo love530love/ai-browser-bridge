@@ -4,6 +4,53 @@
 
 ## 目标
 
+## 2026-11-15 接手增量（0.42.3）：不可归因退出、wrapper-shell 守卫与面板声明语义
+
+触发：用户要求对 0.42.2 遗留的三条边界「详细调查根因并永久解决」：
+（1）回归窗口内旧进程退出原因未取证；（2）wrapper-shell 父进程场景不武装守卫；
+（3）`none_recorded` 是「无证据」而非「面板已清空」。证据与完整记录见
+[docs/ITERATION-20261115-0423.md](ITERATION-20261115-0423.md)。
+
+### 交付内容
+
+- **可归因退出（生命周期账本）**：新增 `src/service-lifecycle.js`，将
+  `service_started` / `shutdown_requested` / `service_exited` / `service_fatal` /
+  `restart_intent` / `restart_intent_cancelled` 追加写入 `.local/service-lifecycle.jsonl`
+  （2MB 轮转）。启动时 `summarizeLifecycleBeforeStart` 把上一次运行分类为
+  `planned_restart` / `crash` / `signal_shutdown_unattributed` / `clean_exit_unattributed` /
+  `unrecorded_exit` / `first_start` / `running`，并出现在 `/status.startup.previousExit`。
+- **信号前意图**：心跳的 `build_restart` 在发出 SIGTERM **之前**写入 `restart_intent`
+  （`intentId` 即 actionId，含 pid/方法/原因/运行与磁盘 buildId）；派发失败或异常写
+  `restart_intent_cancelled`。`node src/cli.js service-history [--limit N]` 回放账本；
+  `node src/cli.js processes` 附带 `lifecycle` 摘要。
+- **新告警规则**：心跳发现 `crash` / `unrecorded_exit` / `signal_shutdown_unattributed` 且
+  发生在 24h 窗口内时给出 `service_exit_unattributed`（warn，report-only，不自动重启）。
+- **wrapper-shell 守卫（祖先链锚点）**：`src/mcp-parent-guard.js` 改为沿
+  `Get-Process.Parent`（PowerShell 7，本机实测 825ms）向上跳过 shell/launcher 与会话根
+  （qoder、code、explorer 等），锚定第一个稳定祖先的 `pid + 创建时间`；身份读不到时进入
+  passive（`anchor_identity_unverifiable` / `process_chain_unavailable` / `no_stable_ancestor`），
+  绝不误判孤儿。adapter 注册表与 `processes` 暴露 `guard.mode/anchor/chain/reason`。
+- **面板声明语义**：新增 `src/extension-error-claims.js`。工具返回 `claims`
+  （`basis`/`panel`/`journal`/`overall`/`cleanClaim`/`note`）：只有「面板读取为空 **且** 审计日志
+  无错误」才 `cleanClaim:true`；仅查日志时 `panel:'not_inspected'`，永远不会被当作干净。
+
+### 验收状态（接手必复核）
+
+- 全量 `npm test` → **930/930**（exit 0，0 fail，约 161s，版本 0.42.3 下执行）。
+- 定向套件：`node --test test/service-lifecycle.test.js test/extension-error-claims.test.js
+  test/mcp-parent-guard.test.js test/heartbeat.test.js` → 60/60。
+- 真实链探测（本机）：`bash.exe ×3 → qoder.exe`，锚点 pid 132968，825ms。
+- 版本四处同步 0.42.2 → **0.42.3**；发布提交以 `git log` 为准。
+
+### 已知边界
+
+- 账本只能证明「本服务自己记录到的」退出；账本文件被外部删除后的首次启动记为
+  `first_start`，不追溯。
+- `signal_shutdown_unattributed` 只表示「无意图的 SIGTERM/SIGINT」，不指认发送者；
+  账本记录的是证据，不是归责。
+- 祖先链探测依赖 PowerShell；两者都不可用时守卫进入 passive，仍以注册表可见性为准。
+- 未启 Playwright/CDP 网关，未读 Chrome profile / Cookie / Login Data / Local State，未改 `browserTarget`。
+
 ## 2026-11-15 接手增量（0.42.2）：三条诚实边界根因修复、进程治理与优先级调度
 
 触发：用户要求把 0.42.1 的三条诚实边界「详细调查根因并永久解决」，并同时治理 MCP/守护进程生命周期、

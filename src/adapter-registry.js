@@ -36,7 +36,8 @@ export function createAdapterRegistry({
   ppid = process.ppid,
   argv = process.argv.slice(1),
   execPath = process.execPath,
-  cwd = process.cwd()
+  cwd = process.cwd(),
+  status = () => ({})
 } = {}) {
   const dir = adaptersDir(stateDir);
   const file = recordPath(dir, pid);
@@ -52,7 +53,8 @@ export function createAdapterRegistry({
     argv,
     cwd,
     startedAt,
-    heartbeatAt: new Date(now()).toISOString()
+    heartbeatAt: new Date(now()).toISOString(),
+    ...status()
   });
 
   function write() {
@@ -115,6 +117,7 @@ export function listAdapters({
         cwd: typeof value.cwd === 'string' ? value.cwd : null,
         startedAt: typeof value.startedAt === 'string' ? value.startedAt : null,
         heartbeatAt: typeof value.heartbeatAt === 'string' ? value.heartbeatAt : null,
+        guard: value.guard && typeof value.guard === 'object' ? value.guard : null,
         ageMs,
         stale: ageMs === null ? true : ageMs > staleMs
       });
