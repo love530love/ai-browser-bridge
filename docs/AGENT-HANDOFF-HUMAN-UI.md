@@ -4,6 +4,43 @@
 
 ## 目标
 
+## 2026-11-15 接手增量（0.40.0 → 0.42.0）：多宿主路由、错误列表只读判定与使用遥测
+
+本轮由 qoder 在 AEP 协作区完成，认领 `0420-*` 五项后已全部 `done` 并释放。提交：
+`d8307b0`（0.40.0 文档接管）、`5e75376`（0.41.0 P0：adapter 注册表、CDP 只读探针、Playwright 门禁）、
+`030a2bc`（0.42.0 功能集）、`62c7101`（read 分支作用域修复）、`7d0f40a`（心跳持久化 usage）。
+`main` 领先 `origin/main` 3 个提交，**未推送**。
+
+### 0.42.0 交付内容
+
+- **默认宿主纠偏**：`src/host-registry.js` 新增 `recommendHost`；`hostKindObserved` 在握手时从
+  socket owner 固化，瞬时 owner 查询失败不再翻转默认目标。`browser_hosts` 返回
+  `recommendedHostId / defaultHostId / selectionRequired / selectionConfidence / selectionReason`；
+  无 `hostId` 的命令跟随 `defaultHostId`，显式 `hostId` 永不迁移。真机：系统 Chrome
+  `h-0b47…`（generic，rank 10）为默认，ChatGPT 内嵌 `h-b76b…`（`agent_embedded`，rank 100）仍可显式到达。
+- **扩展错误列表只读判定**：新增 `scripts/read-extension-errors.ps1` 与 `src/extension-errors.js`，
+  `browser_extension_errors action:"read"` 返回 `state: errors_present | empty | unknown`，**绝不点
+  Clear all、绝不派发按键**；`empty` 必须同时满足地址栏核验、文档可读、无 Clear-all。真机曾实测
+  `empty`（0 条目、clearButtonPresent=false、addressVerified=true）。之后无可见 Chrome 窗口时如实返回
+  `unknown`，不当作干净；按契约也不为重试去打开扩展设置页。
+- **使用遥测**：audit 行携带 `hostId`；`node src/cli.js usage --hours N` 输出按工具/宿主的
+  p50/p95/max 与错误计数；心跳快照与 JSONL 行持久化 1 小时 usage 摘要（真机行已验证含
+  `commandRecords` 与 `byHost`）。
+- **文档**：`docs/MULTI-HOST-TARGETING.md`、`docs/FALLBACK-CHANNELS.md`、`docs/USAGE-TELEMETRY.md`、
+  `docs/AGENT-FIRST-STRATEGY-2026.md`、`docs/OPEN-SOURCE-CAPABILITY-RADAR.md`、`docs/PRODUCT-ROADMAP.md`
+  的 2026-11-15 段。CSDN 现场报告已脱敏后提交。
+
+### 验收状态（接手必复核）
+
+- `npm test` = **888/888**（单次全量）；`node src/cli.js heartbeat --no-remediate` 显示
+  `runningBuildId === diskBuildId === f80c613d…`。
+- 服务 0.42.0 已重启到最终构建；**扩展宿主仍是 0.41.0**，心跳 verdict 因此为 `critical`
+  （唯一发现 `version_skew`）。扩展重载需要当次明确授权，本轮未做。
+- 已知待决：Qoder MCP 仍缓存 0.41.0 的 `browser_extension_errors` schema（只有 `open`），需宿主重连/重启后
+  才能经 MCP 调用 `read`；CLI 直连服务已验证可用。
+- 雷达后续（未实现）：`browser_ocr` provider 接口（Indra 权重为 OpenRAIL-M，不可内置分发）、
+  `browser_visual_elements`、`browser_read mode:"main"`、弱 agent 引导扩展。
+
 ## 2026-11-03 接手增量（0.29.0）：一次真实登录暴露的 7 个缺陷
 
 输入是一次**真实登录失败**的复盘：调用方拿着正确密码，做了 9 次 observe、3 次误判，最后破坏了浏览器已填好的密码配对。
