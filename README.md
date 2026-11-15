@@ -4,7 +4,7 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.40.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.41.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 0.25.0 补的是**一闪而过、或者悬停才存在**的那层 UI。toast 活 2–3 秒，任何「等你问我的时候再扫一遍」都必然错过，所以 `browser_transient` 不是更快的扫描，而是扩展在 isolated world 里装一个常驻 `MutationObserver`，**在提示还在屏幕上时就记下来**：`read` 能查到已经消失的 toast（带 `firstSeenAt` / `goneAt` / `preExisting`），`watch` 等新的提示出现，`clear` 只清记录。tooltip 有两条路：声明式的（`title` / `data-tooltip` / `aria-describedby`）由 `browser_popup action:"probe"` 直接读；纯 CSS `:hover` 的只能让**真实指针**去问——合成 `mouseover` 不移动 `:hover` 状态，所以 `action:"reveal"` 走 CDP `Input.dispatchMouseEvent`，settle 之后再读新出现的浮层。popconfirm 看起来就是个普通按钮，点两次就删两次，所以 `action:"open"` 点一次并返回气泡里的按钮，`action:"choose"` 按 `choice:"confirm"|"cancel"` 或确切文本选，每个派发过点击的结果都是 `retryable:false`。tooltip 常挂在 `<span>`/图标上，`browser_find_element` 不会给 ref，因此 `browser_popup` 支持 `selector` 自己定位，`probe` 不带参数时还会列出全页声明了 tooltip 的元素。真机实测（Chrome 156）三处坑写进了代码：`el.textContent = x` 是替换文本节点而不是 `characterData` 变更（第一版因此漏掉全部 aria-live）；`visible()` 的 per-call 缓存会把「点击前不可见」记到「点击后」（`open` 因此误报 `not_opened`）；用几何距离猜「这个气泡属于哪个触发源」会认错爹（改成只认 `aria-expanded` + `aria-controls`，其余靠 `opened`/`closed_by_click`/`unchanged` 三态如实报告）。另外 `extension/worker.js` 有一行显式的工具分发白名单，新工具漏加就是真机 `Unknown command` 而 532 个单测全绿，所以加了一条静态测试直接读那行源码。
 
@@ -92,13 +92,13 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 ### 发布与版本管理
 
 - 发布历史：[GitHub Releases](https://github.com/love530love/ai-browser-bridge/releases)。源码与本机部署版本以 package.json 和 doctor 为准；推送提交不等于创建 Release。
-> **版本标记口径**：`package.json` / `extension/manifest.json` 的工程版本号（如 `0.40.0`）与部分历史文档、部署记录里的功能叙述版本号（如 `0.5.x`）是**两套并行标记，不能据数字大小判断代码新旧**，看起来像「降级」的快进也可能是正常升级。以 `git HEAD`、`buildId` 和 `doctor` 为准。此说明同样适用于 Release 页面。
+> **版本标记口径**：`package.json` / `extension/manifest.json` 的工程版本号（如 `0.41.0`）与部分历史文档、部署记录里的功能叙述版本号（如 `0.5.x`）是**两套并行标记，不能据数字大小判断代码新旧**，看起来像「降级」的快进也可能是正常升级。以 `git HEAD`、`buildId` 和 `doctor` 为准。此说明同样适用于 Release 页面。
 
 - 所有版本：[GitHub Releases](https://github.com/love530love/ai-browser-bridge/releases)
 - 版本号必须同时更新 `package.json`、`package-lock.json`、`extension/manifest.json` 和 `CHANGELOG.md`，再创建同名 Git tag 与 GitHub Release。
 - Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
 
-### 当前版本升级指南（0.40.0）
+### 当前版本升级指南（0.41.0）
 
 > **只 `git pull` 不等于升级完成。** 磁盘代码、运行中的服务进程、Chrome 里加载的扩展、`.local/config.json` 的新字段是四层独立状态；只更新第一层会出现「面板已连接、体检却跑在旧代码上」的假健康状态。
 
@@ -398,11 +398,12 @@ npm run test:native
 | `.local/runtime.json` · `.local/autostart-registry.json` | 固化的二进制路径与本次注册项清单，供诊断与卸载对账 |
 | `test/` | 服务测试和真实扩展端到端测试 |
 | `docs/AGENT-HANDOFF-20261115.md` | **当前接手入口**：0.40.0 状态快照、工作进度、待办计划（P0–P3）、审计工具箱、升级 SOP 与硬边界清单；数字需按文内命令复核 |
+| `docs/P0-ITERATION-20261115.md` | P0 三项实施记录：adapter 注册表、CDP 只读探针、Playwright 门禁；含测试计数、0.41.0 buildId、真机探针（`Target` 被拒 `-32000`）与两个宿主重载证据 |
 | `docs/HANDOFF.md` | 0.2.0 / 0.1.1 早期交接记录（**已过时**，顶部有指向当前入口的指针，仅供考古） |
 | `docs/KNOWN-LIMITATIONS.md` | **当前版本**的已知限制与硬边界：窗口可见性 / 不抢前台、CSP 双通道、调试横幅与 DevTools 互斥、宿主身份与内嵌 Chromium、累计计数不是瞬时状态 |
 | `docs/TROUBLESHOOTING-MATRIX.md` | 症状分诊矩阵（服务级 OK + 页面级超时 / 横幅 / 宿主误选），附现场报告哪些断言不能照抄的逐条源码反证 |
-| `docs/CDP-GATEWAY-PLAN.md` | CDP Gateway 可行性评估：**未实现、未 PoC、未授权**，列架构障碍与 5 条前置门槛 |
-| `docs/PLAYWRIGHT-FALLBACK-DECISION.md` | Playwright 旁路决策记录：用户授权范围、`AGENTS.md` 逐字冲突、PoC 门槛 0–5；**PoC 未执行、未通过、未获运行授权** |
+| `docs/CDP-GATEWAY-PLAN.md` | CDP Gateway 可行性评估：**网关未实现、未授权**，列架构障碍与 5 条前置门槛；只读探针已实现并单测，真机门槛 1–2 已执行（页级 `Target.getTargets` 被拒 `-32000`，`browserLevelEndpoint:false`） |
+| `docs/PLAYWRIGHT-FALLBACK-DECISION.md` | Playwright 旁路决策记录：用户授权范围、`AGENTS.md` 逐字冲突、PoC 门槛 0–5；**门禁脚本与本地 fixture 已实现并测试覆盖；live PoC 未执行、未通过、未获运行授权** |
 | `docs/LOCAL-EVIDENCE-20261114-runtime.md` | 0.40.0 本机只读取证：服务四证、CSDN 编辑器取证前提不成立、`browser_debugger` 必填 `tabId` 的真机反证 |
 | `docs/PROCESS-OWNERSHIP-AND-RUNTIME-DECISION.md` | 进程归属取证：第三方 MCP 实例与本桥**不同源**、按命令行认领进程；以及为何不改用 Python / Rust、脚本层最小稳定化路线 |
 | `skills/csdn-publish/` | CSDN 发布站点配方：`saveArticle` 只存草稿、真发布按钮与唯一成功判据、`simulation-button` 已证伪勿回退；含语言无关契约与 `snippets/`；**未在 Bridge 上重放验收** |

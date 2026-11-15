@@ -63,7 +63,7 @@
 
 | 路径 | 做法 | 必须先证伪/证实的门槛 | 现状 |
 |---|---|---|---|
-| **A. 扩展侧 CDP 子集翻译网关** | 桥暴露 WS，把收到的 CDP 命令映射到 `chrome.debugger.sendCommand` 或 `chrome.*` API | ① `Target` 域在扩展通道是否可用；② Playwright 能否在不改源码的情况下接受「只有 page target、无 browser 级 flatten 会话」；③ 事件（如 `Page.loadEventFired`）能否通过 `chrome.debugger.onEvent` 反向翻译 | 三条都无证据。最可能的结果是**只能做「够用的 RPC 代理」，不能冒充完整 CDP browser endpoint** |
+| **A. 扩展侧 CDP 子集翻译网关** | 桥暴露 WS，把收到的 CDP 命令映射到 `chrome.debugger.sendCommand` 或 `chrome.*` API | ① `Target` 域在扩展通道是否可用；② Playwright 能否在不改源码的情况下接受「只有 page target、无 browser 级 flatten 会话」；③ 事件（如 `Page.loadEventFired`）能否通过 `chrome.debugger.onEvent` 反向翻译 | ① 已有真机反证：0.41.0 页级会话中 `Target.getTargets` 被拒 `-32000`；②③ 仍无真机证据。结论仍是**只能做「够用的 RPC 代理」，不能冒充完整 CDP browser endpoint** |
 | **B. 原生消息宿主 + 独立调试配置** | 由本机进程拉起带 `--remote-debugging-port` 的 Chrome 供 Playwright 直连 | ① 默认配置能否开调试端口（报告主张不能，待本机复核）；② 独立配置必然丢登录态，是否接受；③ 与项目「绝不按注册表顺序取 chrome.exe」「`browserTarget` = stable/Default」的硬约定是否冲突 | 现场已用 `CSDN_Debug_Profile` + `--disable-extensions` 走通发布，但那是**绕过桥**，不是桥能力 |
 | **C. 继续走桥自身的工具层** | 不引入 Playwright 兼容层，缺什么能力就补一个 `browser_*` 工具（当前已有 125 个） | 是否需要「让第三方 CDP 客户端连进来」这个目标本身；若目标只是「把页面自动化做完」，这条路径成本最低且有回归保障 | 现行路线；新增工具须同步 `src/tools.js` / `src/tool-index.js` 与扩展侧分发表（`extension/worker.js` 主链，或 `extension/browser-authority.js:888` 的 `HANDLERS` 表经 `worker.js:829` 委托） |
 
@@ -81,6 +81,30 @@
 
 任一门槛不过，结论就写「此路径在现有架构下不成立」，而不是「调一调参数就能通」。
 
+### 4.1 2026-11-15 实施：只读探针（门槛 1–2 已单测并完成真机执行）
+
+新增 `browser_debugger action:"probe"`（`src/tools.js`、`extension/worker.js`、`extension/cdp-probe.js`）与 CLI 入口：
+
+```text
+node src/cli.js cdp-probe [--host-id ID] [--tab-id N] [--out FILE]
+```
+
+探针在有 http(s) 标签页的前提下，短暂 attach（或复用已开的 debugger 会话），依次询问 `chrome.debugger.getTargets()`、`Target.getTargets`、`Schema.getDomains`、`Page.getFrameTree`、`Runtime.evaluate("1+1")`、`Input.setIgnoreInputEvents(false)`、`Network.getCookies({urls:["https://example.invalid/"]})`。返回值只保留计数、域存在性、脱敏后的 scheme+host、`-32601`/refused 分类；**不返回 target URL、title、cookie 名值或页面文本**。`Runtime.evaluate` 只执行 `1+1`，`Network.getCookies` 只查一个无效域名，`Input.setIgnoreInputEvents` 写回默认 `false`。
+
+真机第一次尝试（2026-11-15 06:52Z，Chrome host `h-0b47a521c4384e90beb4`，tab `663195610`）返回 `status:"not_dispatched"` / `reason:"no_debugger_session"`。这不是 Target 域不可用，而是**扩展仍在运行旧 `cdp-session.js`**：旧分发先查会话、不认识 `probe`，因此没有 attach，也没有任何页面副作用。证据：`.local/cdp-probe-2026-11-15T06-52-01-509Z.json`。
+
+0.41.0 重载后重跑（2026-11-15 07:04Z，同一 host / tab）**探针已执行**：
+
+- `Target.getTargets` → **refused**，`-32000 Not allowed`（页级 debugger 会话不暴露浏览器级 `Target` 域）
+- `Schema.getDomains` → **unsupported**，`-32601 "'Schema.getDomains' wasn't found"`
+- `Page.getFrameTree`、`Runtime.evaluate("1+1")`、`Input.setIgnoreInputEvents(false)`、`Network.getCookies("https://example.invalid/")` → **accepted**
+- 因 `Target.getTargets` 无结果：`gate1:"inconclusive"`、`targetDomain:"unknown"`、`browserLevelEndpoint:false`
+- `chrome.debugger.getTargets()` 扩展 API 可用：32 targets（5 page / 17 worker / 10 other），attached 1
+
+证据：`.local/cdp-probe-2026-11-15T07-04-13-603Z.json`（只含 scheme+host，无 title、cookie 名值或页面文本）。
+
+⇒ **门槛 1–2 已执行，结论是「当前可用的页级 debugger 会话拿不到浏览器级 Target」**。这不证明 Chrome 不存在浏览器级 CDP，只证明路径 A 不能靠现状会话成立；继续推进需要独立网关 + 新端口 + 单独授权。单测覆盖：`test/cdp-probe.test.js` **5 项**（URL 脱敏、target 摘要、全命令成功、Target 不支持时记 `-32601`、`getTargets` 缺失不阻断其余命令）。
+
 ---
 
 ## 5. 与项目硬边界的交叉检查
@@ -97,6 +121,8 @@
 | 日期 | 决定 | 依据 |
 |---|---|---|
 | 2026-11-14 | 用户确认「只落文档」；本文件作为**评估**归档，**不**启动网关开发、**不**改 `src/` / `extension/` | 报告基于 0.39.0 现场，多条建议与 0.40.0 源码不符；架构障碍 §2 未做 PoC |
+| 2026-11-15 | 实现只读 `probe` 与 CLI，**不实现网关**；门槛 1–2 的真机执行待扩展重载授权 | 用户授权「三项都开始修复并迭代」；探针只读、单测全绿；旧扩展返回 `no_debugger_session`，未 attach |
+| 2026-11-15 | 用户授权「升级本机浏览器扩展并推送和发布版本号」；两个宿主已重载到 **0.41.0**，真机门槛 1–2 完成，**仍不实现网关** | 页级 `Target.getTargets` 被拒 `-32000`、`Schema.getDomains` `-32601`；其余 4 命令 accepted；`browserLevelEndpoint:false` |
 
 后续若要推进，先按 §4 的 1–2 两条做**只读举证**，把结果回写本文件，再重新向用户确认范围。
 

@@ -1,3 +1,34 @@
+## 0.41.0 — 2026-11-15（**P0-1 可观测性 / P0-3 只读探针 / P0-2 门禁 + 本机扩展升级与发布**）
+
+触发：用户 **「三项都由你开始修复并迭代试试」**，范围为 `docs/AGENT-HANDOFF-20261115.md` 的 P0 三项。AEP 四个 claim（ADAPTER / CDP-PROBE / PLAYWRIGHT / RELEASE）均 ALLOWED。随后用户明确 **「升级本机浏览器扩展并推送和发布版本号」**：据此按 `hostId` 重载两个宿主、四处升版 0.41.0、提交推送与发版。完整证据见 `docs/P0-ITERATION-20261115.md`。
+
+### 交付（7 新增 + 11 修订）
+
+- **P0-1 新增** `src/adapter-registry.js`（原子写 `stateDir/mcp-adapters/<pid>.json`、15s 心跳、退出删除）+ `test/adapter-registry.test.js`（5 项）；**修订** `src/mcp.js`（启动登记、EOF/close/EPIPE/exit 撤销）、`src/cli.js`（`adapters [--stale-ms] [--prune …]`）、`test/mcp-lifecycle.test.js`（真实子进程：服务中登记、EOF 后消失）。
+- **P0-3 新增** `extension/cdp-probe.js`（`Target.getTargets` / `Schema.getDomains` / `Page.getFrameTree` / `Runtime.evaluate("1+1")` / `Input.setIgnoreInputEvents` / 无效域 `Network.getCookies`；URL 只留 scheme+host）+ `test/cdp-probe.test.js`（5 项）；**修订** `src/tools.js`（`browser_debugger` 增加 `action:"probe"`）、`extension/worker.js`（probe 分支）、`src/cli.js`（`cdp-probe [--host-id] [--tab-id] [--out]`，脱敏证据落 `.local/`）。
+- **P0-2 新增** `poc/playwright-fallback/gate-check.mjs`（默认只做门禁、不导入 Playwright；实时复探桥；临时 profile + `127.0.0.1` fixture；精确确认串）+ `test/playwright-gate.test.js`（6 项）。
+- **文档**：新增 `docs/P0-ITERATION-20261115.md`；修订 `docs/PROCESS-LIFECYCLE.md`、`docs/PROCESS-OWNERSHIP-AND-RUNTIME-DECISION.md`、`docs/CDP-GATEWAY-PLAN.md`、`docs/PLAYWRIGHT-FALLBACK-DECISION.md`、`README.md`（索引 +1 行、两行描述更新）、`CHANGELOG.md`（本段）。
+- **升版 / 发布**：`package.json`、`extension/manifest.json`、`package-lock.json` 顶层与 `packages[""].version` 四处同步为 **0.41.0**；提交、push、tag `v0.41.0` 与 GitHub Release。
+
+### 实测
+
+- **全量 `npm test` 882/882 通过**（`node --test --test-concurrency=1 test/*.test.js`，exit 0，0 fail，131s）；`verify-success.mjs --self-test` **7/7**。
+- 四处升版 0.40.0 → **0.41.0**；buildId `f0bf52f9…b94c` → **`6b29c09228f456a46924eef660ad69e18ab26ce18387aff3c54913c14b2a4e44`**；经允许清单 `build_restart` 重启服务；两个宿主按 `hostId` 用 `chrome.runtime.reload()` 重载，均 `verified:true` / `expectedVersion:"0.41.0"` / `focusRequired:false`。
+- 重载后 `status`：`version 0.41.0` / buildId 一致 / `extensionVersion 0.41.0`；两次 heartbeat `4cdd5cde-…` / `8655d4e9-…` 均 `clean` + `provenClean:true`，`hostCount:2`；`doctor` `ok:true`、`service-build-current:true`、`queued:0`。
+- 真机 `cdp-probe`（Chrome host `h-0b47a521c4384e90beb4`，tab `663195610`）**已执行**：`Target.getTargets` refused `-32000 Not allowed`；`Schema.getDomains` unsupported `-32601`；`Page.getFrameTree` / `Runtime.evaluate("1+1")` / `Input.setIgnoreInputEvents(false)` / `Network.getCookies(example.invalid)` accepted；`gate1:"inconclusive"`、`targetDomain:"unknown"`、`browserLevelEndpoint:false`。证据 `.local/cdp-probe-2026-11-15T07-04-13-603Z.json`。
+- Playwright 门禁在 0.41.0 复跑仍拒绝：`gate0:"not_met"`、`reason:"bridge_reachable"`、`httpStatus:401`、`playwrightStarted:false` ⇒ 未启动、未创建 profile、未碰默认浏览器。
+- 两次扩展重载均 `partial:true`：reload 本身已 `verified`，但错误列表因 `no_chrome_window` 未清除（Chrome 与 ChatGPT 宿主都没有可见窗口）。状态是「未知」，不写成「已清空」。
+
+### 边界 / 待决
+
+- 已按用户授权重载两个宿主；未改 `browserTarget`、未开调试端口 / CDP 网关、未克隆或解析 Chrome profile、未读 `Cookies` / `Login Data` / `Local State` / `.tmp-cred.txt`、未杀未验证进程。
+- Playwright 未启动、未创建 profile、未连接任何浏览器。
+- P0-1 残余缺口（宿主活着且不关管道）**变为可观测但未自动关闭**；父进程判活 / 空闲超时仍需单独决策。
+- 扩展错误列表未清除（`no_chrome_window`），不作为 clean 证据；不重复 reload。
+- 发现 `coordination/PROJECT-POLICY.md` 基线仍写 `0.37.2 / 58d4539`，已过时；不在 claim 范围，未修改。
+
+---
+
 ## 0.40.0 文档增补 4 — 2026-11-15（**接手交接：进度 / 计划 / 审计入口；纯文档，无版本升级**）
 
 触发：用户问「写交接文档和工作进度和计划了吗？以便其他 agent 可以接手审计和完善升级」。复核后确认：此前有 AAR、CHANGELOG、三份决策文档与 README 索引，但**没有一份面向「其他 agent 接手」的当前状态快照 + 待办计划 + 审计入口**；`docs/HANDOFF.md` 停留在 0.2.0，`docs/AGENT-HANDOFF-HUMAN-UI.md` 是逐版本历史增量且正被其他 agent 并行修改。

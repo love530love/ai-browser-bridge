@@ -52,3 +52,26 @@ through a shell wrapper may have a parent that exits immediately, so that check
 would kill healthy adapters. An idle timeout would kill long-lived but valid
 sessions. Any change here needs an explicit decision and a real child-process
 boundary test (`test/mcp-lifecycle.test.js`).
+
+## Adapter registry (2026-11-15)
+
+The inventory gap now has an observability fix, not a kill policy. Every stdio
+adapter started from the current source writes `stateDir/mcp-adapters/<pid>.json`
+on start and refreshes it every 15 seconds (`AIB_ADAPTER_HEARTBEAT_MS` overrides
+the interval for tests). The record carries `pid`, `ppid`, `execPath`, `argv`,
+`cwd`, `startedAt` and `heartbeatAt`; the same process removes it on graceful
+shutdown, including the EOF/EPIPE path in `src/mcp.js`.
+
+`node src/cli.js adapters` reads that directory and reports `fresh` versus
+`stale` by heartbeat age; it sets `liveness: "not_checked"` on purpose. A stale
+heartbeat means "nobody refreshed this file", not "this pid is dead", so the
+inventory neither signals nor kills anything. `--prune` deletes only registry
+files older than `--older-than-hours` (default 24) and never touches a process;
+`--dry-run` reports what it would delete.
+
+The original gap is therefore **observable, not closed**: a client that stays
+alive with open pipes still keeps its adapter. Closing that needs a separate
+decision and the parent-identity/launch-method evidence described above.
+Regressions: `test/adapter-registry.test.js` (record, heartbeat refresh,
+fresh/stale inventory, age-gated prune, real child process) and the extended
+`test/mcp-lifecycle.test.js` (record exists while serving, gone after EOF).

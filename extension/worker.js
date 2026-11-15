@@ -6,6 +6,7 @@ import { captureDevtools, createTabSubscription } from './cdp-capture.js';
 import { readStorage, writeStorage } from './cdp-storage.js';
 import { replayRequest, fetchRequest, readVerifyValue, verifyRequest } from './cdp-replay.js';
 import { createSessionManager } from './cdp-session.js';
+import { runCdpProbe } from './cdp-probe.js';
 import { createCdpAdvanced } from './cdp-advanced.js';
 import { createClipboard } from './clipboard.js';
 import { createNavigationAudit } from './navigation-audit.js';
@@ -1339,6 +1340,19 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     }
     if (action === 'close') return await debuggerSessions.close({ tabId: tab.id });
     if (action === 'list') return { status: 'success', sessions: debuggerSessions.list() };
+    if (action === 'probe') {
+      if (tab.pendingUrl && tab.pendingUrl !== tab.url) throw new Error('Navigation in progress. Wait and read again.');
+      if (!/^https?:/i.test(tab.url)) {
+        return { status: 'denied', retryable: false, reason: 'probe_requires_http_tab', dispatched: false,
+          message: 'The probe needs an http(s) page tab. A chrome:// or extension page cannot carry a debugger session.' };
+      }
+      const reused = Boolean(debuggerSessions.activeSend(tab.id));
+      return await withTabDebugger(tab, send => runCdpProbe({
+        tab, send, channel: reused ? 'reused_session' : 'one_off_attach',
+        getTargets: () => chrome.debugger.getTargets(),
+        userAgent: self.navigator?.userAgent ?? ''
+      }));
+    }
     return await debuggerSessions.call({ tabId: tab.id, action, args });
   }
   if (name === 'browser_screenshot') {

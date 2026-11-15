@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { configPath, loadConfig, ROOT, stateDir } from './config.js';
 import { request } from './client.js';
 import { callWithWaitingRecovery } from './auto-recovery.js';
@@ -15,6 +15,7 @@ import { createDesktopAdapter } from './desktop-adapter.js';
 import { usageSummary } from './usage-summary.js';
 import { listInstances, createInstance, removeInstance, enableInstance, disableInstance } from './instance-config.js';
 import { startInstance, stopInstance, statusInstance, listAllInstances, startAllInstances, stopAllInstances } from './instance-manager.js';
+import { listAdapters, pruneStaleAdapters } from './adapter-registry.js';
 
 async function rawToolCall(name, args) {
   return await request('/call', { name, arguments: args });
@@ -375,6 +376,64 @@ try {
     } else {
       throw new Error('Usage: node src/cli.js instance list | add [NAME] | remove NAME | start NAME | stop NAME | start-all | stop-all | status NAME');
     }
+  } else if (cmd === 'cdp-probe') {
+    // Gate 1-2 evidence only. This never opens a CDP port, never starts a
+    // browser and never connects Playwright; it asks the existing extension
+    // channel what it answers and saves the sanitized reply under .local/.
+    const flags = rest.slice(1);
+    const flagValue = flag => { const index = flags.indexOf(flag); return index >= 0 ? flags[index + 1] : null; };
+    const tabRaw = flagValue('--tab-id');
+    const tabId = tabRaw === null ? null : Number(tabRaw);
+    if (tabId !== null && (!Number.isSafeInteger(tabId) || tabId < 1)) throw new Error('--tab-id must be a positive integer');
+    const hostId = flagValue('--host-id');
+    const outFlag = flagValue('--out');
+    const tabs = await rawToolCall('browser_tabs', hostId ? { hostId } : {});
+    const tabsPayload = tabs?.result ?? tabs;
+    const rows = Array.isArray(tabsPayload) ? tabsPayload : Array.isArray(tabsPayload?.tabs) ? tabsPayload.tabs : Array.isArray(tabsPayload?.result) ? tabsPayload.result : [];
+    const eligible = rows.filter(row => row && row.restricted !== true && /^https?:\/\//i.test(row.url ?? ''));
+    const target = tabId === null ? eligible[0] : rows.find(row => row.id === tabId);
+    if (!target) throw new Error(tabId === null ? `No http(s) tab is available${hostId ? ` on host ${hostId}` : ''}. Open one, pass --tab-id, or route with --host-id.` : `Tab ${tabId} is not in the visible tab list${hostId ? ` on host ${hostId}` : ''}.`);
+    if (target.restricted === true || !/^https?:\/\//i.test(target.url ?? '')) throw new Error(`Tab ${target.id} is not a readable http(s) tab; the probe needs one.`);
+    const response = await rawToolCall('browser_debugger', { tabId: target.id, action: 'probe', ...(hostId ? { hostId } : {}) });
+    const result = response?.result ?? response;
+    const evidence = {
+      schema: 'ai-browser-bridge-cdp-probe-v1',
+      createdAt: new Date().toISOString(),
+      requestedTabId: tabId,
+      hostId: hostId ?? null,
+      // The probe result already carries a redacted origin; the raw tab url and
+      // title are deliberately not copied into evidence.
+      selectedTabId: target.id,
+      result
+    };
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const evidenceFile = outFlag ?? join(stateDir, `cdp-probe-${stamp}.json`);
+    mkdirSync(dirname(evidenceFile), { recursive: true });
+    writeFileSync(evidenceFile, JSON.stringify(evidence, null, 2), { mode: 0o600 });
+    console.log(JSON.stringify({
+      evidenceFile,
+      tabId: target.id,
+      status: result?.status ?? null,
+      verdict: result?.verdict ?? null,
+      sideEffects: result?.sideEffects ?? []
+    }, null, 2));
+    if (result?.status !== 'success') process.exitCode = 1;
+  } else if (cmd === 'adapters') {
+    // Read-only by default. --prune only deletes this registry's own record
+    // files, never a process, and never a record younger than the given age.
+    const flags = rest.slice(1);
+    const flagValue = flag => { const index = flags.indexOf(flag); return index >= 0 ? flags[index + 1] : null; };
+    const staleRaw = flagValue('--stale-ms');
+    const staleMs = staleRaw === null ? undefined : Number(staleRaw);
+    if (staleMs !== undefined && (!Number.isFinite(staleMs) || staleMs < 0)) throw new Error('--stale-ms must be a non-negative number');
+    if (flags.includes('--prune')) {
+      const hoursRaw = flagValue('--older-than-hours');
+      const hours = hoursRaw === null ? 24 : Number(hoursRaw);
+      if (!Number.isFinite(hours) || hours < 0) throw new Error('--older-than-hours must be a non-negative number');
+      console.log(JSON.stringify(pruneStaleAdapters({ stateDir, olderThanMs: hours * 3600000, dryRun: flags.includes('--dry-run') }), null, 2));
+    } else {
+      console.log(JSON.stringify(listAdapters({ stateDir, ...(staleMs === undefined ? {} : { staleMs }) }), null, 2));
+    }
   } else if (cmd === 'heartbeat') {
     // Continuous inspection is a separate command so an operator or a scheduler
     // can run one cycle without starting a daemon. --watch is opt-in and is
@@ -419,6 +478,6 @@ try {
       ? await raw()
       : await callWithWaitingRecovery({ name, args: parsed, rawCall: rawToolCall, maxWaitMs: Number(process.env.AIB_AUTO_WAIT_MS || 120000) });
     console.log(JSON.stringify(result, null, 2));
-  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | upgrade-check | set-browser-target --from-running-chrome [--write]');
+  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | adapters [--stale-ms N] [--prune [--older-than-hours N] [--dry-run]] | cdp-probe [--tab-id N] [--host-id ID] [--out FILE] | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | upgrade-check | set-browser-target --from-running-chrome [--write]');
 } catch (e) { console.error(e.message); process.exitCode = 1; }
 

@@ -73,6 +73,8 @@ NODE_OLDER_THAN_12H=4
 
 **可选加固（需用户单独授权）**：① adapter 启动/退出登记到 `.local/`，让巡检**按命令行**精确识别而不是按 `node` 名字；② 父进程身份 + 启动方式双证齐备后才考虑存活检测；③ 加固必须带真实边界回归（范例 `test/mcp-lifecycle.test.js`）。
 
+**2026-11-15 进展**：① 已实现（`src/adapter-registry.js` + `node src/cli.js adapters`，只读清单、心跳新鲜度、不做 ppid 判活/空闲超时/杀进程）；③ 已附 `test/adapter-registry.test.js` 真实子进程回归并扩展 `test/mcp-lifecycle.test.js`。② **未做**，残余缺口变为可观测但未自动关闭。详见 [P0-ITERATION-20261115.md](P0-ITERATION-20261115.md) 与 [PROCESS-LIFECYCLE.md](PROCESS-LIFECYCLE.md) 的 Adapter registry 节。
+
 给外部回收器的硬规则（`docs/PROCESS-LIFECYCLE.md:5` 已有）：**不要把所有 Node 进程当重复项按名字杀**。本桥唯一的常驻进程是带 `src\server.js` 命令行的那一个。
 
 ### 1.5 宿主分支归因（用户补充证据 + 本机复核）

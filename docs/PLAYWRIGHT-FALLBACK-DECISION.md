@@ -50,6 +50,36 @@
 
 本轮附加的、尚未取证的前提：`docs/LOCAL-EVIDENCE-20261114-runtime.md` §4 显示当前桥返回的标签清单为空，**不存在 CSDN 编辑器标签**，因此连「在真实编辑器上复现现场现象」这一前提也不成立。
 
+### 4.1 2026-11-15 实施：门禁脚手架（门 0 仍然不成立，未启动 Playwright）
+
+新增 `poc/playwright-fallback/gate-check.mjs`。默认模式只做门禁判定，**不导入 Playwright**：
+
+```text
+node poc/playwright-fallback/gate-check.mjs \
+  --bridge-unavailable-evidence <file> \
+  --authorization-scope "<这次具体授权的通道>" \
+  --confirm-scope playwright-temporary-profile-local-fixture
+```
+
+门禁同时要求：① 现场重新探测 `/status` 失败（不是只看证据文件）；② 证据文件符合 `ai-browser-bridge-unavailable-evidence-v1`，`service.reachable:false` 且至少一条失败尝试；③ 非空 scope，且 scope 不涉及 default profile / cookies / login data；④ 精确确认串（明确标注为**调用方自证，不是独立人工认证**）。任一不满足即 `gate0:"not_met"` 并以非零退出。
+
+2026-11-15 06:52Z 的实际运行结果：
+
+```json
+{"allowed":false,"gate0":"not_met","reason":"bridge_reachable",
+ "defaultProfileTouched":false,"playwrightStarted":false,
+ "live":{"reachable":true,"httpStatus":401},
+ "message":"The bridge answered /status. A fallback PoC is not authorized while the authoritative channel works."}
+```
+
+`401` 是鉴权预期结果，但已证明 19387 有服务应答，因此**门 0 的「桥不可用」前提不成立**，本轮没有启动 Playwright、没有创建 profile、没有连接任何浏览器。
+
+0.41.0 复跑（2026-11-15 07:05Z）结果相同：`allowed:false` / `reason:"bridge_reachable"` / `httpStatus:401` / `playwrightStarted:false`；扩展升级与版本发布没有改变门 0 的结论。
+
+`--launch` 路径即使在全部门禁通过后也只支持**临时 profile + 本地 fixture**：没有 URL、profile 或调试端口参数，启动 `launchPersistentContext(mkdtemp(...))`，访问 `127.0.0.1` 的本地页面，点击一个按钮并把观察写入 `.local/playwright-poc-*.json`；证据里明确写 `defaultProfileTouched:false` 与 `doesNotProve`（默认配置登录态 / CDP endpoint / 桥能力）。单测覆盖：`test/playwright-gate.test.js` 6 项（健康桥拒绝、状态未知、证据缺失/错误 schema/未显示不可用/无失败尝试、scope 与确认串、实时复探优先于证据文件）。
+
+
+
 ## 5. 决策记录
 
 | 日期 | 决定 | 依据 |
@@ -57,6 +87,7 @@
 | 2026-11-14 | 用户「以上都做」→ 交付本决策文档、PoC 门槛、语言无关契约与站点配方修订；**PoC 未执行、未通过、未获运行授权** | `AGENTS.md:10/12/16/17/19/20`；四证全通；`CDP-GATEWAY-PLAN.md` §2/§4 |
 | 2026-11-14 | **不引入嵌入式 Python 到基座** | 项目运行时零 Python 依赖；真实阻滞在外部发布链路，属契约剥离问题 |
 | 2026-11-14 | **不照抄** Qoder 的第 5 条通道建议进仓库 skill | 与 `AGENTS.md:10/12/16` 冲突；产品方向「不设能力禁区」不允许把单次观察写成永久禁区 |
+| 2026-11-15 | 实现门禁脚手架与本地 fixture 启动器；**live PoC 仍未运行、未授权** | 用户授权「三项都开始修复并迭代」；实测桥可达（401）⇒ 门 0 不成立；启动路径只有临时 profile + 本地 fixture |
 
 ## 6. 若下一轮要真正推进 PoC，最小步骤
 
