@@ -186,6 +186,8 @@ test('the read-only error-list verdict never clicks and never claims clean witho
   // Wiring: action:"read" is answered locally, before any extension dispatch.
   assert.match(serverSource, /name === 'browser_extension_errors' && args\.action === 'read'/);
   assert.match(serverSource, /readExtensionErrors\(/);
+  assert.match(serverSource, /recordDesktopAudit\('browser_extension_errors'/,
+    'the read branch has no handleCall-scope name; it must pass the literal tool name');
   const toolsSource = readFileSync(new URL('../src/tools.js', import.meta.url), 'utf8');
   assert.match(toolsSource, /enum: \['open', 'read'\]/, 'the tool schema must expose the read action');
 });

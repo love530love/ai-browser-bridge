@@ -1397,7 +1397,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
             ? 'The list was read as empty on a verified chrome://extensions page with a readable document. This is evidence from the page, not an inference from a reload.'
             : 'The list state is unknown and nothing was clicked. Open the error page in this same host with browser_extension_errors action:"open", then read again. Do not report the panel as clean.'
       };
-      return recordDesktopAudit(name, { ...args, hostId: host?.hostId ?? args.hostId ?? null }, enriched, startedAt);
+      return recordDesktopAudit('browser_extension_errors', { ...args, hostId: host?.hostId ?? args.hostId ?? null }, enriched, startedAt);
     } finally { desktopOperation = null; }
   }
 
