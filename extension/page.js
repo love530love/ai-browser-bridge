@@ -65,7 +65,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   // freeze with an overlay still intercepting clicks. Say so on every write.
   const throttledInfo = () => document.visibilityState !== 'visible'
     ? { throttled: true, visibilityState: document.visibilityState,
-      nextStep: 'Document is hidden, so timers are throttled and CSS leave animations may never finish. Use browser_windows_control to activate the window before the next write, then re-observe instead of retrying blindly.' }
+      nextStep: 'Document is hidden, so timers are throttled and CSS leave animations may never finish. Do not activate the window for automation: DOM and CDP writes keep working in the background. Re-observe, or wait with a bounded timeout, instead of retrying blindly. Activate the window only when the user explicitly wants to watch it.' }
     : { throttled: false, visibilityState: document.visibilityState };
   // CNIPA P1-1/P1-6: a click can report clicked:true while absolutely nothing
   // happens. These are the effects observable from the page world. Downloads and

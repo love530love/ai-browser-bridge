@@ -4,6 +4,42 @@
 
 ## 目标
 
+## 2026-11-15 接手增量（0.42.1）：后台优先、零抢焦点与高并发实测
+
+触发：用户要求高并发下稳定，且 Chrome 在后台、人类正在操作其他软件时，自动化不得抢屏幕或打断人。
+获得「开发和检验期间完全授权更新重载扩展」的当次授权；本轮据此重载了两个宿主并在最小化窗口上做了实测。
+
+### 交付内容
+
+- **隐藏文档指引纠偏**：`extension/page.js` 的 `throttledInfo` 原先把「用 `browser_windows_control`
+  激活窗口再写」当作建议，与本项目的前台契约冲突。现改为有界超时 + 重新观察，明确 DOM/CDP 在后台照常工作，
+  且 rAF 不触发、定时器节流、CSS 离场动画可能永不结束。
+- **后台并发实测**：新增 `test/background-concurrency.js` / `npm run test:background`。3 个后台 tab
+  （`active:false`）、30 路混合并发（读数/查找/健康/截图/填表/点击）、同 tab 突发写（6 读 + 普通重复写 +
+  `allowRepeat:true` 写）。断言逐 tab 无串扰、重复抑制为安全拒绝、`allowRepeat:true` 可派发；
+  结束时用 PowerShell 读取 OS 前台窗口 identity 与 Chrome 窗口 `focused/state`，断言前后不变。
+- **静态回归**：`test/browser-diagnostics.test.js` 锁定隐藏文档指引不得包含抢焦点话术，并校验
+  `test:background` 接线、前台探针存在、脚本内不出现 `active: true`。
+- **文档**：`docs/FALLBACK-CHANNELS.md` §7 后台优先与前台预算；`AGENTS.md` Background-first 契约；
+  `README.md` 版本、升级指南与能力条目；`CHANGELOG.md` 0.42.1。
+
+### 验收状态（接手必复核）
+
+- `npm run test:focus` → **25/25**，Chrome 窗口最小化且未聚焦。
+- `npm run test:background` → **51/51**；OS 前台窗口前后均为
+  `{"handle":3541526,"pid":113140,"process":"Qoder"}`，Chrome 窗口保持 `minimized / focused:false`。
+- 全量 `npm test` → **890/890**（exit 0，0 fail，约 170s）。
+- 版本四处同步 0.42.0 → **0.42.1**；升级后需重启服务到新 buildId 并重载每个宿主，
+  再跑一次 `test:background` 作为部署后复验。
+
+### 已知边界
+
+- 重复抑制指纹不读取输入值；页面可见变化但指纹未变时仍可能返回 `duplicate_suppressed`，
+  此时显式 `allowRepeat:true`，不要把它当失败自动重放。
+- 前台动作仍然是显式白名单：`browser_history activate`、`browser_extension_errors open`、
+  `browser_windows_control focused:true`、剪贴板/UIA 的 `allowFocus:true`。常规任务前台变更应为 0。
+- 未改 `browserTarget`，未启动 Playwright/CDP 写入网关，未读 Chrome profile / Cookie / Login Data / Local State。
+
 ## 2026-11-15 接手增量（0.40.0 → 0.42.0）：多宿主路由、错误列表只读判定与使用遥测
 
 本轮由 qoder 在 AEP 协作区完成，认领 `0420-*` 五项后已全部 `done` 并释放。提交：

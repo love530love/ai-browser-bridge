@@ -81,7 +81,34 @@ browser_health → browser_hosts → browser_tabs → browser_observe/browser_re
 
 当前状态：门禁脚本与契约测试已实现；live PoC **未运行、未通过、未获运行授权**。详见 [PLAYWRIGHT-FALLBACK-DECISION.md](PLAYWRIGHT-FALLBACK-DECISION.md)。
 
-## 7. 失败语义
+## 7. 后台优先与前台预算（0.42.1）
+
+默认契约：**自动化在后台完成，不抢屏幕、不夺焦点、不打断宿主机上的人。**
+Chrome 可以最小化、可以被其他窗口完全遮挡，DOM 注入（`chrome.scripting.executeScript`）与 CDP 通道照常工作。
+
+| 操作 | 前台行为 |
+| --- | --- |
+| `browser_open` | 默认 `active:false`；只有显式 `active:true` 才激活 tab |
+| `browser_navigate` / 回读 / 查找 / 截图 | 不激活窗口 |
+| `browser_history action:"activate"` | 显式前台动作，调用方声明后才切 tab |
+| `browser_extension_errors action:"open"` | 显式前台动作 |
+| `browser_windows_control focused:true` | 显式前台动作 |
+| 剪贴板 / UIA 重载 | 仅在 `allowFocus:true` 时请求前台 |
+
+隐藏文档的已知物理限制与正确应对：
+
+- `requestAnimationFrame` 不触发，CSS 离场动画可能永不结束 → 使用有界超时 + 重新观察，不要为了等动画去激活窗口；
+- 定时器被节流 → 按 `throttled` / `visibilityState` 诊断处理，不盲目重试；
+- `Page.captureScreenshot` 在纯隐藏 tab 上可能长时间等待 → 走封装好的 screencast 预热路径；
+- `Page.bringToFront` 会抢 tab 前台，默认路径不使用。
+
+前台预算：一次常规任务的前台变更次数应为 **0**。只有两类例外——用户明确要求观看过程，或目标是无 DOM 表面的内部页且调用方已获得 `allowFocus` 授权。`_verified` 写操作在后台 tab 上同样有效，不需要先激活窗口；重新观察即可确认结果。
+
+同页重复写保护：相同写在页面状态未变时 8 秒内返回 `status:"duplicate_suppressed"`（`dispatched:false`），是安全拒绝而非失败；确需重复时显式传 `allowRepeat:true`。指纹只取页面状态与目标元素，不读取输入值。
+
+实测证据（`npm run test:focus` / `npm run test:background`）：最小化且未聚焦的 Chrome 上 25 项原语全部通过；3 个后台 tab、30 路混合并发、同 tab 突发写共 51 项断言通过，OS 前台窗口 identity（handle/pid/process）与 Chrome 窗口 `focused/state` 前后不变。
+
+## 8. 失败语义
 
 | 结果 | 含义 | 允许动作 |
 | --- | --- | --- |
@@ -92,13 +119,13 @@ browser_health → browser_hosts → browser_tabs → browser_observe/browser_re
 | `unsupported` / `not_implemented` | 能力缺口 | 换阶梯或报告，不假装完成 |
 | `failed` | 有证据的失败 | 按 `retryable` 与 `nextStep` 处理 |
 
-## 8. 多宿主与旁路
+## 9. 多宿主与旁路
 
 - 旁路通道也必须绑定同一个目标浏览器/窗口；不能因为主通道失败就换到另一个浏览器；
 - UIA 以 PID/HWND 绑定；CDP 以 tab target 绑定；Playwright 只允许临时 profile + fixture；
 - 任何通道的结果都要回写 `hostId`（适用时）与证据字段，便于 `usage`/`heartbeat` 归因。
 
-## 9. 验收清单
+## 10. 验收清单
 
 1. 主通道可用时，旁路不得启动（门禁脚本 `playwrightStarted:false`）。
 2. 多宿主场景：无 `hostId` 命令落到推荐宿主；显式宿主掉线返回 `waiting`。

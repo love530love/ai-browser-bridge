@@ -25,6 +25,25 @@ test('a fill never waits on a frame that a hidden document will not paint', () =
   assert.match(page, /settleMode/, 'how the wait ended is evidence and must be reported');
 });
 
+test('hidden-document guidance never tells the caller to steal the foreground', () => {
+  // Background writes are a supported path, verified live by
+  // test/background-concurrency.js. Advice to raise the window would interrupt
+  // the human and is exactly what the background contract forbids.
+  assert.doesNotMatch(page, /browser_windows_control to activate the window before the next write/);
+  assert.match(page, /Do not activate the window for automation/);
+  assert.match(page, /DOM and CDP writes keep working in the background/);
+});
+
+test('the live background test is wired and measures the OS foreground', () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const script = readFileSync(new URL('./background-concurrency.js', import.meta.url), 'utf8');
+  assert.equal(pkg.scripts['test:background'], 'node test/background-concurrency.js');
+  assert.match(script, /GetForegroundWindow/, 'the test must measure the real OS foreground window');
+  assert.match(script, /active: false/, 'test tabs must be opened without activation');
+  assert.doesNotMatch(script, /active: true/, 'the test must never activate its tabs');
+  assert.match(script, /allowRepeat: true/, 'the repeated-click escape hatch must be covered');
+});
+
 test('both finders compute the not-rendered diagnostic on a miss', () => {
   const calls = page.match(/notRenderedDiagnostic\(\)/g) || [];
   assert.ok(calls.length >= 2, `expected a call per finder, found ${calls.length}`);

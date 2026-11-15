@@ -39,6 +39,15 @@ Run `node src/cli.js heartbeat` for a single inspection cycle, or read the lates
 
 Only two remediations are automated: restarting a service whose source build identity is stale (through the watchdog), and reloading an extension that is behind (per `hostId`). Both require a completely idle service, cooldown, a single-instance lock and a re-check. Everything else - a lost host, a stuck in-flight command, a stale lease, an unreadable extension error list - is reported with evidence and left to you: the bridge will not replay an unknown write, launch a GUI, steal focus, or move an explicitly routed task to another browser. Never describe an `uncertain` result as clean or fixed. For usage-level evidence (per-tool/per-host latency, error categories, uncertain counts), run `node src/cli.js usage --hours N`; the heartbeat snapshot also carries a 1-hour aggregate. These aggregates contain no page text, URLs or credentials.
 
+## Background-first and the focus budget (0.42.1)
+
+- The default contract is that automation runs in the background: Chrome may be minimized or fully occluded by the human's other apps, and DOM injection plus CDP keep working. Do not activate windows or tabs to make automation succeed.
+- `browser_open` defaults to `active:false`, navigation never activates a tab, and `browser_screenshot` captures hidden tabs through the screencast path. A normal task should make **zero** foreground changes.
+- The only explicit foreground actions are `browser_history {action:"activate"}`, `browser_extension_errors {action:"open"}`, `browser_windows_control {focused:true}`, and `allowFocus:true` on clipboard or UIA reload. Use them only when the human asked to watch, or when a DOM-less internal page needs UIA and the caller has authorization.
+- Hidden documents do not paint: `requestAnimationFrame` never fires and timers are throttled, so CSS leave animations may hang. Wait with a bounded timeout, re-observe, and never "fix" it by bringing the window forward.
+- Verified writes are valid in background tabs; re-observe to confirm instead of focusing. Duplicate suppression (`status:"duplicate_suppressed"`, `dispatched:false`) is a safety refusal, not a failure; pass `allowRepeat:true` only when a repeat is genuinely intended.
+- Evidence commands: `npm run test:focus` and `npm run test:background`. See [docs/FALLBACK-CHANNELS.md](docs/FALLBACK-CHANNELS.md) §7.
+
 ## Action rules
 
 - Use `browser_prepare_action` and `browser_find_element` before clicks, fills, selections, uploads, or downloads.
