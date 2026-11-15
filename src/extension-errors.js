@@ -67,6 +67,52 @@ export async function clearExtensionErrors(target = {}, { platform = process.pla
   });
 }
 
+// Read-only sibling of clearExtensionErrors. Same target resolution and the
+// same one-process reload, but the Clear all control is only observed. This is
+// what makes "the panel is red" / "the panel is empty" an evidenced verdict
+// instead of "unknown because no window was reachable".
+export async function readExtensionErrors(target = {}, { platform = process.platform, timeoutMs = 45000 } = {}) {
+  if (platform !== 'win32') return { status: 'unavailable', reason: 'platform_unsupported', state: 'unknown', hasErrors: null, dispatched: false, retryable: false };
+  const processId = target?.processId;
+  const windowHandle = target?.windowHandle;
+  const hasProcess = processId !== undefined;
+  const hasHandle = windowHandle !== undefined;
+  if (hasProcess && !(Number.isSafeInteger(processId) && processId > 0)) throw new Error('Exact process required');
+  if (hasHandle && !(Number.isSafeInteger(windowHandle) && windowHandle > 0)) throw new Error('Exact window required');
+  const executable = (process.env.PATH ?? '').split(delimiter).map(p => join(p.replace(/^"|"$/g, ''), 'pwsh.exe')).find(existsSync);
+  if (!executable) return { status: 'unavailable', reason: 'powershell7_unavailable', state: 'unknown', hasErrors: null, dispatched: false, retryable: false };
+  const script = fileURLToPath(new URL('../scripts/read-extension-errors.ps1', import.meta.url));
+  const args = ['-NoProfile', '-NonInteractive', '-File', script];
+  const extensionId = typeof target?.extensionId === 'string' && /^[a-p]{32}$/.test(target.extensionId)
+    ? target.extensionId : resolveBridgeExtensionId().extensionId;
+  args.push('-ExtensionId', extensionId);
+  if (hasProcess) args.push('-ChromeProcessId', String(processId));
+  if (hasHandle) args.push('-ChromeWindowHandle', String(windowHandle));
+  return new Promise(resolve => {
+    let output = '';
+    let settled = false;
+    let timer;
+    const done = result => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
+    const failed = (reason, retryable) => ({ status: 'failed', reason, state: 'unknown', hasErrors: null, dispatched: false, retryable });
+    const child = spawn(executable, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    timer = setTimeout(() => { child.kill(); done(failed('read_extension_errors_timeout', true)); }, timeoutMs);
+    child.stdout.on('data', chunk => {
+      output += chunk.toString('utf8');
+      if (output.length > 200000) { child.kill(); done(failed('read_extension_errors_output_limit', false)); }
+    });
+    child.on('error', () => done(failed('read_extension_errors_spawn_failed', true)));
+    child.on('close', code => {
+      if (settled) return;
+      try {
+        if (code !== 0) throw Error();
+        const value = JSON.parse(output);
+        if (typeof value?.status !== 'string') throw Error();
+        done({ ...value, dispatched: false, retryable: value.retryable === true });
+      } catch { done(failed('read_extension_errors_invalid_result', false)); }
+    });
+  });
+}
+
 // What the caller is told about the error list, decided in one place so that
 // "the reload succeeded" and "the red list is gone" can never be confused.
 //

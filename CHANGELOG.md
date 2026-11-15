@@ -1,3 +1,31 @@
+## 0.42.0 — 2026-11-15（**多宿主默认路由 / 错误列表只读判定 / 使用遥测 / 战略文档**）
+
+触发：用户要求「不设能力边界」的浏览器操控基座，区分本机多个 Chrome 类浏览器与 Agent 内置浏览器，增加心跳/使用统计用于实战验收，并调研开源页面解析与元素识别能力。本轮在不删除既有能力的前提下增加可观测性与目标认定。
+
+### 交付
+
+- **多宿主目标认定**：`src/host-registry.js` 新增 `recommendHost()`（系统 Chrome 优先、`generic` 次之、`agent_embedded` 最后；含 `selectionRequired` / `confidence` / `reason` / `candidates`）；握手持久化 `hostKindObserved`；`src/server.js` 新增 `defaultTargetHostId()`，无 `hostId` 的排队与派发跟随推荐宿主，`browser_hosts` 返回 `recommendedHostId` / `defaultHostId` / `selectionRequired` / `selectionReason`；显式 `hostId` 仍永不迁移。新增 `test/multi-host.test.js` 回归（内嵌宿主先连接也不会截获无 `hostId` 命令）。
+- **扩展错误列表只读判定**：新增 `scripts/read-extension-errors.ps1` 与 `readExtensionErrors()`；`browser_extension_errors` 新增 `action:"read"`，只观察不点 `Clear all`，返回 `state: errors_present|empty|unknown`、地址/文档/Clear all 证据与 `dispatched:false`；`empty` 必须同时具备地址栏验证、可读文档与控件缺失证据。真机结果：`state:"empty"`、0 条错误、地址栏已验证、未 reload、未抢前台。
+- **使用遥测**：`src/usage-summary.js` 新增 `byTool` / `byHost` / `slowestTools`（p50/p95/max、错误、uncertain），无 `hostId` 的行归入 `unrecorded` 并附说明；`src/cli.js` 新增 `usage [--hours N]`；审计行（命令、桌面、拒绝、扩展错误）统一携带 `hostId`；心跳 `readDiskFacts` 携带 1 小时 usage 聚合。无页面内容、URL、Cookie 或凭据。
+- **文档**：新增 `docs/AGENT-FIRST-STRATEGY-2026.md`、`docs/FALLBACK-CHANNELS.md`、`docs/MULTI-HOST-TARGETING.md`、`docs/USAGE-TELEMETRY.md`、`docs/OPEN-SOURCE-CAPABILITY-RADAR.md`；更新 `docs/PRODUCT-ROADMAP.md`（2026-11-15 转向）、`README.md`、`AGENTS.md`（无 `hostId` 跟随推荐宿主）、`coordination/PROJECT-POLICY.md`。
+
+### 实测
+
+- 全量 `npm test` **887/887 通过**（exit 0，0 fail，约 143s）。
+- 受影响套件 `multi-host` / `extension-errors` / `usage-summary` / `heartbeat` → **61/61 通过**。
+- 四处版本同步 0.41.0 → **0.42.0**（`package.json`、`extension/manifest.json`、`package-lock.json` 顶层与 `packages[""]`）；buildId `6b29c092…b2a4e44` → **`86f8787fe1989ee49597f8c596a3902c26099d65fa0834362b96d7f0c863f287`**。
+- `node src/cli.js usage --hours 2` 实测返回命令记录、错误、服务启动次数与每工具 p50/p95。
+- 真机只读错误列表：`addressVerified:true`、`documentVisible:true`、`clearButtonPresent:false`、`pageReloadPerformed:false`。
+
+### 边界
+
+- 未改 `browserTarget`，未启动 Playwright/CDP 网关，未读 Chrome profile / Cookie / Login Data / Local State / `.tmp-cred.txt`。
+- Playwright live PoC 仍未运行；CDP 写入网关仍未实现。
+- `frequentRestarts` 是提示性阈值，不等于崩溃；`uncertain` 不等于 clean。
+- 全量回归、升版与运行服务激活见后续发布步骤。
+
+---
+
 ## 0.41.0 — 2026-11-15（**P0-1 可观测性 / P0-3 只读探针 / P0-2 门禁 + 本机扩展升级与发布**）
 
 触发：用户 **「三项都由你开始修复并迭代试试」**，范围为 `docs/AGENT-HANDOFF-20261115.md` 的 P0 三项。AEP 四个 claim（ADAPTER / CDP-PROBE / PLAYWRIGHT / RELEASE）均 ALLOWED。随后用户明确 **「升级本机浏览器扩展并推送和发布版本号」**：据此按 `hostId` 重载两个宿主、四处升版 0.41.0、提交推送与发版。完整证据见 `docs/P0-ITERATION-20261115.md`。

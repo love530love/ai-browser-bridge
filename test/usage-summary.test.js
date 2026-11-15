@@ -23,6 +23,35 @@ test('usage separates mirrored errors and detects recovery churn within its wind
   assert.equal(summary.exitCause, 'unknown'); assert.ok(!JSON.stringify(summary).includes('PRIVATE'));
 });
 
+test('usage attributes commands to tools and hosts and reports latency percentiles', t => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-usage-'));
+  t.after(() => rmSync(root, { recursive:true, force:true }));
+  mkdirSync(join(root, 'logs'));
+  const now = Date.parse('2026-11-15T12:00:00Z');
+  const at = offset => new Date(now - offset).toISOString();
+  const rows = [
+    { time: at(5000), tool: 'browser_read', hostId: 'h-a', outcome: 'ok', durationMs: 10 },
+    { time: at(4000), tool: 'browser_read', hostId: 'h-a', outcome: 'ok', durationMs: 20 },
+    { time: at(3000), tool: 'browser_read', hostId: 'h-a', outcome: 'ok', durationMs: 30 },
+    { time: at(2000), tool: 'browser_read', hostId: 'h-a', outcome: 'ok', durationMs: 40 },
+    { time: at(1000), tool: 'browser_click', hostId: 'h-b', outcome: 'error', errorCategory: 'ELEMENT_COVERED', durationMs: 100 },
+    { time: at(500), tool: 'browser_click', outcome: 'ok' }
+  ];
+  writeFileSync(join(root, 'logs/audit.jsonl'), rows.map(JSON.stringify).join('\n'));
+  const summary = usageSummary(root, now);
+  assert.equal(summary.commandRecords, 6);
+  assert.equal(summary.byTool.browser_read.records, 4);
+  assert.equal(summary.byTool.browser_read.p50Ms, 20);
+  assert.equal(summary.byTool.browser_read.p95Ms, 40);
+  assert.equal(summary.byTool.browser_click.errors, 1);
+  assert.equal(summary.byHost['h-a'].records, 4);
+  assert.equal(summary.byHost['h-b'].errors, 1);
+  assert.equal(summary.byHost.unrecorded.records, 1, 'rows without hostId must stay visibly unrecorded');
+  assert.match(summary.hostTelemetryNote, /host attribution is unknown/);
+  assert.equal(summary.slowestTools[0].tool, 'browser_click');
+  assert.equal(usageSummary(root, now, { windowHours: 12 }).windowHours, 12);
+});
+
 test('missing and malformed evidence remains visible', t => {
   const root = mkdtempSync(join(tmpdir(), 'bridge-usage-'));
   t.after(() => rmSync(root, { recursive:true, force:true }));

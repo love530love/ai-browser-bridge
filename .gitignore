@@ -34,3 +34,15 @@ test/bench/last-run.json
 # so both are install artefacts rather than source.
 native-host/aibridge-host.bat
 native-host/com.aibridge.host.json
+
+# AEP collaboration area: machine-local multi-agent coordination state (mailbox, claims,
+# leases, workspace marker). Shared over disk, not over git - the same convention
+# agent-evolution-protocol uses for its own root. Never a product source file.
+/.aep/workspace.json
+/coordination/*
+/.aep-kernel/
+/AEP_JOIN.md
+# The policy is the one hand-written file in that tree: machine-independent and not
+# regenerable by `aep workspace-init`, so it is project config rather than local state.
+# Git cannot re-include a file under a wholly ignored directory, hence `/coordination/*`.
+!/coordination/PROJECT-POLICY.md

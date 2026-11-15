@@ -4,7 +4,27 @@
 
 评价标准不是工具数量，而是能否用一句话委托目标、选到正确执行表面、完成操作并验证结果，以及在页面/浏览器/权限拒绝时给出可恢复状态。
 
-## 当前源码候选：0.5.24（2026-10-27）
+## 2026-11-15 当前转向与已落地增量
+
+当前源码版本以 `package.json` 与 `git HEAD` 为准（2026-11-15 为 0.41.0，本文新增条目随下一次升版发布）。以下条目是**当前方向**；更早的 0.5.x 章节保留为历史记录，其中“当前版本/候选验收”等表述已过时。
+
+- **Agent 优先战略**：见 [AGENT-FIRST-STRATEGY-2026.md](AGENT-FIRST-STRATEGY-2026.md)。目标是最强、最稳的浏览器操控基座：能力开放、弱 Agent 可走确定性最小路径、模型完全可选、证据可审计。
+- **多宿主目标认定**：`browser_hosts` 新增 `recommendedHostId` / `defaultHostId` / `selectionRequired` / `selectionReason`；无 `hostId` 命令跟随推荐宿主，系统 Chrome 优先于 `generic`，`agent_embedded` 排最后；显式 `hostId` 永不迁移。见 [MULTI-HOST-TARGETING.md](MULTI-HOST-TARGETING.md)。
+- **扩展错误列表只读判定**：`browser_extension_errors action:"read"` 只观察不点击，返回 `state: errors_present|empty|unknown`，`empty` 必须有地址栏与文档证据。真机验证结果为 `empty`（0 条、Clear all 不存在、地址栏已验证）。
+- **本地遥测**：审计行携带 `hostId`；`node src/cli.js usage --hours N` 输出每工具/宿主 p50/p95、错误与不确定计数；心跳快照携带 1 小时 usage 摘要。见 [USAGE-TELEMETRY.md](USAGE-TELEMETRY.md)。
+- **旁路门禁**：CDP 只读探针、UIA、视觉、Playwright 门禁的进入条件与失败语义统一记录在 [FALLBACK-CHANNELS.md](FALLBACK-CHANNELS.md)。
+- **开源能力雷达**：OCR、页面元素识别、正文提取的许可证与复刻优先级见 [OPEN-SOURCE-CAPABILITY-RADAR.md](OPEN-SOURCE-CAPABILITY-RADAR.md)；默认不捆绑模型权重。
+
+### 下一阶段优先级（2026-11-15 起）
+
+1. `browser_ocr` provider 接口（`indra-node|rapidocr|tesseract|external`），默认不下载权重。
+2. `browser_visual_elements`：移植非文本 CV 元素检测，补 Canvas/图片页定位。
+3. `browser_read mode:"main"`：移植 Readability 正文提取，保留证据边界。
+4. 弱 Agent 指引并入 `browser_capabilities` / `nextStep`，以真实失败样本回归。
+5. CDP 网关与 Playwright live PoC 仍需独立授权与现场验收。
+
+
+## 历史阶段：0.5.24 源码候选（2026-10-27，已过时）
 
 0.5.22 是已验证的上一个完整部署基线；0.5.23 加入停靠 DevTools UIA 阶段（已撤下 open/F12），0.5.24 加入 CDP 只读捕获 `browser_devtools_capture`。两者都仍处于**候选验收**，未重新部署。此前运行服务曾加载过 DevTools 候选，而本轮随后修改了策略热加载实现，故服务 build ID 需要重新核对/维护部署；Chrome 加载扩展仍为 0.5.22，`doctor` 的版本匹配检查未通过。不要把源码版本、服务版本和扩展版本混称为已完成发布。`npm run doctor` 检查版本、连接、构建摘要和工具 schema；它不证明每项业务能力已完成现场验收。验证范围见 [部署记录](DEPLOYMENT-2026-10-26.md)。
 

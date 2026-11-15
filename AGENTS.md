@@ -29,7 +29,7 @@ Do not start Playwright, Puppeteer, Selenium, CDP, or a second browser-control b
 
 Several browsers may hold an extension connection at the same time: system Chrome, Canary/Dev and agent-embedded browsers are peers. None is closed for connecting, and a stalled browser no longer blocks the others. Call `browser_hosts` first when more than one host is connected; it returns every `hostId`, its protocol/extension/Chrome version, capability hints, socket owner and in-flight command.
 
-Pass optional `hostId` on **any** tool to bind that command and its tab lease to one browser. Tab ids are only unique inside one browser, so two hosts can both have tab 7. Omitting `hostId` uses the primary host for backward compatibility. Pass `commandId` on writes whose outcome may be uncertain: resending the same id replays the recorded outcome instead of dispatching a second write.
+Pass optional `hostId` on **any** tool to bind that command and its tab lease to one browser. Tab ids are only unique inside one browser, so two hosts can both have tab 7. Omitting `hostId` follows the `defaultHostId` reported by `browser_hosts`: system Chrome is preferred over `generic`, and `agent_embedded` hosts rank last. When `selectionRequired` is true, do not guess — inspect the candidates and pass `hostId` explicitly. Pass `commandId` on writes whose outcome may be uncertain: resending the same id replays the recorded outcome instead of dispatching a second write.
 
 If a named host disconnects, the result is `waiting` with `reason:"host_not_connected"` and a `browser_hosts` next step. Do not silently retry against a different browser. Capability flags (`features`, `hostKind`, `hostKindObserved`) are hints for choosing a route; they are never a refusal, and no tool closes a connection because the host is not chrome.exe. Report what you observed; the agent decides what is safe.
 
@@ -37,7 +37,7 @@ If a named host disconnects, the result is `waiting` with `reason:"host_not_conn
 
 Run `node src/cli.js heartbeat` for a single inspection cycle, or read the latest `.local/heartbeat/incidents/*.md` when a scheduler reports a non-zero exit. A `clean` verdict requires build identity, version, connection and zero findings to all be evidenced; anything else is `uncertain`, never healthy. Findings are debounced across three cycles and host changes are compared by `hostId`, not through the primary mirror.
 
-Only two remediations are automated: restarting a service whose source build identity is stale (through the watchdog), and reloading an extension that is behind (per `hostId`). Both require a completely idle service, cooldown, a single-instance lock and a re-check. Everything else - a lost host, a stuck in-flight command, a stale lease, an unreadable extension error list - is reported with evidence and left to you: the bridge will not replay an unknown write, launch a GUI, steal focus, or move an explicitly routed task to another browser. Never describe an `uncertain` result as clean or fixed.
+Only two remediations are automated: restarting a service whose source build identity is stale (through the watchdog), and reloading an extension that is behind (per `hostId`). Both require a completely idle service, cooldown, a single-instance lock and a re-check. Everything else - a lost host, a stuck in-flight command, a stale lease, an unreadable extension error list - is reported with evidence and left to you: the bridge will not replay an unknown write, launch a GUI, steal focus, or move an explicitly routed task to another browser. Never describe an `uncertain` result as clean or fixed. For usage-level evidence (per-tool/per-host latency, error categories, uncertain counts), run `node src/cli.js usage --hours N`; the heartbeat snapshot also carries a 1-hour aggregate. These aggregates contain no page text, URLs or credentials.
 
 ## Action rules
 
@@ -121,3 +121,9 @@ Before starting or resuming browser-platform work:
 ## Copyable task preamble
 
 "Use the AI Browser Bridge MCP tool chain for this browser task. Begin with browser_health, browser_tabs, and browser_observe. Read the page before acting. Use the bridge's prepare/find/verify tools for every action, preserve queued tasks when the result is waiting, and never fall back to Playwright or open extension settings unless the bridge is unavailable and I explicitly authorize it."
+
+<!-- AEP JOIN START -->
+# Agent Evolution Protocol
+
+If you are an AI agent opened in this workspace, first read `AEP_JOIN.md` and join the collaboration. Do not create a new session by default; use digest-first handoff, claim before writes, and guided retry after failures.
+<!-- AEP JOIN END -->

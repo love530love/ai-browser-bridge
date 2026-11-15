@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  HEARTBEAT_DEFAULTS, parseHeartbeatArgs, collectSnapshot, readAuditWindows,
+  HEARTBEAT_DEFAULTS, parseHeartbeatArgs, collectSnapshot, readAuditWindows, readDiskFacts,
   evaluateSnapshot, safeToAct, planRemediation, executeRemediation,
   runHeartbeat, createHeartbeatRunner
 } from '../src/heartbeat.js';
@@ -477,4 +477,19 @@ test('a real HTTP status reply with a historical gap never becomes a leak', asyn
     server.closeAllConnections?.();
     await new Promise(resolve => server.close(resolve));
   }
+});
+
+test('disk facts carry an aggregate usage summary, never the raw row detail', () => {
+  const stateDir = tempState();
+  mkdirSync(join(stateDir, 'logs'), { recursive: true });
+  writeFileSync(join(stateDir, 'logs/audit.jsonl'), JSON.stringify({
+    time: new Date(T0 - 1000).toISOString(), tool: 'browser_read', hostId: 'h-a',
+    outcome: 'ok', durationMs: 12, detail: 'PRIVATE-PAGE-TEXT'
+  }) + '\n');
+  const facts = readDiskFacts(undefined, stateDir, T0);
+  assert.equal(facts.usage.windowHours, 1);
+  assert.equal(facts.usage.commandRecords, 1);
+  assert.equal(facts.usage.byHost['h-a'].records, 1);
+  assert.ok(!JSON.stringify(facts.usage).includes('PRIVATE-PAGE-TEXT'),
+    'the usage summary is aggregate counters only, not a copy of audit rows');
 });

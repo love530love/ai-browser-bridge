@@ -16,7 +16,7 @@ import { createLeaseStore } from '../src/leases.js';
 import {
   HostRegistry, CommandLedger, negotiateHandshake, pickDispatchable,
   scopeKey, parseScopeKey, compareVersions, featureFlagsFor, isValidHostId,
-  SERVICE_PROTOCOL_VERSION
+  recommendHost, SERVICE_PROTOCOL_VERSION
 } from '../src/host-registry.js';
 
 const config = { port: 0, agentToken: 'a'.repeat(64), extensionToken: 'b'.repeat(64) };
@@ -164,6 +164,38 @@ test('the idempotency ledger is bounded and replays outcomes', () => {
   assert.equal(ledger.check('c1'), null);
 });
 
+test('default-target recommendation ranks embedded browsers last and flags ambiguity', () => {
+  const embeddedFirst = [
+    { hostId: 'h-embedded', hostKindObserved: 'agent_embedded', primary: true, connectedAt: 1 },
+    { hostId: 'h-system', hostKindObserved: 'stable', primary: false, connectedAt: 2 }
+  ];
+  const rec = recommendHost(embeddedFirst, { primaryHostId: 'h-embedded' });
+  assert.equal(rec.recommendedHostId, 'h-system');
+  assert.equal(rec.defaultHostId, 'h-system');
+  assert.equal(rec.selectionRequired, false);
+  assert.equal(rec.confidence, 'high');
+  assert.equal(rec.candidates.find(item => item.hostId === 'h-embedded').recommended, false);
+
+  // Two system browsers: the primary is the deterministic tie-break, but the
+  // agent must confirm the profile before a login-dependent write.
+  const twoSystem = [
+    { hostId: 'h-b', hostKindObserved: 'stable', primary: false, connectedAt: 2 },
+    { hostId: 'h-a', hostKindObserved: 'stable', primary: true, connectedAt: 1 }
+  ];
+  const ambiguous = recommendHost(twoSystem, { primaryHostId: 'h-a' });
+  assert.equal(ambiguous.defaultHostId, 'h-a');
+  assert.equal(ambiguous.selectionRequired, true);
+  assert.equal(ambiguous.confidence, 'low');
+
+  // Only embedded browsers are connected: still routable, but never a
+  // confident default.
+  const onlyEmbedded = recommendHost([{ hostId: 'h-e', hostKindObserved: 'agent_embedded', primary: true }], {});
+  assert.equal(onlyEmbedded.defaultHostId, 'h-e');
+  assert.equal(onlyEmbedded.selectionRequired, true);
+  assert.equal(onlyEmbedded.confidence, 'low');
+  assert.equal(recommendHost([], {}).defaultHostId, null);
+});
+
 // ── Lease scoping ─────────────────────────────────────────────────────────
 
 test('the same tab id in two browsers holds two independent leases', () => {
@@ -281,6 +313,34 @@ test('disconnecting one host leaves the others connected and working', async t =
   reply(c.ws, bCommands[1]);
   await after;
   c.ws.close();
+});
+
+test('an embedded browser that connected first does not capture hostId-less commands', async t => {
+  const { b, wsUrl } = await setup(t);
+  const embedded = await connectHost(wsUrl, { hostId: 'h-embedded', hostKind: 'agent_embedded' });
+  const system = await connectHost(wsUrl, { hostId: 'h-system', hostKind: 'stable' });
+  const embeddedCommands = collectCommands(embedded.ws);
+  const systemCommands = collectCommands(system.ws);
+  const status = await b.call('browser_hosts', {});
+  assert.equal(status.primaryHostId, 'h-embedded', 'primary still follows connection order');
+  assert.equal(status.defaultHostId, 'h-system');
+  assert.equal(status.recommendedHostId, 'h-system');
+  assert.equal(status.selectionRequired, false);
+  assert.equal(status.recommendation.candidates.find(item => item.hostId === 'h-embedded').recommended, false);
+
+  const pending = b.call('browser_read', { tabId: 1 });
+  assert.ok(await until(() => systemCommands.length === 1), 'the system browser must receive the default call');
+  assert.equal(embeddedCommands.length, 0);
+  reply(system.ws, systemCommands[0]);
+  await pending;
+
+  // An explicit hostId still reaches the embedded browser: the preference is
+  // a default, never a refusal.
+  const explicit = b.call('browser_read', { tabId: 1, hostId: 'h-embedded' });
+  assert.ok(await until(() => embeddedCommands.length === 1));
+  reply(embedded.ws, embeddedCommands[0]);
+  await explicit;
+  embedded.ws.close(); system.ws.close();
 });
 
 test('an unknown hostId waits with evidence instead of being silently rerouted', async t => {

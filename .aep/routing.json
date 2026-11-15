@@ -1,0 +1,10 @@
+{
+  "schema": "agent-evolution-routing-v1",
+  "keywords": {
+    "takeover": ["认领"],
+    "review-only": ["复核"],
+    "status-report": ["巡检", "健康", "体检", "心跳", "heartbeat", "doctor", "verdict", "provenClean", "现状"],
+    "stalled-recovery": ["停摆", "故障", "排障", "处置", "看门狗", "watchdog", "incident", "service_unreachable", "build_stale", "clock_drift", "假死", "空窗"],
+    "shared-resource-lock": ["重载扩展", "重载浏览器扩展", "重启服务", "重启桥服务", "自愈", "browserTarget", "browser_target", "切换宿主", "extension reload", "reload extension", "restart service", "build_restart", "extension_reload", "升版", "发版", "release", "git push", "推送远程"]
+  }
+}

@@ -14,6 +14,7 @@ import { errorCategory } from './diagnostics.js';
 import { createLeaseStore, LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
 import {
   HostRegistry, CommandLedger, negotiateHandshake, pickDispatchable,
+  recommendHost,
   SERVICE_PROTOCOL_VERSION
 } from './host-registry.js';
 import { createSchedulerBridge } from './scheduler-bridge.js';
@@ -24,7 +25,7 @@ import { failureHelp } from './failure-help.js';
 import { capabilityGuide } from './capability-guide.js';
 import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
-import { clearExtensionErrors, describeErrorList } from './extension-errors.js';
+import { clearExtensionErrors, describeErrorList, readExtensionErrors } from './extension-errors.js';
 import { analyzeRequest, validateVerifySpec } from './request-risk.js';
 import { withNextStep, nextStepForError } from './next-step.js';
 import { toolIndex } from './tool-index.js';
@@ -453,6 +454,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     // no longer has to win a race for the only socket. Kept lightweight here
     // (no netstat per host); browser_hosts adds the process-owner details.
     hostCount: hosts.size(),
+    recommendedHostId: recommendHost(hosts.snapshot(), { primaryHostId: hosts.primaryHostId }).recommendedHostId,
     hosts: hosts.snapshot().map(host => ({
       ...host,
       inFlight: inFlight.has(host.hostId),
@@ -575,7 +577,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       dispatched: result?.dispatched ?? null
     });
     const status = ['success', 'uncertain', 'failed', 'waiting', 'ready', 'denied', 'not_dispatched'].includes(result?.status) ? result.status : null;
-    audit({ time: new Date().toISOString(), id: job.id, tool: job.name, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : status === 'uncertain' ? 'uncertain' : status === 'duplicate_suppressed' ? 'denied' : 'ok', resultStatus: status, dispatched: typeof result?.dispatched === 'boolean' ? result.dispatched : null, errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
+    audit({ time: new Date().toISOString(), id: job.id, tool: job.name, hostId: job.hostId ?? null, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, artifactSha256: job.name === 'browser_upload' ? job.args.sha256 : null, outcome: error ? 'error' : status === 'uncertain' ? 'uncertain' : status === 'duplicate_suppressed' ? 'denied' : 'ok', resultStatus: status, dispatched: typeof result?.dispatched === 'boolean' ? result.dispatched : null, errorCategory: errorCategory(error), durationMs: Date.now() - job.created });
     if (error) job.reject(new Error(error)); else job.resolve(result);
   }
   function syncPrimaryMirrors() {
@@ -586,6 +588,34 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     extensionId = primary?.extensionId ?? null;
     extensionSessionId = primary?.sessionId ?? null;
     if (primary) extensionPaused = false;
+  }
+
+  // `primary` is a compatibility mirror that follows connection order. Default
+  // routing follows the recommendation instead, so an agent-embedded browser
+  // that happens to connect first cannot capture every hostId-less command.
+  function defaultTargetHostId() {
+    const views = hosts.snapshot();
+    return recommendHost(views, { primaryHostId: hosts.primaryHostId }).recommendedHostId;
+  }
+
+  function hostViewsWithOwners() {
+    const snapshot = hosts.snapshot({ ownerFor: record => {
+      const owner = resolveExtensionOwner(record.remotePort, config.port);
+      if (owner && isNonChromeHost(owner)) hosts.noteObservedKind(record.hostId, 'agent_embedded');
+      return owner ? { ...owner, nonChromeHost: isNonChromeHost(owner) } : null;
+    } });
+    return snapshot.map(host => ({
+      ...host,
+      // ownerFor runs during snapshot(); read the persisted observation after
+      // it, so a first-time detection is reflected in this same reply.
+      hostKindObserved: hosts.byId(host.hostId)?.hostKindObserved ?? host.hostKindObserved ?? host.hostKind,
+      inFlight: inFlight.has(host.hostId),
+      activeCommand: inFlight.has(host.hostId) ? {
+        id: inFlight.get(host.hostId).id,
+        tool: inFlight.get(host.hostId).name,
+        ageMs: Date.now() - inFlight.get(host.hostId).created
+      } : null
+    }));
   }
 
   // A host that still has peers must not take their work down with it. Only this
@@ -613,11 +643,11 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     pump();
   }
 
-  // Callers that did not name a host follow the live primary. A caller that did
-  // name one stays bound to that browser and waits for it to come back.
+  // Callers that did not name a host follow the recommended default. A caller
+  // that did name one stays bound to that browser and waits for it to come back.
   function promotePrimary() {
     syncPrimaryMirrors();
-    const next = hosts.primaryHostId;
+    const next = defaultTargetHostId();
     if (!next) return;
     for (const job of queue) if (!job.explicitHost && job.hostId !== next) job.hostId = next;
   }
@@ -744,7 +774,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   function recordDesktopAudit(name, args, result, startedAt) {
     const status = result?.status ?? 'failed';
     audit({
-      time: new Date().toISOString(), id: randomUUID(), tool: name, tabId: null, agent: args.agent ?? null,
+      time: new Date().toISOString(), id: randomUUID(), tool: name, hostId: typeof args.hostId === 'string' ? args.hostId : null, tabId: null, agent: args.agent ?? null,
       outcome: status === 'uncertain' ? 'uncertain' : status === 'denied' ? 'denied' : status === 'duplicate_suppressed' ? 'denied' : status === 'success' ? 'ok' : status === 'waiting' ? 'waiting' : 'error',
       resultStatus: status, dispatched: typeof result?.dispatched === 'boolean' ? result.dispatched : null,
       errorCategory: typeof result?.reason === 'string' ? result.reason.slice(0, 80) : null,
@@ -1125,7 +1155,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       const explicitHost = typeof routeArgs?.hostId === 'string';
       const job = {
         id: randomUUID(), name, tool, args: prepared,
-        hostId: explicitHost ? routeArgs.hostId : (hosts.primaryHostId ?? 'primary'),
+        hostId: explicitHost ? routeArgs.hostId : (defaultTargetHostId() ?? hosts.primaryHostId ?? 'primary'),
         explicitHost, commandId,
         created: Date.now(), priority: priority.value, priorityName: priority.name, resolve, reject
       };
@@ -1323,6 +1353,52 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       result.nextStep = `The extension connection belongs to ${owner.processName} (pid ${owner.pid}), which exposed no reachable window for UI Automation (${result.reason}). Its error list was NOT cleared. Open chrome://extensions inside that browser and clear the list there, or pair this service with the Chrome instance you want to maintain.`;
     }
     return result;
+  }
+
+  // Read-only verdict for the extension error list. The page is read through
+  // the same one-process UIA path as the clear step, but nothing is invoked:
+  // "empty" requires a verified chrome://extensions page and a readable
+  // document, and "errors_present" carries the actual entry names.
+  async function extensionErrorsReadCall(args) {
+    const startedAt = Date.now();
+    const requested = typeof args.hostId === 'string' ? hosts.byId(args.hostId) : null;
+    if (args.hostId && !requested) return {
+      status: 'waiting', retryable: true, reason: 'host_not_connected', dispatched: false,
+      requestedHostId: args.hostId, availableHostIds: hosts.list().map(host => host.hostId),
+      nextPollTool: 'browser_hosts', nextPollArgs: {},
+      recommendedNextAction: 'Nothing was read. Call browser_hosts, then retry with an available hostId or omit it to use the default target.'
+    };
+    const host = requested ?? hosts.byId(defaultTargetHostId()) ?? hosts.primary();
+    const remotePort = host?.remotePort ?? extension?._socket?.remotePort ?? null;
+    const owner = resolveExtensionOwner(remotePort, config.port);
+    const readId = typeof extensionId === 'string' && /^[a-p]{32}$/.test(extensionId)
+      ? extensionId : resolveBridgeExtensionId().extensionId;
+    desktopOperation = { tool: 'browser_extension_errors:read', startedAt };
+    try {
+      let result;
+      try {
+        result = await readExtensionErrors({
+          ...(Number.isSafeInteger(owner?.pid) && owner.pid > 0 ? { processId: owner.pid } : {}),
+          extensionId: readId
+        });
+      } catch (error) {
+        result = { status: 'failed', retryable: false, reason: 'read_extension_errors_threw',
+          state: 'unknown', hasErrors: null, dispatched: false,
+          message: String(error?.message ?? error).slice(0, 200) };
+      }
+      const enriched = {
+        ...result,
+        read: true,
+        ...(host ? { hostBinding: { hostId: host.hostId, hostKindObserved: host.hostKindObserved ?? host.hostKind } } : {}),
+        ...(owner ? { extensionOwner: { ...owner, nonChromeHost: isNonChromeHost(owner) } } : {}),
+        recommendedNextAction: result.state === 'errors_present'
+          ? 'The list is non-empty. errorEntryNames carries the actual messages; relay or act on them and do not report the panel as clean. Clearing is a separate action.'
+          : result.state === 'empty'
+            ? 'The list was read as empty on a verified chrome://extensions page with a readable document. This is evidence from the page, not an inference from a reload.'
+            : 'The list state is unknown and nothing was clicked. Open the error page in this same host with browser_extension_errors action:"open", then read again. Do not report the panel as clean.'
+      };
+      return recordDesktopAudit(name, { ...args, hostId: host?.hostId ?? args.hostId ?? null }, enriched, startedAt);
+    } finally { desktopOperation = null; }
   }
 
   function waitForReload({ previousSession, previousSessions, startedAt = Date.now(), hostId = null }) {
@@ -1632,45 +1708,43 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         ? 'Multi-instance routing is enabled. Use browser_route_task for work that should run on a sibling instance.'
         : 'Single-instance mode: browser_route_task returns waiting instead of forwarding. Enable config.instanceMode (or AIB_INSTANCE_MODE=1) and start the sibling instances if you need cross-instance dispatch.'
     };
-    if (name === 'browser_hosts') return {
-      status: 'success',
-      serviceVersion: VERSION,
-      protocolVersion: SERVICE_PROTOCOL_VERSION,
-      primaryHostId: hosts.primaryHostId,
-      hostCount: hosts.size(),
-      hosts: hosts.snapshot({ ownerFor: record => {
-        const owner = resolveExtensionOwner(record.remotePort, config.port);
-        return owner ? { ...owner, nonChromeHost: isNonChromeHost(owner) } : null;
-      } }).map(host => ({
-        ...host,
-        // The extension cannot know whether it is running inside another
-        // agent's embedded browser. The socket owner can, so report the
-        // observed kind separately from the declared hint.
-        hostKindObserved: host.owner?.nonChromeHost === true ? 'agent_embedded' : host.hostKind,
-        inFlight: inFlight.has(host.hostId),
-        activeCommand: inFlight.has(host.hostId) ? {
-          id: inFlight.get(host.hostId).id,
-          tool: inFlight.get(host.hostId).name,
-          ageMs: Date.now() - inFlight.get(host.hostId).created
-        } : null
-      })),
-      policy: {
-        exclusivity: 'none',
-        refusal: 'A second browser is never closed for connecting. Each host has its own in-flight slot, so a stalled browser cannot block its peers.',
-        capabilityFlags: 'Hints for the agent, never a denial. The bridge does not decide what is safe.',
-        hostId: 'Optional on every tool. Omit it for the primary host; supply it to bind a command and its tab lease to one browser.',
-        tabIds: 'Tab ids are unique only inside one browser. Leases are scoped by hostId when one is supplied.'
-      },
-      recommendedNextAction: hosts.size() > 1
-        ? 'Several browsers are connected. Pass hostId on each command to keep each agent on its own browser, and use commandId for writes that must not be replayed.'
-        : 'One browser is connected. Other browsers may connect at any time without displacing it.'
-    };
+    if (name === 'browser_hosts') {
+      const hostViews = hostViewsWithOwners();
+      const recommendation = recommendHost(hostViews, { primaryHostId: hosts.primaryHostId });
+      return {
+        status: 'success',
+        serviceVersion: VERSION,
+        protocolVersion: SERVICE_PROTOCOL_VERSION,
+        primaryHostId: hosts.primaryHostId,
+        recommendedHostId: recommendation.recommendedHostId,
+        defaultHostId: recommendation.defaultHostId,
+        selectionRequired: recommendation.selectionRequired,
+        selectionConfidence: recommendation.confidence,
+        selectionReason: recommendation.reason,
+        recommendation,
+        hostCount: hosts.size(),
+        hosts: hostViews,
+        policy: {
+          exclusivity: 'none',
+          refusal: 'A second browser is never closed for connecting. Each host has its own in-flight slot, so a stalled browser cannot block its peers.',
+          capabilityFlags: 'Hints for the agent, never a denial. The bridge does not decide what is safe.',
+          hostId: 'Optional on every tool. Omit it to route to defaultHostId (a system browser is preferred over an agent-embedded one). Pass hostId to bind a command and its tab lease to one specific browser, especially when selectionRequired is true.',
+          tabIds: 'Tab ids are unique only inside one browser. Leases are scoped by hostId when one is supplied.',
+          primaryHostId: 'Compatibility mirror that follows connection order. It is not the default routing target; defaultHostId is.'
+        },
+        recommendedNextAction: hosts.size() === 0
+          ? 'No browser is connected. Start or reload the 自主浏览器 extension, then poll browser_hosts again.'
+          : recommendation.selectionRequired
+            ? `Confirm the target before acting: ${recommendation.reason} Candidates: ${recommendation.candidates.map(item => `${item.hostId} (${item.hostKindObserved})`).join(', ')}.`
+            : `Omit hostId to use ${recommendation.defaultHostId}; pass hostId explicitly to keep an agent on a specific browser. Re-observe the page before every write.`
+      };
+    }
     if (name === 'browser_wait_until_ready') return waitUntilReady(args);
     // Governance is evaluated before anything is dispatched or queued, so a
     // denied call costs no queue slot and never reaches the extension.
     const decision = policy.evaluate({ name, tool, args, agent: args.agent ?? null });
     if (!decision.allowed) {
-      audit({ time: new Date().toISOString(), id: randomUUID(), tool: name, tabId: args.tabId ?? null, agent: decision.agent ?? null, outcome: 'denied', errorCategory: decision.reason, durationMs: 0 });
+      audit({ time: new Date().toISOString(), id: randomUUID(), tool: name, hostId: typeof args.hostId === 'string' ? args.hostId : null, tabId: args.tabId ?? null, agent: decision.agent ?? null, outcome: 'denied', errorCategory: decision.reason, durationMs: 0 });
       return decision;
     }
     // This is the ONLY place a /call can be forwarded to a sibling instance,
@@ -1682,11 +1756,14 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       return schedulerBridge.routeExplicitly({ name: args.name, arguments: routedArgs, agent: args.agent ?? null });
     }
     if (name === 'browser_failure_help') return failureHelp(args, { readOnly: TOOLS.find(item => item.name === args.attemptedAction)?.annotations?.readOnlyHint === true });
+    // Answered locally through UI Automation: the error list has no extension
+    // API, and a read must not wait on the extension socket it is diagnosing.
+    if (name === 'browser_extension_errors' && args.action === 'read') return extensionErrorsReadCall(args);
     // An explicitly routed task stays on its browser. Silently moving it to a
     // different host would be the exact "wrong browser did the work" failure
     // this release exists to end, so a missing host is a waiting result with a
     // concrete next call rather than a reroute.
-    const targetHost = args.hostId ? hosts.byId(args.hostId) : hosts.primary();
+    const targetHost = args.hostId ? hosts.byId(args.hostId) : (hosts.byId(defaultTargetHostId()) ?? hosts.primary());
     if (args.hostId && !targetHost) return {
       status: 'waiting', retryable: true, reason: 'host_not_connected', dispatched: false,
       requestedHostId: args.hostId, availableHostIds: hosts.list().map(host => host.hostId), hostCount: hosts.size(),
@@ -1905,7 +1982,14 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
           clearTimeout(timer); authenticated = true;
           clearTimeout(hostGrace.get(record.hostId)); hostGrace.delete(record.hostId);
           clearTimeout(requeueGrace); requeueGrace = null;
+          // Observe the socket owner once at handshake time and persist it, so
+          // the default target does not depend on a later netstat lookup.
+          const owner = resolveExtensionOwner(remotePort, config.port);
+          if (owner && isNonChromeHost(owner)) hosts.noteObservedKind(record.hostId, 'agent_embedded');
           syncPrimaryMirrors();
+          // A newly arrived system browser can be a better default than the
+          // embedded browser that connected first; move hostId-less backlog.
+          promotePrimary();
           extensionPaused = false;
           ws.send(JSON.stringify({
             type: 'ready', hostId: record.hostId, protocolVersion: handshake.protocolVersion,
@@ -1942,7 +2026,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         if (msg.type === 'extension-error' && hosts.byWs(ws)) {
           const eventId = typeof msg.eventId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(msg.eventId) ? msg.eventId : null;
           try {
-            audit({ time: new Date().toISOString(), id: randomUUID(), eventId, occurredAt: typeof msg.at === 'string' ? msg.at.slice(0, 40) : null, droppedBeforeSend: Number.isSafeInteger(msg.droppedBeforeSend) ? Math.max(0, msg.droppedBeforeSend) : 0, tool: 'extension-error', tabId: Number.isInteger(msg.tabId) ? msg.tabId : null, agent: null, outcome: 'error', errorCategory: typeof msg.category === 'string' ? msg.category.slice(0, 80) : 'EXTENSION_ERROR', detail: typeof msg.message === 'string' ? msg.message.slice(0, 1000) : 'unknown', source: typeof msg.source === 'string' ? msg.source.slice(0, 80) : 'extension' });
+            audit({ time: new Date().toISOString(), id: randomUUID(), eventId, occurredAt: typeof msg.at === 'string' ? msg.at.slice(0, 40) : null, droppedBeforeSend: Number.isSafeInteger(msg.droppedBeforeSend) ? Math.max(0, msg.droppedBeforeSend) : 0, tool: 'extension-error', hostId: hosts.hostIdFor(ws), tabId: Number.isInteger(msg.tabId) ? msg.tabId : null, agent: null, outcome: 'error', errorCategory: typeof msg.category === 'string' ? msg.category.slice(0, 80) : 'EXTENSION_ERROR', detail: typeof msg.message === 'string' ? msg.message.slice(0, 1000) : 'unknown', source: typeof msg.source === 'string' ? msg.source.slice(0, 80) : 'extension' });
             if (eventId) ws.send(JSON.stringify({ type: 'extension-error-ack', eventId }));
           } catch { /* No acknowledgement if persistence fails; extension retains evidence. */ }
           return;
@@ -1989,14 +2073,14 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       clearTimeout(timer); clients.delete(ws);
       const record = hosts.remove(ws);
       if (!record) return; // unauthenticated, or superseded by its own reconnect
-      const wasPrimary = extension === ws;
       // A closed socket has no reconnect window to inherit: legacy callers get
       // the original immediate failure. When peers exist, dropHostOnly keeps
       // this host's backlog for its own bounded reconnect instead.
       drop('Connection lost; active outcome may be unknown. Inspect page before retrying.', { hostId: record.hostId });
-      // Peers keep working. Default callers follow the surviving primary; a
-      // caller that named this specific host keeps its place until reconnect.
-      if (wasPrimary || !hosts.primary()) promotePrimary();
+      // Peers keep working. Default callers follow the surviving recommended
+      // host; a caller that named this specific host keeps its place until
+      // reconnect.
+      promotePrimary();
     });
   });
   

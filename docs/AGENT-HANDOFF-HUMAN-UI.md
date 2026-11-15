@@ -562,6 +562,7 @@ Toggle 若要实现，必须先解决「重试会反转」——只暴露 SetSta
 1. 阅读根目录 `AGENTS.md` 和本文件。
 2. 检查 `git status --short --branch`、`git log --oneline --decorate -8`、所有远端跟踪分支及本任务板；不得丢弃、覆盖其他 Agent 的未提交文件。
 3. 在共享任务板认领一个未阻塞事项。当前活跃协作区：`ai-browser-bridge-human-ui`；共享 task list 为本轮人类等价 UI 基座任务板。新会话若无法进入同一个协作区，仍可按仓库此交接文档和任务编号继续，并先向负责人说明。
+   3a. 本机 AEP 协作区（`K:\PythonProjects5\AI-Browser-Bridge\coordination`，用 `aep` CLI 操作）的**权威约定**在 `coordination/PROJECT-POLICY.md`（随仓库版本化）；项目路由词表在 `.aep/routing.json`。根目录 `AEP_JOIN.md` 是 `aep workspace-init` 的生成物、不进 git，重新生成后指针会丢失——以本条和 `PROJECT-POLICY.md` 为准。
 4. 实施前先加可复现测试/独立 oracle，改动保持单一能力边界；不得同时操作真实用户浏览器和隔离 fixture。真实 Chrome 操作必须经过 Bridge、限制在本次创建的测试标签/窗口，任何扩展 Reload、用户设置变更、安装/删除扩展都需要本次具体动作的明确授权。
 5. 交付时记录变更文件、确切命令/结果、真实 Chrome 覆盖范围、未覆盖边界、工作树和提交/部署状态；更新本文件与任务板。未明确要求时不要擅自推送、部署或重载扩展。
 

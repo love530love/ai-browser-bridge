@@ -17,9 +17,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { describeErrorList, clearExtensionErrors } from '../src/extension-errors.js';
+import { describeErrorList, clearExtensionErrors, readExtensionErrors } from '../src/extension-errors.js';
 
 const script = readFileSync(new URL('../scripts/clear-extension-errors.ps1', import.meta.url), 'utf8');
+const readScript = readFileSync(new URL('../scripts/read-extension-errors.ps1', import.meta.url), 'utf8');
 const serverSource = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
 const workerSource = readFileSync(new URL('../extension/worker.js', import.meta.url), 'utf8');
 
@@ -156,6 +157,37 @@ test('the reload result separates "the reload worked" from "the list is gone"', 
     'a verified reload with a red list must be marked partial instead of reported as a clean success');
   assert.doesNotMatch(workerSource, /errorsClearedBy/,
     'the worker must not claim the reload clears the list: Chrome keeps those entries per extension id, outside the worker');
+});
+
+test('the read-only error-list verdict never clicks and never claims clean without page evidence', async () => {
+  // Validation mirrors the clear path: an explicit target must be exact.
+  await assert.rejects(() => readExtensionErrors({ processId: '11' }), /Exact process required/);
+  await assert.rejects(() => readExtensionErrors({ windowHandle: 0 }), /Exact window required/);
+  const unsupported = await readExtensionErrors({}, { platform: 'linux' });
+  assert.equal(unsupported.status, 'unavailable');
+  assert.equal(unsupported.state, 'unknown');
+  assert.equal(unsupported.hasErrors, null);
+
+  // Static contract: the script can observe Clear all but must never invoke it.
+  assert.match(readScript, /clearButtonPresent = \(\$null -ne \$clearAll\)/);
+  assert.doesNotMatch(readScript, /Invoke-Btn \$clearAll/,
+    'the read script must never click Clear all');
+  assert.match(readScript, /\$state = if \(\$hasErrors\) \{ 'errors_present' \} else \{ 'empty' \}/,
+    'a non-empty list needs its own state and an empty list needs an evidenced state');
+  assert.match(readScript, /state = 'unknown'/, 'unreadable pages must stay unknown');
+  assert.match(readScript, /addressVerified = \$false[\s\S]{0,500}reason = 'errors_page_not_front'/,
+    'page identity must be verified before reading the list');
+  const gate = readScript.indexOf("reason = 'errors_page_not_front'");
+  const reload = readScript.indexOf("Find-Button $rows 'Reload'");
+  assert.ok(gate > 0 && reload > gate, 'the address check must run before the page reload');
+  assert.match(readScript, /dispatched = \$false/,
+    'read must report that it dispatched no page action');
+
+  // Wiring: action:"read" is answered locally, before any extension dispatch.
+  assert.match(serverSource, /name === 'browser_extension_errors' && args\.action === 'read'/);
+  assert.match(serverSource, /readExtensionErrors\(/);
+  const toolsSource = readFileSync(new URL('../src/tools.js', import.meta.url), 'utf8');
+  assert.match(toolsSource, /enum: \['open', 'read'\]/, 'the tool schema must expose the read action');
 });
 
 test('a failed clear step reports unknown with a read-only next step, never "reload again"', () => {

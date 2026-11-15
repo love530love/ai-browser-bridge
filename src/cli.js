@@ -453,6 +453,14 @@ try {
       process.on('SIGTERM', finish);
       await runner.loop;
     }
+  } else if (cmd === 'usage') {
+    // Local operation evidence for heartbeat/review loops: per-tool and
+    // per-host volume, errors, uncertain outcomes and latency percentiles.
+    // Read-only; never starts the service and never calls the browser.
+    const hoursAt = rest.indexOf('--hours');
+    const hours = hoursAt >= 0 ? Number(rest[hoursAt + 1]) : 48;
+    if (!Number.isFinite(hours) || hours <= 0) throw new Error('--hours must be a positive number');
+    console.log(JSON.stringify(usageSummary(stateDir, Date.now(), { windowHours: hours }), null, 2));
   } else if (cmd === 'status') console.log(JSON.stringify(await request('/status'), null, 2));
   else if (cmd === 'diagnose-upgrade') console.log(JSON.stringify(upgradeDiagnosis(), null, 2));
   else if (cmd === 'upgrade-check') {
@@ -478,6 +486,6 @@ try {
       ? await raw()
       : await callWithWaitingRecovery({ name, args: parsed, rawCall: rawToolCall, maxWaitMs: Number(process.env.AIB_AUTO_WAIT_MS || 120000) });
     console.log(JSON.stringify(result, null, 2));
-  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | adapters [--stale-ms N] [--prune [--older-than-hours N] [--dry-run]] | cdp-probe [--tab-id N] [--host-id ID] [--out FILE] | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | upgrade-check | set-browser-target --from-running-chrome [--write]');
+  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | adapters [--stale-ms N] [--prune [--older-than-hours N] [--dry-run]] | cdp-probe [--tab-id N] [--host-id ID] [--out FILE] | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | usage [--hours N] | upgrade-check | set-browser-target --from-running-chrome [--write]');
 } catch (e) { console.error(e.message); process.exitCode = 1; }
 

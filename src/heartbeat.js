@@ -30,6 +30,7 @@ import { computeBuildIdentity } from './build-identity.js';
 import { VERSION } from './version.js';
 import { request as defaultRequest } from './client.js';
 import { RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
+import { usageSummary } from './usage-summary.js';
 
 export const HEARTBEAT_DEFAULTS = {
   intervalMs: 60000,
@@ -114,6 +115,9 @@ export function readDiskFacts(root = ROOT, stateDir = defaultStateDir, nowMs = D
     diskBuildId,
     pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null,
     audit: readAuditWindows(join(stateDir, 'logs', 'audit.jsonl'), nowMs),
+    // Aggregate counters only: tool names, hostIds, error categories and
+    // durations. Never page text, URLs, headers or credentials.
+    usage: usageSummary(stateDir, nowMs, { windowHours: 1, topTools: 5 }),
     readAt: new Date(nowMs).toISOString()
   };
 }

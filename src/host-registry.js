@@ -61,6 +61,59 @@ const majorOf = version => {
   return Number.isSafeInteger(value) && value > 0 ? value : null;
 };
 
+// Default-target recommendation. The caller's own Chrome is the safer default:
+// an agent-embedded browser usually has none of the operator's site sessions,
+// which is how an agent ends up asking a human to log in again. This is an
+// ordering heuristic based on the observed host kind, not proof of login; no
+// cookie store or profile file is ever inspected.
+export function recommendHost(hostViews, { primaryHostId = null } = {}) {
+  const views = Array.isArray(hostViews) ? hostViews : [];
+  if (views.length === 0) {
+    return {
+      recommendedHostId: null, defaultHostId: null, selectionRequired: false,
+      confidence: 'none', reason: 'No browser is connected.', candidates: []
+    };
+  }
+  const rank = host => {
+    const kind = host.hostKindObserved ?? host.hostKind ?? 'generic';
+    if (kind === 'agent_embedded') return 100;
+    if (kind === 'generic') return 10;
+    return 0;
+  };
+  const ranked = views.map(host => ({
+    hostId: host.hostId,
+    hostKindObserved: host.hostKindObserved ?? host.hostKind ?? 'generic',
+    rank: rank(host),
+    primary: host.primary === true || host.hostId === primaryHostId,
+    connectedAt: Number(host.connectedAt ?? 0)
+  })).sort((a, b) => a.rank - b.rank
+    || (Number(b.primary) - Number(a.primary))
+    || a.connectedAt - b.connectedAt);
+
+  const best = ranked[0];
+  const tied = ranked.filter(item => item.rank === best.rank);
+  const realCount = ranked.filter(item => item.rank < 100).length;
+  const allEmbedded = realCount === 0;
+  const selectionRequired = allEmbedded || tied.length > 1;
+  const confidence = allEmbedded ? 'low' : tied.length > 1 ? 'low' : realCount === 1 ? 'high' : 'medium';
+  const reason = allEmbedded
+    ? 'Every connected browser looks agent-embedded. No system browser carries the operator\'s sessions; pass hostId explicitly after confirming which browser has the login.'
+    : tied.length > 1
+      ? `${tied.length} system browsers are connected. The default is deterministic, but confirm the profile with hostId before any write that depends on a login.`
+      : `Preferred ${best.hostKindObserved} host ${best.hostId}; agent-embedded browsers rank last because they usually lack the operator's site sessions.`;
+  return {
+    recommendedHostId: best.hostId,
+    defaultHostId: best.hostId,
+    selectionRequired,
+    confidence,
+    reason,
+    candidates: ranked.map(item => ({
+      hostId: item.hostId, hostKindObserved: item.hostKindObserved,
+      rank: item.rank, primary: item.primary, recommended: item.hostId === best.hostId
+    }))
+  };
+}
+
 // Advisory only. A `false` here never denies a tool; it tells the agent which
 // observation path is likely to work so it can choose a fallback itself.
 export function featureFlagsFor({ chromeVersion = null, hostKind = 'generic' } = {}) {
@@ -145,6 +198,7 @@ export class HostRegistry {
       extensionVersion: handshake.extensionVersion,
       extensionId: handshake.extensionId ?? meta.extensionId ?? null,
       hostKind: handshake.hostKind,
+      hostKindObserved: handshake.hostKind,
       chromeVersion: handshake.chromeVersion,
       features: handshake.features ?? featureFlagsFor(handshake),
       warnings: [...(handshake.warnings ?? [])],
@@ -178,6 +232,15 @@ export class HostRegistry {
   list() { return [...this.byHostId.values()]; }
   size() { return this.byHostId.size; }
 
+  // The socket owner is the only reliable source for "this is another agent's
+  // embedded browser". Persist the observation on the record so a transient
+  // owner-lookup failure cannot flip the default target back to that browser.
+  noteObservedKind(hostId, kind) {
+    const record = this.byHostId.get(hostId);
+    if (record && HOST_KINDS.includes(kind)) record.hostKindObserved = kind;
+    return record ?? null;
+  }
+
   noteBrowser(ws, { extensionId = null, browser = null } = {}) {
     const record = this.bySocket.get(ws);
     if (!record) return null;
@@ -203,6 +266,7 @@ export class HostRegistry {
       extensionVersion: record.extensionVersion,
       extensionId: record.extensionId,
       hostKind: record.hostKind,
+      hostKindObserved: record.hostKindObserved ?? record.hostKind,
       chromeVersion: record.chromeVersion,
       browserVersion: record.browser?.version ?? null,
       features: record.features,

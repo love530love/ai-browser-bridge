@@ -4,7 +4,7 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.41.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.42.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
 0.25.0 补的是**一闪而过、或者悬停才存在**的那层 UI。toast 活 2–3 秒，任何「等你问我的时候再扫一遍」都必然错过，所以 `browser_transient` 不是更快的扫描，而是扩展在 isolated world 里装一个常驻 `MutationObserver`，**在提示还在屏幕上时就记下来**：`read` 能查到已经消失的 toast（带 `firstSeenAt` / `goneAt` / `preExisting`），`watch` 等新的提示出现，`clear` 只清记录。tooltip 有两条路：声明式的（`title` / `data-tooltip` / `aria-describedby`）由 `browser_popup action:"probe"` 直接读；纯 CSS `:hover` 的只能让**真实指针**去问——合成 `mouseover` 不移动 `:hover` 状态，所以 `action:"reveal"` 走 CDP `Input.dispatchMouseEvent`，settle 之后再读新出现的浮层。popconfirm 看起来就是个普通按钮，点两次就删两次，所以 `action:"open"` 点一次并返回气泡里的按钮，`action:"choose"` 按 `choice:"confirm"|"cancel"` 或确切文本选，每个派发过点击的结果都是 `retryable:false`。tooltip 常挂在 `<span>`/图标上，`browser_find_element` 不会给 ref，因此 `browser_popup` 支持 `selector` 自己定位，`probe` 不带参数时还会列出全页声明了 tooltip 的元素。真机实测（Chrome 156）三处坑写进了代码：`el.textContent = x` 是替换文本节点而不是 `characterData` 变更（第一版因此漏掉全部 aria-live）；`visible()` 的 per-call 缓存会把「点击前不可见」记到「点击后」（`open` 因此误报 `not_opened`）；用几何距离猜「这个气泡属于哪个触发源」会认错爹（改成只认 `aria-expanded` + `aria-controls`，其余靠 `opened`/`closed_by_click`/`unchanged` 三态如实报告）。另外 `extension/worker.js` 有一行显式的工具分发白名单，新工具漏加就是真机 `Unknown command` 而 532 个单测全绿，所以加了一条静态测试直接读那行源码。
 
@@ -98,7 +98,7 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 - 版本号必须同时更新 `package.json`、`package-lock.json`、`extension/manifest.json` 和 `CHANGELOG.md`，再创建同名 Git tag 与 GitHub Release。
 - Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
 
-### 当前版本升级指南（0.41.0）
+### 当前版本升级指南（0.42.0）
 
 > **只 `git pull` 不等于升级完成。** 磁盘代码、运行中的服务进程、Chrome 里加载的扩展、`.local/config.json` 的新字段是四层独立状态；只更新第一层会出现「面板已连接、体检却跑在旧代码上」的假健康状态。
 
@@ -162,6 +162,9 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 - **扩展占用者可见（0.35.1）**：`/status` 与 `browser_queue_status` 返回 `extensionOwner { pid, processName, nonChromeHost, ... }`，明确「当前是哪个浏览器进程占着唯一的扩展连接」。当多个装了扩展的浏览器同时存在（系统 Chrome / Codex 内置浏览器 / Canary）时，不再出现「我的 Chrome 没反应」却无从排查的情况。`browser_reload_extension` 会在 `errorList` 里返回 `addressVerified` / `observedButtonNames` 等原始证据，只有地址栏已验证为 `chrome://extensions` 且文档可读时才判定错误列表已清空。清错的 UIA 扫描会按 `extensionOwner.pid` 精确绑定到持有连接的那个浏览器进程；若该宿主没有可见窗口（实测 Codex/ChatGPT 内置浏览器），结果带 `hostBinding` 明确说明是哪个进程、为什么没清，而不是误报成功或让人去开另一个 Chrome 窗口。
 - **多宿主并发基座（0.36.0）**：扩展连接不再独占——系统 Chrome、Canary/Dev、Agent 内置浏览器可同时连到同一服务，各自持有独立 `hostId`、独立 in-flight 槽位与独立能力画像，任一宿主卡住或断线都不影响其他宿主。所有工具新增可选 `hostId`（把命令与 tab 租约绑定到指定浏览器；tab id 只在单个浏览器内唯一）与 `commandId`（幂等键，重发只回放结果、不重放写操作）。`browser_hosts` 列出全部宿主、协议/扩展/Chrome 版本、socket 占用进程与能力 hints（WebMCP Origin Trial 149+、`outputSchema` 159.0.8140.0+）。握手向后兼容未带 hostId 的旧扩展；显式指定宿主掉线时返回 `waiting` 而非静默改派；不设能力禁区，版本与能力差异只作为 hints，绝不因「宿主不是 chrome.exe」拒绝连接。完整排期与极端场景库见 [docs/HIGH-CONCURRENCY-ROADMAP.md](docs/HIGH-CONCURRENCY-ROADMAP.md)。
 - **心跳巡检（0.37.0）**：`node src/cli.js heartbeat` 一次采集服务/宿主/队列/审计指标并与源码 buildId 比对，异常时生成 `.local/heartbeat/incidents/*.md` 排障报告；`--watch --interval-ms 60000` 可由用户自行常驻。`clean` 需要 buildId、版本、连接与零 findings 全部有证据，否则一律 `uncertain`；finding 连续 3 轮才升级 critical，宿主变化按 `hostId` 双快照对比。**只自动执行两个白名单动作**（源码陈旧时经看门狗重启服务、扩展落后时按 hostId 重载），且必须服务完全空闲、通过冷却与单实例锁、动作后复核；其余异常只报告不动作。`critical / uncertain / skipped` 返回非零退出码，供定时调度器识别。详见 [docs/HIGH-CONCURRENCY-ROADMAP.md](docs/HIGH-CONCURRENCY-ROADMAP.md) 的 SLO 与故障注入部分。
+- **多宿主默认路由（0.42.0）**：`browser_hosts` 返回 `recommendedHostId` / `defaultHostId` / `selectionRequired` / `selectionReason`；未显式传 `hostId` 的命令走推荐宿主（系统 Chrome 优先，`agent_embedded` 最后），显示指定的宿主永不迁移。避免 Agent 连到未登录的内嵌浏览器却以为页面坏了。见 [docs/MULTI-HOST-TARGETING.md](docs/MULTI-HOST-TARGETING.md)。
+- **扩展错误列表只读判定（0.42.0）**：`browser_extension_errors action:"read"` 只读取 `chrome://extensions` 错误列表，不点 `Clear all`，返回 `state: errors_present|empty|unknown`；`empty` 必须同时有地址栏验证、可读文档与 Clear all 控件缺失证据。真机验证本机当前为 `empty`（0 条错误，非“未知”）。
+- **使用遥测（0.42.0）**：审计行携带 `hostId`；`node src/cli.js usage --hours N` 输出每工具/每个宿主的 p50/p95/max、错误分类与不确定计数；心跳快照携带 1 小时聚合。只含工具名、宿主 id、分类与耗时，不含页面内容、URL 或凭据。见 [docs/USAGE-TELEMETRY.md](docs/USAGE-TELEMETRY.md)。
 - 可选的多 agent 治理：用 `node src/cli.js agent set <name> '{"scopes":["read"],"origins":["example.com"],"maxLeaseMs":60000}'` 注册具名 agent 后，超出作用域的写入/上传/认领租约、白名单外的导航都会被服务直接拒绝并返回 `status:"denied"`、`reason`、`retryable:false`，租约时长会被钳制到上限；未注册或未具名的调用保持默认开放，不会削弱单机使用。所有工具都接受可选 `agent`，建议读操作也带上以便审计归属。同一份策略还可配 `tools.allow/tools.deny`（工具级白/黑名单）、`judge:"require"`（写前过本机模型，默认 `judgeTtlMs` 120s）、`contentBoundaries:true`（读输出加不可信内容边界）。策略存放于 `.local/agents.json`，运维改动无需重启。
 - 断线和超时不自动重放写入；断线后的新请求返回 waiting 恢复指引，已派发或排队的未知结果命令仍失败返回。暂停不撤销已经执行的操作。扩展保存配对密钥后会在后台自动重连，不需要 AI 自动打开扩展设置页。
 - 日志仅记录操作名称、标签页编号、调用方 agent 名、时间和成功/失败，不记录输入内容、正文、截图或密钥。
@@ -399,6 +402,11 @@ npm run test:native
 | `test/` | 服务测试和真实扩展端到端测试 |
 | `docs/AGENT-HANDOFF-20261115.md` | **当前接手入口**：0.40.0 状态快照、工作进度、待办计划（P0–P3）、审计工具箱、升级 SOP 与硬边界清单；数字需按文内命令复核 |
 | `docs/P0-ITERATION-20261115.md` | P0 三项实施记录：adapter 注册表、CDP 只读探针、Playwright 门禁；含测试计数、0.41.0 buildId、真机探针（`Target` 被拒 `-32000`）与两个宿主重载证据 |
+| `docs/AGENT-FIRST-STRATEGY-2026.md` | Agent 优先战略：审计专家/真实用户两类人格、场景痛点映射、执行阶梯、弱 Agent 最小路径、模型可选与验收标准 |
+| `docs/FALLBACK-CHANNELS.md` | 执行通道与旁路门禁：扩展 → CDP 只读 → UIA → 视觉/坐标 → Playwright（需授权）→ 人工；含失败语义与验收清单 |
+| `docs/MULTI-HOST-TARGETING.md` | 多宿主目标认定：推荐宿主、`defaultHostId`、`selectionRequired`、显式 `hostId` 不迁移 |
+| `docs/USAGE-TELEMETRY.md` | 本地遥测：审计字段、隐私边界、`usage` CLI 与心跳聚合、实战验收用法 |
+| `docs/OPEN-SOURCE-CAPABILITY-RADAR.md` | 开源能力雷达：OCR/元素识别/正文提取的许可证、复刻优先级与不捆绑权重决策 |
 | `docs/HANDOFF.md` | 0.2.0 / 0.1.1 早期交接记录（**已过时**，顶部有指向当前入口的指针，仅供考古） |
 | `docs/KNOWN-LIMITATIONS.md` | **当前版本**的已知限制与硬边界：窗口可见性 / 不抢前台、CSP 双通道、调试横幅与 DevTools 互斥、宿主身份与内嵌 Chromium、累计计数不是瞬时状态 |
 | `docs/TROUBLESHOOTING-MATRIX.md` | 症状分诊矩阵（服务级 OK + 页面级超时 / 横幅 / 宿主误选），附现场报告哪些断言不能照抄的逐条源码反证 |
