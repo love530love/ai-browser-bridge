@@ -1,3 +1,34 @@
+## 0.42.2 — 2026-11-15（**三条诚实边界根因修复 / 进程治理 / 读快车道 / 运行时预检**）
+
+触发：用户要求对 0.42.1 遗留的三条诚实边界「详细调查根因并永久解决」，并同时治理 MCP 进程生命周期、强化多 agent 优先级调度、评估 REA 等跨设备能力与常驻形态。
+
+### 交付
+
+- **错误列表零窗口判定**：新增 `src/extension-error-journal.js`，从 `logs/audit.jsonl`（含轮转）读取 `extension-error` 事件，按 `eventId` 去重、按 `hostId`/时间窗过滤，返回 `state: errors_present|none_recorded` 且不回声原始 detail。`browser_reload_extension` 默认返回 `errorJournal`（`basis:"bridge-journal"`、`panelInspected:false`），不再因 `no_chrome_window` 塌缩为「未知」；`browser_extension_errors` 默认同源，`includePanel:true` 才附加 UIA 面板判定且失败时保留日志结论。
+- **重载零页面动作**：重载默认不打开、不激活 `chrome://extensions`（此前每次重载都会在浏览器内切前台 tab）；仅 `clearErrors:true` 时后台（`active:false`）打开并清理，清理未成功才 `partial:true`，未请求清理的重载为完整成功。
+- **同长度文本变更可证**：`extension/page.js` 以 MutationObserver 维护单调 `globalThis.__aibRevision`，`extension/receipt.js` 将修订变化并入 `changed` 判定；修订号不进入重复键，重复抑制语义不变，确需重写仍用 `allowRepeat:true`。
+- **父进程守卫**：新增 `src/mcp-parent-guard.js`。父进程名可读且非 shell/launcher 才武装，武装后父进程消失则 adapter 退出；名称不可读连续 3 次解除武装。探测优先 `pwsh`/`powershell` `Get-Process`（本机实测 `tasklist /FI` 超 8s），`tasklist` 末位兜底；名称归一化 `.exe`。
+- **进程清单**：`node src/cli.js processes` 报告 service/watchdog/adapter 的 `alive`/`parentAlive`/`parentName`/`parentIsShell`/`orphanedCandidate`，report-only、并行探测、绝不发信号；`scripts/watch-service.ps1` 写 `.local/watchdog.pid`。
+- **读快车道与优先级**：每宿主最多 2 个只读任务并行（不同 tab），写任务等待本宿主读排空，同 tab 互斥，跨宿主独立；agent 策略 `queuePriority`（-100..100）与 aging、切换公平共同排序，短任务可真快车道，长任务不会饿死。任务由服务持有，调用方超时不会撤回任务。
+- **运行时预检**：`node src/cli.js runtime`（`ai-browser-bridge-runtime-v1`）报告 Node ≥22（唯一必需）与可选 `npm/pwsh/powershell/python/go/rustc/rea`；REA 是 Node/MIT 可选 MCP peer，不内嵌、不作运行前置。
+- **文档**：新增 `docs/ITERATION-20261115-0422.md`（根因、决策、常驻形态）；更新 `docs/PROCESS-LIFECYCLE.md`（Parent guard 节）与 `docs/PROCESS-OWNERSHIP-AND-RUNTIME-DECISION.md` §1.4。
+
+### 实测
+
+- 全量 `npm test` → **910/910 通过**（exit 0，0 fail，约 137s）。
+- `node src/cli.js processes` → 服务 + 5 条 adapter 记录（2 条存活，父名 `codex.exe`），report-only。
+- `node src/cli.js runtime` → Node 27.0.0-alpha、npm、pwsh 7.6.10、powershell、Python 3.13.9、Go 1.27.4、rustc 1.99.1、rea 全部存在，无建议。
+- 四处版本同步 0.42.1 → **0.42.2**（`package.json`、`extension/manifest.json`、`package-lock.json` 顶层与 `packages[""]`）；buildId `4ef84a86…7af9`。
+- 部署复验：服务监听 PID 25684（`src/server.js`），`doctor ok:true`；两个宿主均重载为 0.42.2（`focusRequired:false`、`foregroundTaken:false`、未打开任何页签，`errorJournal.state:"none_recorded"`）；心跳 `clean` + `provenClean:true`、`hostCount:2`；`npm run test:background` 部署后 **51/51**，前台窗口与 Chrome 焦点不变。
+
+### 边界
+
+- 未启 Playwright/CDP 网关，未读 Chrome profile / Cookie / Login Data / Local State，未改 `browserTarget`，未抢前台。
+- wrapper-shell 父进程（父进程为 shell/launcher 且已退出）无法证明真实客户端，守卫按设计不武装，注册表仍可见。
+- 面板清理仍需要单独 `clearErrors:true` 授权；未请求时 `errorListCleared:null` 是设计。
+
+---
+
 ## 0.42.1 — 2026-11-15（**后台优先 / 零抢焦点 / 高并发实测**）
 
 触发：用户要求项目在高并发下保持稳定，且 Chrome 处于后台、人类正在操作其他软件时，自动化必须在后台完成，不得抢屏幕或打断宿主机用户。

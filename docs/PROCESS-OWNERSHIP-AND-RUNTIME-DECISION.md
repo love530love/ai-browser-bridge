@@ -73,7 +73,7 @@ NODE_OLDER_THAN_12H=4
 
 **可选加固（需用户单独授权）**：① adapter 启动/退出登记到 `.local/`，让巡检**按命令行**精确识别而不是按 `node` 名字；② 父进程身份 + 启动方式双证齐备后才考虑存活检测；③ 加固必须带真实边界回归（范例 `test/mcp-lifecycle.test.js`）。
 
-**2026-11-15 进展**：① 已实现（`src/adapter-registry.js` + `node src/cli.js adapters`，只读清单、心跳新鲜度、不做 ppid 判活/空闲超时/杀进程）；③ 已附 `test/adapter-registry.test.js` 真实子进程回归并扩展 `test/mcp-lifecycle.test.js`。② **未做**，残余缺口变为可观测但未自动关闭。详见 [P0-ITERATION-20261115.md](P0-ITERATION-20261115.md) 与 [PROCESS-LIFECYCLE.md](PROCESS-LIFECYCLE.md) 的 Adapter registry 节。
+**2026-11-15 进展**：① 已实现（`src/adapter-registry.js` + `node src/cli.js adapters`，只读清单、心跳新鲜度、不做 ppid 判活/空闲超时/杀进程）；③ 已附 `test/adapter-registry.test.js` 真实子进程回归并扩展 `test/mcp-lifecycle.test.js`。② 在 **0.42.2** 实现为**双因子父进程守卫**（`src/mcp-parent-guard.js`）：先证明父进程名可读且不是 shell/launcher，才监视其存活；父进程死亡时 adapter 自行退出；无法读取名字时连续三次失败后解除武装而不是猜测。`node src/cli.js processes` 提供 report-only 清单（service / watchdog / adapters，含 `orphanedCandidate`），并行探测、绝不发信号。实测 `tasklist /FI` 在本机 >8s，因此探针优先 `pwsh`/`powershell` 的 `Get-Process`。残余缺口只剩“父进程是 shell/launcher 且已退出”的 wrapper 场景：此时无法证明真实客户端，守卫按设计不武装，登记仍可见。详见 [P0-ITERATION-20261115.md](P0-ITERATION-20261115.md) 与 [PROCESS-LIFECYCLE.md](PROCESS-LIFECYCLE.md) 的 Parent guard 节。
 
 给外部回收器的硬规则（`docs/PROCESS-LIFECYCLE.md:5` 已有）：**不要把所有 Node 进程当重复项按名字杀**。本桥唯一的常驻进程是带 `src\server.js` 命令行的那一个。
 

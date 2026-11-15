@@ -75,3 +75,37 @@ decision and the parent-identity/launch-method evidence described above.
 Regressions: `test/adapter-registry.test.js` (record, heartbeat refresh,
 fresh/stale inventory, age-gated prune, real child process) and the extended
 `test/mcp-lifecycle.test.js` (record exists while serving, gone after EOF).
+
+## Parent guard and process inventory (0.42.2)
+
+The "client stays alive with open pipes" gap is now closed for the case where
+ownership can be proven, without the unsafe naive `process.ppid` check:
+
+- `src/mcp-parent-guard.js` probes the recorded parent's **name** first and
+  arms only when the name is readable and is not a shell/launcher
+  (`bash`, `sh`, `cmd`, `conhost`, `pwsh`, `powershell`, `node`, `npx`, `npm`,
+  terminals). While armed it checks parent liveness every 30s and exits the
+  adapter when the parent is gone. An unreadable name never acts: it disarms
+  after three consecutive probe failures, so one transiently slow lookup cannot
+  disable the guard for the session.
+- Measured while building this: `tasklist.exe /FI "PID eq N"` took **over 8s on
+  this host** and timed out a 5s probe, which made every parent name `null`.
+  The probe therefore tries `pwsh.exe`/`powershell.exe` `Get-Process` first
+  (~0.75s) and keeps `tasklist.exe` only as the last-resort fallback. Process
+  names are normalized to lowercase and to an `.exe` suffix so both
+  `node` and `node.exe` match the same safety rule.
+- `node src/cli.js processes` is the one inventory of what this project started:
+  it lists the service pid file, the watchdog pid file and every registered
+  adapter with `alive`, `parentAlive`, `parentName`, `parentIsShell` and
+  `orphanedCandidate`. It is `action: "report-only"`: pid files are treated as
+  claims, and nothing is signalled or killed. Probes run in parallel.
+- Registry files for dead adapters are still removed only by age
+  (`adapters --prune`), never on a liveness guess: a live adapter with a blocked
+  event loop can have a stale heartbeat.
+
+Regressions: `test/mcp-parent-guard.test.js` (shell disarm, unreadable-name
+disarm after three attempts, orphan fires only after arming, `.exe`
+normalization, PowerShell-first with tasklist fallback). `node src/cli.js
+runtime` additionally reports which optional runtimes are present on a new
+machine; only Node >=22 is required.
+

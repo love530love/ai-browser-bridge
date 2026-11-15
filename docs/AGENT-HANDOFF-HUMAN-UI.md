@@ -4,6 +4,46 @@
 
 ## 目标
 
+## 2026-11-15 接手增量（0.42.2）：三条诚实边界根因修复、进程治理与优先级调度
+
+触发：用户要求把 0.42.1 的三条诚实边界「详细调查根因并永久解决」，并同时治理 MCP/守护进程生命周期、
+强化多 agent 优先级调度、评估 REA 与自带运行时、回答常驻形态。范围与证据见
+[docs/ITERATION-20261115-0422.md](ITERATION-20261115-0422.md)。
+
+### 交付内容
+
+- **错误列表不再依赖窗口**：新增 `src/extension-error-journal.js`，默认从 `logs/audit.jsonl` 给出
+  `errorJournal`（`errors_present` / `none_recorded`，`panelInspected:false`）。`browser_reload_extension`
+  默认不打开、不激活 `chrome://extensions`；只有 `clearErrors:true` 才后台打开并用 UIA 清理，
+  清理未成功才 `partial:true`。`no_chrome_window` 不再把结论压成「未知」。
+- **同长度变更可证**：页内 MutationObserver 维护单调修订号，回执 `changed` 纳入修订变化；修订号不入重复键。
+- **父进程守卫**：`src/mcp-parent-guard.js` 双因子武装（父名可读且非 shell/launcher），名字不可读三次后
+  解除武装；探测优先 `pwsh`/`powershell`（本机 `tasklist /FI` 实测超 8s）。`node src/cli.js processes`
+  为 report-only 清单；`scripts/watch-service.ps1` 写 `.local/watchdog.pid`。
+- **读快车道**：每宿主 2 路只读并行（不同 tab），写等待本宿主读排空，同 tab 互斥，跨宿主独立；
+  `queuePriority`（-100..100）+ aging + 公平奖励，短任务快车道、长任务不饿死；服务持有任务，
+  调用方超时不撤回。
+- **运行时预检**：`node src/cli.js runtime` 报告 Node ≥22 与可选 npm/pwsh/powershell/python/go/rustc/rea；
+  REA 为 Node/MIT 可选 MCP peer，不内嵌、不作运行前置。
+- **常驻形态**：维持按登录用户的 service + watchdog + per-client adapter + extension；不做 Windows 服务
+  （Session 0 无法驱动交互桌面），不新增常驻进程。
+
+### 验收状态（接手必复核）
+
+- 全量 `npm test` → **910/910**（exit 0，0 fail，约 137s）。
+- `node src/cli.js processes` → 服务 + 5 条 adapter 记录（2 条存活，父名 `codex.exe`），report-only；
+  `node src/cli.js runtime` → 全部可选运行时存在，无建议。
+- 版本四处同步 0.42.1 → **0.42.2**；两个宿主已重载为 0.42.2（`focusRequired:false`、
+  `foregroundTaken:false`、未打开页签），心跳 `clean` + `provenClean:true`；部署后
+  `test:background` **51/51**，前台窗口与 Chrome 焦点不变。服务监听 PID 25684（`src/server.js`），
+  `doctor ok:true`。发布提交以 `git log` 为准。
+
+### 已知边界
+
+- wrapper-shell（父进程是 shell/launcher 且已退出）无法证明真实客户端，守卫按设计不武装，注册表仍可见。
+- `none_recorded` 是「无证据」，不是「面板已清空」；清理面板需要单独的 `clearErrors:true` 调用。
+- 未启 Playwright/CDP 网关，未读 Chrome profile / Cookie / Login Data / Local State，未改 `browserTarget`。
+
 ## 2026-11-15 接手增量（0.42.1）：后台优先、零抢焦点与高并发实测
 
 触发：用户要求高并发下稳定，且 Chrome 在后台、人类正在操作其他软件时，自动化不得抢屏幕或打断人。
