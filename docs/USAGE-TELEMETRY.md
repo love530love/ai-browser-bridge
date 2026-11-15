@@ -10,7 +10,7 @@
 | `.local/logs/audit.jsonl` | 服务端每条命令结束时 | `time`、`tool`、`hostId`、`outcome`、`errorCategory`、`durationMs`、`traceId` 等 |
 | `.local/logs/audit.jsonl`（`tool:"extension-error"`） | 扩展 | `eventId`、`errorCategory`、`droppedBeforeSend`，**不含页面内容** |
 | `.local/watchdog.jsonl` | 看门狗 | `starting-service`、`connected` 等状态迁移 |
-| `.local/snapshots.jsonl` | `cli heartbeat` / watch | 每次心跳的快照：版本、buildId、宿主列表、队列、派发缺口、**1 小时 usage 汇总** |
+| `.local/heartbeat/<UTC-date>.jsonl` | `cli heartbeat` / watch | 每周期快照：版本、buildId、宿主数、队列、findings、**1 小时 usage 摘要** |
 | `.local/heartbeat/incidents/*.md` | `cli heartbeat` | 非 clean 周期的证据与建议 |
 
 `.local/` 已在 `.gitignore` 中，不进入版本库。
@@ -66,7 +66,7 @@ node src/cli.js heartbeat --watch --interval-ms 60000
 2. **找错宿主**：`byHost` 中出现 `agent_embedded` 宿主承接了本应走系统 Chrome 的命令时，结合 `browser_hosts` 的 `recommendedHostId` / `selectionRequired` 复核路由。
 3. **找不确定性**：`uncertainCommands > 0` 表示有写入结果未被观察到；按约定不得重放，应先重新观察再行动。
 4. **验收修复**：修复前后各取一个窗口，记录 `commandErrors`、`errorCategories` 与相关工具的 p95，作为“是否真的变好”的对照证据。
-5. **心跳留痕**：`snapshots.jsonl` 的 `disk.usage` 是逐周期时间序列，可直接用于复盘“哪一小时开始变慢/报错”。
+5. **心跳留痕**：`.local/heartbeat/<UTC-date>.jsonl` 每行的 `usage` 是逐周期时间序列（命令/错误/不确定计数、每宿主记录数与 p95、最慢 3 个工具），可直接用于复盘“哪一小时开始变慢/报错”。
 
 所有结论必须带窗口与文件坐标；单点快照不能证明趋势。
 

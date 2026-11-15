@@ -13,7 +13,7 @@
 
 - 全量 `npm test` **887/887 通过**（exit 0，0 fail，约 143s）。
 - 受影响套件 `multi-host` / `extension-errors` / `usage-summary` / `heartbeat` → **61/61 通过**。
-- 四处版本同步 0.41.0 → **0.42.0**（`package.json`、`extension/manifest.json`、`package-lock.json` 顶层与 `packages[""]`）；buildId `6b29c092…b2a4e44` → **`bcbac6785c4024e60585b11550a5ee7ceb8eb80e77a70b282c2fe7b7848738a6`**。
+- 四处版本同步 0.41.0 → **0.42.0**（`package.json`、`extension/manifest.json`、`package-lock.json` 顶层与 `packages[""]`）；buildId `6b29c092…b2a4e44` → **`f80c613d34157a0b96b12ebcd1f3e5d2e581098ad0b1c589c6b125f120b793d0`**。
 - live CLI 首次调用 `action:"read"` 暴露 `recordDesktopAudit(name, …)` 作用域缺陷（`name is not defined`）；已改为字面量 `'browser_extension_errors'` 并加静态回归断言，重启后复验通过。
 - `node src/cli.js usage --hours 2` 实测返回命令记录、错误、服务启动次数与每工具 p50/p95。
 - 真机只读错误列表：`addressVerified:true`、`documentVisible:true`、`clearButtonPresent:false`、`pageReloadPerformed:false`。

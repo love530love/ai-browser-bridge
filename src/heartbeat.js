@@ -650,10 +650,20 @@ export async function runHeartbeat(options = {}) {
     }
 
     const hash = createHash('sha256').update(JSON.stringify({ status: snapshot.status, disk: snapshot.disk })).digest('hex').slice(0, 16);
+    const usage = snapshot.disk?.usage;
     const record = { cycleId, ts: snapshot.ts, verdict: evaluation.verdict, provenClean: evaluation.provenClean,
       snapshotHash: hash, durationMs: snapshot.durationMs,
       hostCount: snapshot.status?.hostCount ?? null, activeCount: snapshot.status?.activeCount ?? null,
       queued: snapshot.status?.queued ?? null,
+      // Compact longitudinal usage counters: no page text, URLs or credentials.
+      usage: usage ? {
+        windowHours: usage.windowHours, commandRecords: usage.commandRecords,
+        commandErrors: usage.commandErrors, uncertainCommands: usage.uncertainCommands,
+        serviceStarts: usage.serviceStarts, recoveryConnections: usage.recoveryConnections,
+        byHost: Object.fromEntries(Object.entries(usage.byHost ?? {}).map(([hostId, item]) =>
+          [hostId, { records: item.records, errors: item.errors, uncertain: item.uncertain, p95Ms: item.p95Ms }])),
+        slowestTools: (usage.slowestTools ?? []).slice(0, 3)
+      } : null,
       findings: evaluation.findings.map(item => ({ code: item.code, severity: item.severity, occurrences: item.occurrences })) };
     const day = new Date(nowMs).toISOString().slice(0, 10);
     degraded = !appendJsonl(join(dir, `${day}.jsonl`), record) || !writeState(dir, evaluation.nextState);

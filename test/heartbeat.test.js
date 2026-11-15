@@ -493,3 +493,26 @@ test('disk facts carry an aggregate usage summary, never the raw row detail', ()
   assert.ok(!JSON.stringify(facts.usage).includes('PRIVATE-PAGE-TEXT'),
     'the usage summary is aggregate counters only, not a copy of audit rows');
 });
+
+test('heartbeat rows persist only the compact usage counters', async () => {
+  const stateDir = tempState();
+  const usage = {
+    windowHours: 1, commandRecords: 3, commandErrors: 1, uncertainCommands: 0,
+    serviceStarts: 1, recoveryConnections: 1,
+    byHost: { 'h-a': { records: 3, errors: 1, uncertain: 0, p95Ms: 12 } },
+    slowestTools: [{ tool: 'browser_read', p95Ms: 12, records: 3 }]
+  };
+  const result = await runHeartbeat({
+    stateDir,
+    probe: async () => statusOk(),
+    diskFacts: diskOk({ usage }),
+    now: () => T0,
+    thresholds: { ...HEARTBEAT_DEFAULTS },
+    remediate: false
+  });
+  assert.equal(result.verdict, 'clean');
+  const rows = readFileSync(join(stateDir, 'heartbeat', '2026-11-06.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(rows.at(-1).usage.commandRecords, 3);
+  assert.equal(rows.at(-1).usage.byHost['h-a'].p95Ms, 12);
+  assert.equal(rows.at(-1).usage.slowestTools[0].tool, 'browser_read');
+});
