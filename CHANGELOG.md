@@ -18,8 +18,10 @@
 ### 验收
 
 - 定向测试 60/60；新增 `test/service-lifecycle.test.js`、`test/extension-error-claims.test.js`，重写 `test/mcp-parent-guard.test.js`（wrapper 链、被动、pid 复用、瞬时探测失败）。
-- 全量 `npm test` → **930/930**（exit 0，约 146s）。
+- 全量 `npm test` → **930/930**（exit 0，0 fail，约 161s，版本 0.42.3 下执行）。
 - 真实链探测：`probeProcessChain(process.ppid)` 825ms，链含 3 层 `bash.exe` 后命中 `qoder.exe`，anchor 为 `qoder.exe`；不读命令行、不读环境变量。
+- 部署实测：心跳 dry-run 确认空闲后执行 `build_restart`，账本先写 `restart_intent`（actionId `50daff92-81c6-4d07-8664-31c383283798`，SIGTERM pid 25684），随后服务以 0.42.3 / buildId `548eb51e…` 启动（pid 104788）；两个宿主扩展经白名单重载（actionId `f98d35a0…`、`43ccfe36…`，均 `verified:true`），`doctor ok:true`、心跳 `findings:[]`。
+- 面板实测（`action:"read"`）：`journalState:"none_recorded"`、`panelState:"not_inspected"`、`overall:"unknown"`、`cleanClaim:false`，证明「无证据」不再被压成「干净」。
 
 ### 边界
 

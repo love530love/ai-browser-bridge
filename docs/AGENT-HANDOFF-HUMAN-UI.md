@@ -41,14 +41,23 @@
   test/mcp-parent-guard.test.js test/heartbeat.test.js` → 60/60。
 - 真实链探测（本机）：`bash.exe ×3 → qoder.exe`，锚点 pid 132968，825ms。
 - 版本四处同步 0.42.2 → **0.42.3**；发布提交以 `git log` 为准。
+- 部署（2026-11-15 11:00Z，均经白名单）：`build_restart` 先写 intent
+  （actionId `50daff92-81c6-4d07-8664-31c383283798`），服务以 0.42.3 / buildId
+  `548eb51e…` 启动（pid 104788）；两个宿主扩展重载 `verified:true`
+  （`f98d35a0…`、`43ccfe36…`）；`doctor ok:true`、心跳 `findings:[]`。
+- 部署后面板读数：`action:"read"` → `journalState:"none_recorded"`、
+  `panelState:"not_inspected"`、`overall:"unknown"`、`cleanClaim:false`。
 
 ### 已知边界
 
 - 账本只能证明「本服务自己记录到的」退出；账本文件被外部删除后的首次启动记为
-  `first_start`，不追溯。
+  `first_start`，不追溯。本次部署的旧服务运行在账本之前，故 `previousExit` 为
+  `first_start`，但 `restart_intent` 已先于启动落盘。
 - `signal_shutdown_unattributed` 只表示「无意图的 SIGTERM/SIGINT」，不指认发送者；
   账本记录的是证据，不是归责。
 - 祖先链探测依赖 PowerShell；两者都不可用时守卫进入 passive，仍以注册表可见性为准。
+- 部署时存活的一个 adapter 早于守卫最终构建，仍显示 `process_chain_unavailable`；
+  新进程会按新链武装，旧进程不会热更新。
 - 未启 Playwright/CDP 网关，未读 Chrome profile / Cookie / Login Data / Local State，未改 `browserTarget`。
 
 ## 2026-11-15 接手增量（0.42.2）：三条诚实边界根因修复、进程治理与优先级调度
