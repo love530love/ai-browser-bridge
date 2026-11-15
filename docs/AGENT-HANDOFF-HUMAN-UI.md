@@ -29,8 +29,12 @@
 - `npm run test:background` → **51/51**；OS 前台窗口前后均为
   `{"handle":3541526,"pid":113140,"process":"Qoder"}`，Chrome 窗口保持 `minimized / focused:false`。
 - 全量 `npm test` → **890/890**（exit 0，0 fail，约 170s）。
-- 版本四处同步 0.42.0 → **0.42.1**；升级后需重启服务到新 buildId 并重载每个宿主，
-  再跑一次 `test:background` 作为部署后复验。
+- 版本四处同步 0.42.0 → **0.42.1**；提交 `e031bc7`。
+- 部署后状态（本机）：服务重启到 buildId `ca4fe48f…`，两个宿主（系统 Chrome `h-0b47…`、
+  ChatGPT 内嵌 `h-b76b…`）均重载为 0.42.1（`focusRequired:false`，无窗口/按键/前台请求），
+  心跳 verdict `clean`、`hostCount:2`、无 findings。
+- 部署后复验：`test:background` **51/51**（OS 前台保持 Qoder，Chrome `maximized/false`），
+  `test:focus` **25/25**。扩展错误列表因 Chrome 无可达窗口仍为 `unknown`（非干净，未重试）。
 
 ### 已知边界
 

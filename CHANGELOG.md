@@ -16,6 +16,7 @@
 - `npm run test:background` → **51/51**；OS 前台窗口在测试前后均为 `{"handle":3541526,"pid":113140,"process":"Qoder"}`，Chrome 窗口保持 `minimized / focused:false`。
 - 同页重复写返回 `status:"duplicate_suppressed", dispatched:false`（安全拒绝）；`allowRepeat:true` 正常派发。
 - 四处版本同步 0.42.0 → **0.42.1**（`package.json`、`extension/manifest.json`、`package-lock.json` 顶层与 `packages[""]`）。
+- 部署复验：服务 buildId `ca4fe48f…`，两个宿主均重载为 0.42.1，心跳 `clean`；重载后再次 `test:background` **51/51**、`test:focus` **25/25**。
 
 ### 边界
 
