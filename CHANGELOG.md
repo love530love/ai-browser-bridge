@@ -1,3 +1,30 @@
+## 0.40.0 文档增补 4 — 2026-11-15（**接手交接：进度 / 计划 / 审计入口；纯文档，无版本升级**）
+
+触发：用户问「写交接文档和工作进度和计划了吗？以便其他 agent 可以接手审计和完善升级」。复核后确认：此前有 AAR、CHANGELOG、三份决策文档与 README 索引，但**没有一份面向「其他 agent 接手」的当前状态快照 + 待办计划 + 审计入口**；`docs/HANDOFF.md` 停留在 0.2.0，`docs/AGENT-HANDOFF-HUMAN-UI.md` 是逐版本历史增量且正被其他 agent 并行修改。
+
+基线（2026-11-15 14:02 GMT+8 现取）：HEAD `7f343d4`、`origin/main...HEAD 0/0`、四处 `0.40.0`、磁盘与在线 buildId 均 `5b705286…77a`、Latest `v0.40.0` + `docs.1/.2/.3` Pre-release。
+
+### 交付（1 新增 + 3 修订，共 4 文件）
+
+- **新增** `docs/AGENT-HANDOFF-20261115.md`：事实源优先级与四份 handoff 分工、架构分层与改动影响表、带时间戳的当前状态快照、最近交付链、P0–P3 待办计划（逐条带证据与门槛）、可复制的审计命令、升级 SOP、10 条硬边界、接手第一小时检查单。
+- **修订** `docs/HANDOFF.md`（顶部加当前入口指针，标注早期记录已过时）、`README.md`（索引 +1 行、原 HANDOFF 行改为考古用途）、`CHANGELOG.md`（本段）。
+
+### 本轮取证（均只读，不写成「已修复」）
+
+- 服务四证全通：LISTENING `142028` = `.local/server.pid` = `node`（`D:\Scoop\apps\nodejs-lts\current\node.exe`，13:44:35+08:00 启动）、TCP OK、裸 `/status` 带端口 `401`、带 token `status` 返回 `0.40.0` / `hostCount:2` / `connected:true` / buildId 一致。
+- 同日 13:25–13:31 的 AAR 基线是 `35384`；`.local/watchdog.jsonl` 本地 11-15 共 280 行 `BAD=0`，可见 13:43:21 与 13:44:32 两轮 `starting-service → startup-completed → connected`、`failures` 恒 0 ⇒ 按看门狗启动序列解释 PID 变化，**不称漂移、不称故障、不称修复**。`watchdog-status.json` 为 `connected / failures 0` 的滞后快照，只登记。
+- `heartbeat/state.json`：`counters:{}`、`consecutiveFailures:0`、`missingHostIds:[]`、`frozen:false`、两 `hostId` 均 0.40.0 connected。`extensionOwner` 报 `198816 / ChatGPT / nonChromeHost` 属易变字段，不据此判宿主丢失。
+- 历史 `errorListCleared:false` ⇒ 扩展报错仍「未清除、状态未知」；8 条 `pwsh` 子进程测试失败属环境前提不成立；历史 critical / uncertain / attention 有连续 clean 闭环，非现症。
+
+### 边界
+
+- 不改 `src/` / `extension/`、不改版本号、不改 buildId ⇒ **无需重启服务或重载扩展**；纯文档 tag 创建时直接带 `--prerelease`。
+- 未跑 PoC、未启动 Playwright / CDP、未克隆或解析 Chrome profile、未杀进程、未启 GUI、未切 `browserTarget`、未改 Qoder 个人目录、未碰协作区。
+- 工作区他人并行改动 6 项（`.gitignore`、`AGENTS.md`、`docs/AGENT-HANDOFF-HUMAN-UI.md`、`.aep/`、`coordination/`、现场报告）**一律不夹带提交**。
+- 本文状态快照是 14:02 的瞬时值；接手时按文内 §6 重跑取证，不直接引用旧数字。
+
+---
+
 ## 0.40.0 文档增补 3 — 2026-11-14（**进程归属取证 + 运行时选型决策；纯文档，无版本升级**）
 
 触发：用户在「冗余进程清理」会话发现本机 166 个重复 MCP/stdio 服务器实例（18 条相同命令行：`windows-control/server.py` 20 份、`windows_mcp serve` 18 份、`jianyingdraft/server.py` 16 份；另 207 conhost、29 个卡死 taskkill），问是否与本项目有关、是否该改用 Python / Rust 提升稳定性。基线：HEAD `d64f837`、0.40.0、`v0.40.0-docs.2`。

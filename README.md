@@ -397,7 +397,8 @@ npm run test:native
 | `uninstall-autostart.ps1` | 按 `autostart-registry.json` 逐项撤销并输出「已移除 / 未找到」；不擅自删除外部计划任务 |
 | `.local/runtime.json` · `.local/autostart-registry.json` | 固化的二进制路径与本次注册项清单，供诊断与卸载对账 |
 | `test/` | 服务测试和真实扩展端到端测试 |
-| `docs/HANDOFF.md` | 后续开发交接与已知限制（早期记录，涉及未完成项可能已过时） |
+| `docs/AGENT-HANDOFF-20261115.md` | **当前接手入口**：0.40.0 状态快照、工作进度、待办计划（P0–P3）、审计工具箱、升级 SOP 与硬边界清单；数字需按文内命令复核 |
+| `docs/HANDOFF.md` | 0.2.0 / 0.1.1 早期交接记录（**已过时**，顶部有指向当前入口的指针，仅供考古） |
 | `docs/KNOWN-LIMITATIONS.md` | **当前版本**的已知限制与硬边界：窗口可见性 / 不抢前台、CSP 双通道、调试横幅与 DevTools 互斥、宿主身份与内嵌 Chromium、累计计数不是瞬时状态 |
 | `docs/TROUBLESHOOTING-MATRIX.md` | 症状分诊矩阵（服务级 OK + 页面级超时 / 横幅 / 宿主误选），附现场报告哪些断言不能照抄的逐条源码反证 |
 | `docs/CDP-GATEWAY-PLAN.md` | CDP Gateway 可行性评估：**未实现、未 PoC、未授权**，列架构障碍与 5 条前置门槛 |

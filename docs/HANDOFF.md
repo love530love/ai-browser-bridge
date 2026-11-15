@@ -1,3 +1,8 @@
+> ⚠️ **本文是 0.2.0 / 0.1.1 时期的早期交接记录，涉及未完成项可能已过时，不要作为现状依据。**
+> **当前接手入口**：[docs/AGENT-HANDOFF-20261115.md](AGENT-HANDOFF-20261115.md)（0.40.0 状态快照、待办计划、审计工具箱与升级 SOP）。
+> 逐版本「为什么这么改」的复盘见 [docs/AGENT-HANDOFF-HUMAN-UI.md](AGENT-HANDOFF-HUMAN-UI.md)（根 `AGENTS.md` §Incoming agent handoff 指定）；版本说明见 `CHANGELOG.md`。
+> 以下保留原文，仅供考古。
+
 # 当前交接：0.2.0
 
 当前版本、验证范围与待办以 UPDATE-0.2.0.md 为准。已实现 15 工具、任务助手、可配置模型循环、全局任务租约及取消。原有 0.1.1 日常 Chrome 已成功验收；0.2.0 独立 Chromium 验证通过，个人 Chrome 需要重载后核验。下文保留早期交接记录，涉及未完成项可能已过时。
