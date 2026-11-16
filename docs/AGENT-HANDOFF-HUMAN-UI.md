@@ -26,6 +26,8 @@
 - 未经扩展执行：`browser_locate` 由服务端编排现有读工具，`extension/worker.js` 无新增分支；`tool-index` 3500 字节预算测试保持通过。
 - 部署（2026-11-16 04:33–04:37Z，均经白名单）：`build_restart` intent `8901256b…`，服务以 0.43.0 启动（pid 57936，buildId `4377d0a4…`）；随后冒烟发现 coverage 漏洞并修复，再次 `build_restart` intent `818dd31d…`，最终 pid 50624 / buildId `fc9e2322…`。两个宿主均经 `chrome.runtime.reload` 自重载至 0.43.0（`foregroundTaken:false`，未开 tab、未抬窗口），`doctor ok:true`。
 - 真实页面冒烟（只读，tab 663195956）：`browser_locate {query:"购买资源包"}` 返回 3 个候选、`selection:null`；首轮暴露 `coverage.complete:true` 与 `text_scan_truncated` 自相矛盾，修复后为 `status:"partial"`、`coverage.complete:false`、reasons 保留 `frame_text_search_incomplete` / `text_scan_truncated`。`strategyHealth` 第二轮读到 semantic-dom/text-match/shadow-dom 各 1 次运行。
+- 部署后复验：`heartbeat --no-remediate` → `verdict:"clean"`、`findings:[]`、`provenClean:true`；`npm run test:focus` 25/25；`npm run test:background` 51/51（OS 前台仍为 Qoder，Chrome 焦点/窗口状态未变）。
+- 发布提交 `4804938` 已在本地 main；未推送远端、未创建 tag/Release（等待用户明确指令）。
 - 未启 Playwright/CDP 网关，未读 Chrome profile / Cookie / Login Data / Local State，未改 `browserTarget`。
 
 ### 已知边界
