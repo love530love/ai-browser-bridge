@@ -13,6 +13,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { computeBuildIdentity } from './build-identity.js';
 import { recordLifecycle } from './service-lifecycle.js';
@@ -20,6 +21,10 @@ import { recordLifecycle } from './service-lifecycle.js';
 export const RESTART_CONFIRMATION = 'restart_service_when_idle_once';
 const DEFAULT_TIMEOUT_MS = 90000;
 const DEFAULT_POLL_MS = 1000;
+// Get-CimInstance can take ~34s on a host where WMI autoload is slow, so the
+// probe script answers first through NtQueryInformationProcess (no WMI), and
+// CIM only remains as a slow fallback.
+const PROBE_SCRIPT = fileURLToPath(new URL('../scripts/probe-process-identity.ps1', import.meta.url));
 
 const normalizePath = value => String(value ?? '').replace(/\\/g, '/').toLowerCase();
 
@@ -35,17 +40,28 @@ export function parseNetstatListener(stdout, port) {
   return null;
 }
 
-export function probeProcessIdentity(pid, { execFileFn = execFileSync, timeoutMs = 8000 } = {}) {
+export function probeProcessIdentity(pid, { execFileFn = execFileSync, timeoutMs = 8000, cimTimeoutMs = 45000 } = {}) {
   if (!Number.isInteger(pid) || pid <= 1) return { checked: false, pid, error: 'invalid_pid' };
   if (process.platform !== 'win32') return { checked: false, pid, error: 'unsupported_platform' };
-  const lookup = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction Stop; $p | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress`;
-  const attempts = [
-    ['pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', lookup]],
-    ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', lookup]]
-  ];
-  for (const [command, args] of attempts) {
+  for (const command of ['pwsh.exe', 'powershell.exe']) {
     try {
-      const stdout = execFileFn(command, args, { encoding: 'utf8', timeout: timeoutMs, windowsHide: true });
+      const stdout = execFileFn(command, ['-NoProfile', '-NonInteractive', '-File', PROBE_SCRIPT, '-ProcessId', String(pid)], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true });
+      const record = JSON.parse(String(stdout).trim());
+      if (!record || Number(record.processId) !== pid) continue;
+      if (!record.commandLine && !record.executablePath) continue;
+      return {
+        checked: true,
+        pid,
+        executablePath: record.executablePath ?? null,
+        commandLine: record.commandLine ?? null,
+        error: null
+      };
+    } catch { /* fall through to the next entry point */ }
+  }
+  const lookup = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction Stop; $p | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress`;
+  for (const command of ['pwsh.exe', 'powershell.exe']) {
+    try {
+      const stdout = execFileFn(command, ['-NoProfile', '-NonInteractive', '-Command', lookup], { encoding: 'utf8', timeout: cimTimeoutMs, windowsHide: true });
       const parsed = JSON.parse(String(stdout).trim());
       const record = Array.isArray(parsed) ? parsed[0] : parsed;
       if (!record || Number(record.ProcessId) !== pid) continue;

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseNetstatListener,
+  probeProcessIdentity,
   listenerIdentityVerified,
   watchdogIdentityVerified,
   evaluateRestartPreflight,
@@ -29,6 +30,31 @@ const watchdog = (pid = 7777, commandLine = `pwsh.exe -File "${ROOT}\\scripts\\w
 });
 
 const ready = () => ({ status: idleStatus(), diskBuildId: 'disk-build-2', listener: nodeListener(), watchdog: watchdog(), root: ROOT });
+
+test('probeProcessIdentity answers through the fast NtQuery script before touching CIM', { skip: process.platform !== 'win32' }, () => {
+  const calls = [];
+  const execFileFn = (command, args) => {
+    calls.push({ command, args });
+    return JSON.stringify({ processId: 4242, commandLine: `node "${ROOT}\\src\\server.js"`, executablePath: 'C:\\Program Files\\nodejs\\node.exe' });
+  };
+  const identity = probeProcessIdentity(4242, { execFileFn });
+  assert.equal(identity.checked, true);
+  assert.equal(identity.commandLine, `node "${ROOT}\\src\\server.js"`);
+  assert.equal(calls.length, 1, 'the fast path must win on the first attempt');
+  assert.match(calls[0].args.join(' '), /probe-process-identity\.ps1/);
+});
+
+test('probeProcessIdentity falls back to CIM only after both fast entry points fail', { skip: process.platform !== 'win32' }, () => {
+  let attempt = 0;
+  const execFileFn = () => {
+    attempt += 1;
+    if (attempt <= 2) throw new Error('spawn EPERM');
+    return JSON.stringify({ ProcessId: 4242, ExecutablePath: 'C:\\Program Files\\nodejs\\node.exe', CommandLine: 'node src/server.js' });
+  };
+  const identity = probeProcessIdentity(4242, { execFileFn, timeoutMs: 100, cimTimeoutMs: 100 });
+  assert.equal(identity.commandLine, 'node src/server.js');
+  assert.equal(attempt, 3, 'pwsh + powershell fast attempts, then CIM');
+});
 
 test('parseNetstatListener returns only the LISTENING pid for the requested port', () => {
   const stdout = [
