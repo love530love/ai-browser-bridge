@@ -58,9 +58,9 @@
 
 分三层，优先确定性、再上模型：
 
-- **结构层**：DOM、可访问性树、iframe、Shadow DOM、滚动容器、表单状态、遮挡关系；
+- **结构层**：DOM、可访问性树、iframe、Shadow DOM、滚动容器、表单状态、遮挡关系；源码/F12 深度层已落地 `browser_script_inventory`、`browser_source_map`、`browser_event_listeners`、`browser_dom_snapshot`、`browser_framework_tree`（均为只读证据，不返回 ref）；
 - **几何层**：元素矩形、视口、DPR、命中测试、层叠顺序；
-- **像素层**：截图、OCR（规划 `browser_ocr`，provider 可插拔）、非文本视觉元素检测（规划 `browser_visual_elements`）。
+- **像素层**：截图、OCR（`browser_ocr` 已实现 Windows.Media.Ocr 本地后端，无权重/无网络；provider 插拔仍在规划）、非文本视觉元素检测（规划 `browser_visual_elements`）。
 
 归一化输出：每个候选元素带 `ref`、角色/文本、矩形、可见性、遮挡、来源通道与置信度。
 模型只做排序/建议，不直接执行；模型不可用时结构层必须仍能完成可识别任务。
@@ -72,8 +72,8 @@
 弱模型不需要理解全部工具，只需要一条稳定顺序：
 
 ```text
-browser_health → browser_hosts → browser_tabs → browser_observe
-→ browser_prepare_action → 操作（写用 _verified）→ 重新观察/验证
+browser_health → browser_hosts → browser_tabs → browser_agent_advice
+→ browser_observe → browser_prepare_action → 操作（写用 _verified）→ 重新观察/验证
 ```
 
 规则：
@@ -81,13 +81,14 @@ browser_health → browser_hosts → browser_tabs → browser_observe
 - 一次只推进一步；失败就读返回的 `nextStep`，不要自创替代通道；
 - 页面有遮挡先扫遮挡，有 iframe 先取 frame 引用，有 Shadow DOM 先取 shadow 引用；
 - 写操作必须带预期条件；`not_dispatched` 可重试，`uncertain` 只能重新观察；
+- 高并发或排队时先调 `browser_agent_advice`（本地、只读、永不入队），按 `decision`、`estimatedWaitMs`、`blockers` 与 `nextStep` 行动；上一笔写结果未知时只重新读，不重放；
 - 多宿主时先看推荐宿主与 `selectionRequired`，不要凭主宿主旧印象选浏览器；
 - 不读凭据、不复制 profile、不为了“绕过”而开第二个浏览器。
 
 ## 7. 本地与内置模型
 
 - 模型是**可选增强器**：规划、候选排序、视觉理解、恢复建议；
-- 默认不依赖云端；Chrome 内置模型与本地小模型通过适配器接入；
+- 默认不依赖云端；Chrome 内置模型与本地小模型通过适配器接入；P3 的 `browser_agent_advice` 先给确定性结论，`modelProvider:"chrome"` 只准备 `browser_local_judge mode:"triage"` 参数（仅队列元数据），`"local"` 才调用 loopback OpenAI 兼容端点（≤2 并发、严格 JSON、有界超时/输出，失败降级 `unavailable`）；
 - 模型输出必须是受 schema 约束的建议，不能绕过租约、策略、上传目录与写验证；
 - 模型不可用 → 确定性路径、`waiting` 或可恢复检查点，不丢任务、不盲重放；
 - 评测必须包含“完全禁用模型”一轮。
@@ -140,5 +141,5 @@ Bridge 服务（队列 / 租约 / 策略 / 审计 / 心跳）
 ## 12. 近期优先级
 
 1. 已落地：多宿主推荐路由、扩展错误列表只读判定、usage 遥测、心跳 usage 摘要。
-2. 下一步：`browser_ocr` provider 接口（默认不捆绑权重）、`browser_visual_elements`（非文本 CV 移植）、`browser_read mode:"main"`（Readability 移植）。
-3. 再下一步：能力画像与弱 Agent 指引并入 `browser_capabilities` / `nextStep`；CDP 网关与 Playwright live PoC 仍需独立授权。
+2. 已落地（0.44.0 工作树）：`browser_ocr`（Windows.Media.Ocr 本地后端，行框/CSS/0..1000 坐标，无 ref、无网络、文本不入账本）；P2 深度感知五工具（`browser_script_inventory`、`browser_source_map`、`browser_event_listeners`、`browser_dom_snapshot`、`browser_framework_tree`）与 Resource Timing 瀑布；P3 `browser_agent_advice`（只读、永不入队、确定性决策 + `estimatedWaitMs`）、`browser_local_judge mode:"triage"`（仅元数据）与可选 loopback 小模型。下一步：P4 真实页面高并发基准与失败样本回归，再评估 OCR 多 provider、`browser_visual_elements`、`browser_read mode:"main"`。
+3. 再下一步：CDP 网关与 Playwright live PoC 仍需独立授权与现场验收。

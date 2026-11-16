@@ -166,6 +166,22 @@ test('a target that cannot be located is routed to locate, not to a guessed coor
   assert.ok(capabilityGuide({ goal: '读取页面内容' }).primary.tools.includes('browser_locate'));
 });
 
+test('pixel-only text is routed to local OCR before a guessed coordinate', () => {
+  for (const goal of ['识别图片里的文字', 'OCR 一下画布上的标签', 'read the text in this image']) {
+    const guide = capabilityGuide({ goal });
+    assert.equal(guide.primary?.intent, 'ocr-or-image-text', goal);
+    assert.ok(guide.primary.tools.includes('browser_ocr'), goal);
+    assert.equal(guide.focusRequired, false, goal);
+    assert.match(guide.primary.prefer, /partial|availableLanguages/, goal);
+    assert.match(guide.primary.prefer, /browser_prepare_coordinate/, goal);
+    assert.match(guide.primary.prefer, /viewport/, goal);
+  }
+  const policy = capabilityGuide({ goal: '' }).focusPolicy;
+  assert.ok(policy.backgroundSafeTools.includes('browser_ocr'));
+  const read = capabilityGuide({ goal: '读取页面内容' });
+  assert.ok(read.fallbacks.includes('browser_ocr'));
+});
+
 test('launching and reloading are both advertised as background-safe', () => {
   const launch = capabilityGuide({ goal: '浏览器没启动，帮我拉起来' });
   assert.equal(launch.primary.intent, 'launch-browser');

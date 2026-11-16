@@ -10,7 +10,13 @@ param(
   # -Heartbeat makes heartbeat --watch resident; -ScheduledTask registers a
   # logon-triggered watchdog task. See the warning below before enabling.
   [switch]$Heartbeat,
-  [switch]$ScheduledTask
+  [switch]$ScheduledTask,
+  # -AdoptExternal tracks a positively verified external "AI Browser Bridge
+  # Watchdog" task in this manifest so uninstall-autostart.ps1 may delete it.
+  # Without it, an external task is reported but never touched.
+  [switch]$AdoptExternal,
+  # -Force overrides ONLY the read-only heartbeat-versus-second-route preflight.
+  [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -54,6 +60,85 @@ function Get-WatchdogTaskState([string]$TaskName) {
   } catch { }
   return 'unknown'
 }
+
+function Get-ScheduledTaskActionEvidence([string]$TaskName) {
+  # Read-only. Existence alone is not identity: before this project adopts an
+  # external task it must prove the task action references *this* project's
+  # watch-service.ps1. schtasks /query /xml is used because it carries the
+  # command and arguments; a blocked query is reported, never treated as clean.
+  $ErrorActionPreference = 'SilentlyContinue'
+  try {
+    $xml = & schtasks.exe /query /tn $TaskName /xml 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      return [ordered]@{ registered = $false; matchesProject = $false; error = 'not_found_or_query_blocked'; actionText = '' }
+    }
+    $text = ($xml -join "`n")
+    $normalizedRoot = ($root -replace '\\', '/').ToLowerInvariant()
+    $normalizedText = ($text -replace '\\', '/').ToLowerInvariant()
+    return [ordered]@{
+      registered     = $true
+      matchesProject = ($normalizedText.Contains('watch-service.ps1') -and $normalizedText.Contains($normalizedRoot))
+      error          = $null
+      actionText     = $text
+    }
+  } catch {
+    return [ordered]@{ registered = $false; matchesProject = $false; error = $_.Exception.Message; actionText = '' }
+  }
+}
+
+function Find-SecondInspectionRoutes {
+  # heartbeat --watch is a resident loop. A second inspection route (the hourly
+  # single-shot automation) would collide with it on the first cycle. This is a
+  # read-only preflight; unreadable scopes are left unknown by omission, not
+  # reported as "clean".
+  $found = [System.Collections.Generic.List[object]]::new()
+  $normalizedRoot = ($root -replace '\\', '/').ToLowerInvariant()
+  function Test-InspectionText([string]$text) {
+    if ([string]::IsNullOrEmpty($text)) { return $false }
+    $normalized = ($text -replace '\\', '/').ToLowerInvariant()
+    return $normalized.Contains('heartbeat') -and
+      $normalized.Contains($normalizedRoot) -and
+      -not $normalized.Contains('--watch')
+  }
+  try {
+    $key = Get-Item -LiteralPath $runKey
+    foreach ($name in @($key.GetValueNames())) {
+      if ($name -eq $heartbeatValueName -or $name -eq $valueName) { continue }
+      $value = [string]$key.GetValue($name)
+      if (Test-InspectionText $value) {
+        $found.Add([ordered]@{ kind = 'registry-run'; name = $name; evidence = $value }) | Out-Null
+      }
+    }
+  } catch { }
+  try {
+    $startup = [Environment]::GetFolderPath('Startup')
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($file in @(Get-ChildItem -LiteralPath $startup -Filter '*.lnk' -ErrorAction SilentlyContinue)) {
+      if ($file.FullName -eq $heartbeatLinkPath -or $file.FullName -eq $linkPath) { continue }
+      try {
+        $shortcut = $shell.CreateShortcut($file.FullName)
+        $evidence = ([string]$shortcut.TargetPath) + ' ' + ([string]$shortcut.Arguments)
+        if (Test-InspectionText $evidence) {
+          $found.Add([ordered]@{ kind = 'startup-shortcut'; path = $file.FullName; evidence = $evidence }) | Out-Null
+        }
+      } catch { }
+    }
+  } catch { }
+  try {
+    if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+      foreach ($task in @(Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+        foreach ($action in @($task.Actions)) {
+          $evidence = ([string]$action.Execute) + ' ' + ([string]$action.Arguments)
+          if (Test-InspectionText $evidence) {
+            $found.Add([ordered]@{ kind = 'scheduled-task-route'; name = $task.TaskName; path = $task.TaskPath; evidence = $evidence }) | Out-Null
+          }
+        }
+      }
+    }
+  } catch { }
+  return $found.ToArray()
+}
+
 
 function ConvertTo-XmlText([string]$text) {
   # Escape paths / arguments before embedding them in the task definition XML.
@@ -188,6 +273,7 @@ function Show-AutostartStatus {
   if ($state -eq 'registered') {
     Write-Host "[user-external] external: true managed: false scheduled task ""$watchdogTaskName"": detected (registered)"
     Write-Host ('  project will not auto-delete it; to remove manually: schtasks /delete /tn "' + $watchdogTaskName + '" /f')
+    Write-Host '  处置：保持现状（继续由外部管理，uninstall 不删除），或运行 install-autostart.ps1 -AdoptExternal 将其纳入清单；收养前会核验任务动作确实指向本项目的 scripts/watch-service.ps1，核验失败则拒绝并保持外部状态。'
     if ($managedScheduledTask) {
       Write-Host '  注意：同名任务已在上方 managed 清单登记（由 -ScheduledTask 注册），此处检测到的很可能就是该项目管理项，uninstall 会按清单清理。'
     }
@@ -202,6 +288,27 @@ function Show-AutostartStatus {
 if ($StatusOnly) {
   Show-AutostartStatus
   return
+}
+
+# ---- preflight (read-only, before any write): heartbeat vs second inspection ----
+# Registering a resident --watch while an hourly single-shot route already exists
+# makes the first cycle report clock_drift and freeze whitelist self-healing.
+# Detect it before writing runtime.json / shortcuts / the manifest; -Force is the
+# explicit override and still prints the conflict.
+if ($Heartbeat) {
+  $secondRoutes = @(Find-SecondInspectionRoutes)
+  if ($secondRoutes.Count -gt 0) {
+    Write-Host 'REFUSED: -Heartbeat would register a resident heartbeat --watch beside an existing inspection route.'
+    foreach ($route in $secondRoutes) {
+      Write-Host ('  [second-route] ' + ($route | ConvertTo-Json -Depth 6 -Compress))
+    }
+    Write-Host "  $heartbeatWarning"
+    if (-not $Force) {
+      Write-Host '  No writes were made. Remove the second route above, or re-run with -Force after confirming you accept clock_drift and frozen self-healing on the first cycle.'
+      exit 3
+    }
+    Write-Host '  -Force supplied: continuing with both routes. Expect clock_drift on the first cycle.'
+  }
 }
 
 # ---- install path (writes) ----
@@ -310,6 +417,35 @@ if ($ScheduledTask) {
   }
 }
 
+if ($AdoptExternal) {
+  # Bring an externally registered watchdog task into this manifest so a later
+  # uninstall can remove it instead of leaving an orphan that relaunches the
+  # supervisor. Adoption is explicit, and only a positively verified action
+  # (references this project's watch-service.ps1) is accepted.
+  $alreadyManaged = @($entries | Where-Object {
+    [string]$_.kind -eq 'scheduled-task' -and [string]$_.name -eq $scheduledTaskName
+  }).Count -gt 0
+  if (-not $alreadyManaged) {
+    $evidence = Get-ScheduledTaskActionEvidence $scheduledTaskName
+    if (-not $evidence.registered) {
+      throw "Cannot adopt ""$scheduledTaskName"": the task was not positively found (query result: $($evidence.error)). No writes were made. Verify with: schtasks /query /tn ""$scheduledTaskName"" /xml"
+    }
+    if (-not $evidence.matchesProject) {
+      throw "Refusing to adopt ""$scheduledTaskName"": its action is not proven to reference this project's scripts/watch-service.ps1, so an uninstall could delete an unrelated task. Inspect with: schtasks /query /tn ""$scheduledTaskName"" /xml. Re-run without -AdoptExternal to leave it external, or remove it manually and re-register with -ScheduledTask."
+    }
+    $entries.Add([ordered]@{
+      kind       = 'scheduled-task'
+      name       = $scheduledTaskName
+      adopted    = $true
+      adoptedAt  = [DateTimeOffset]::Now.ToString('o')
+      evidence   = 'schtasks /query /xml action references this project scripts/watch-service.ps1'
+    }) | Out-Null
+    Write-Host "[adopted] external scheduled task ""$scheduledTaskName"" is now tracked by this manifest; uninstall-autostart.ps1 will delete it by name."
+  } else {
+    Write-Host "[adopted] scheduled task ""$scheduledTaskName"" is already managed by -ScheduledTask; no duplicate entry."
+  }
+}
+
 # Overwrite (never append): the manifest always lists only what was just
 # registered successfully, so switching Method cannot leave a ghost entry.
 $registry = [ordered]@{
@@ -333,4 +469,5 @@ Write-Host 'Health supervisor installed and launched. Check .local/watchdog-stat
 Write-Host 'stop.ps1 pauses recovery; start.ps1 resumes it. uninstall-autostart.ps1 disables the supervisor.'
 Write-Host 'Optional (off by default): -Heartbeat (heartbeat --watch resident) and -ScheduledTask (logon-triggered watchdog task).'
 Write-Host "If -Heartbeat is used: $heartbeatWarning"
+Write-Host 'External watchdog task: -AdoptExternal tracks it in the manifest (verified action only) so uninstall can clean it; -Force only overrides the heartbeat/second-route preflight.'
 Write-Host 'Opt-in items are tracked in the manifest; uninstall-autostart.ps1 clears them. Run install-autostart.ps1 -StatusOnly to list all registered autostart items.'

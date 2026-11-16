@@ -367,7 +367,7 @@ function nextActionFor(decision, ranked, coverage) {
     return `The search was incomplete (${coverage.reasons.join(', ') || 'unknown scope'}). Do not report the target as absent: narrow the scope deliberately or re-run with frames:"all" / includeAccessibility:true, then re-observe.`;
   }
   if (decision.status === 'not_found') {
-    return 'The searched scope was complete and produced no viable target. Confirm the tab and URL, then try a role-only or shorter query; a screenshot can reveal canvas or image-rendered controls that the DOM cannot expose.';
+    return 'The searched scope was complete and produced no viable target. Confirm the tab and URL, then try a role-only or shorter query. If the target may be painted into a canvas, image or video, call browser_ocr and confirm its point with browser_prepare_coordinate; a screenshot can reveal image-rendered controls that the DOM cannot expose.';
   }
   if (decision.status === 'blocked') {
     return 'This page cannot be searched from the extension. Use browser_debug/browser_protected_ui_plan for the correct surface; do not start another browser or retry the same read.';

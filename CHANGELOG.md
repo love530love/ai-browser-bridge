@@ -1,3 +1,65 @@
+## 0.45.0 — 2026-11-16（**部署陈旧可见 / 空闲门控重启 / 自启纳管**）
+
+触发：另一台 Windows 11 笔记本（love-PC）从 0.37.4 升级到 0.42.3 后的安装部署与热更新反馈。六个问题里最核心的两个：`git pull` 之后旧 buildId 仍在跑而面板仍显示「已连接」；`scripts/upgrade.ps1` 与 `docs/UPGRADE-OPERATIONS.md` 仍在描述旧的 `npm ci` → `start.ps1` → UIA 重载链，且脚本本身不会完成重启。
+
+### 交付
+
+- **P1-1 部署陈旧可见（`/status`、`ready`、面板）**：`queueSnapshot()`、`/status`、WebSocket `ready` 均携带 `deployment { runningBuildId, diskBuildId, runningVersion, manifestVersion, extensionVersion, deploymentStale, actionRequired }` 与顶层 `deploymentStale` / `diskBuildId` / `runningBuildId`。部署快照每 15 秒重算一次，只在变化时广播 `deployment-status`（仅认证连接）。扩展面板（`extension/panel-status.js` + `panel.html`）在 `deploymentStale` 时显示源码已更新、需要空闲重启的提示，而不是只显示「连接正常」。
+- **P1-1/P2-6 空闲门控官方重启**：新增 `src/service-restart.js` 与 `node src/cli.js restart-service-when-idle [--apply]`。它先做完整只读预检：认证 `/status` 的 pid 与 LISTENING pid 一致、进程命令行证明是本项目 `src/server.js`（绝对路径必须落在项目根内，相对路径可接受）、看门狗身份核验、队列/租约/桌面操作/维护锁全部空闲、running 与 disk buildId 确已不一致；任一不符即拒绝且不发送任何信号。通过后写 `restart_intent` 到生命周期账本，再 `POST /restart-when-idle`（要求精确确认串与可选 `expectedBuildId` / `diskBuildId` 防陈旧请求），服务自查空闲后自行退出，看门狗拉起新源码，CLI 有界轮询到 `buildId === 磁盘 buildId`（`status:verified`）。旧服务没有该端点时返回 `restart_endpoint_unavailable` 且不发信号；`uncertain` 永不自动重放。绝不按 `.local/server.pid` 杀进程，也绝不调用 `stop.ps1`。
+- **P1-2 收敛升级入口**：`scripts/upgrade.ps1` 默认只运行只读 `upgrade-check`（不拉取、不安装、不重启），旧流程必须显式 `-Legacy`；`docs/UPGRADE-OPERATIONS.md` 重写为唯一官方五步流程并标注旧脚本 DEPRECATED；`upgrade-check` 的服务层直接输出 `node src/cli.js restart-service-when-idle --apply` 与预检/迁移说明，不再只给证据命令。
+- **P2-4 外部守护任务纳管**：`install-autostart.ps1` 新增 `-AdoptExternal`——按 `schtasks /query /xml` 核验任务动作确实引用本项目的 `scripts/watch-service.ps1` 后才写入 `adopted:true` 清单条目并留下证据，动作不符即拒绝；`-StatusOnly` 为未纳管外部任务给出「保持外部 / 纳管」两种处置说明。`uninstall-autostart.ps1` 新增只读 `[residual]` 扫描（HKCU Run + 启动文件夹，匹配项目根 + watch-service/heartbeat/cli.js），只报告不删除。
+- **P2-5 巡检二路冲突预检**：`install-autostart.ps1 -Heartbeat` 在任何写入前扫描 HKCU Run、启动快捷方式与计划任务中的第二路巡检；发现即打印 `REFUSED`、证据与 clock_drift 警示并以退出码 3 拒绝，只有显式 `-Force` 才继续并保留告警。
+
+### 验收
+
+- 全量 `npm test` → **1057/1057**（exit 0，0 fail，约 163s；0.45.0 升版后）。新增 `test/service-restart.test.js` 12 项、`test/bridge.test.js` +5 项、`test/autostart-options.test.js` +1 项、`test/upgrade-preflight.test.js` +1 项。
+- 定向：`service-restart` / `upgrade-check` / `deployment-status` / `panel-status` → 27/27；`bridge` → 35/35；`autostart-options` → 10/10。
+- PowerShell 解析检查（install/uninstall/upgrade）→ `PARSE_OK`。
+- **未部署**：本版只升源码版本；运行服务与 Chrome 扩展仍为 0.43.0。首次迁移到含 `/restart-when-idle` 的构建仍需按文档做一次手工重启，之后该命令才可用。
+
+### 边界
+
+- 重启命令只负责「让服务换到磁盘源码」，不拉取代码、不重载扩展、不改 `.local/config.json`；四层仍由 `upgrade-check` 逐层报告。
+- 看门狗默认仍只报告 `build-stale-restart-needed`；除 `restart-service-when-idle` 与心跳白名单外没有新的自动重启路径，`-Heartbeat` 的安全门控未被削弱。
+- 收养外部计划任务是一次显式、带证据的所有权声明；未收养的外部任务在卸载后仍可能重新拉起守护，卸载只报告不删除。
+- `deploymentStale` 是构建摘要比较，不是签名或依赖完整性证明；不覆盖 `node_modules` 与实际加载的扩展源码。
+
+## 0.44.0 — 2026-11-16（**深度感知 / 弱 Agent 并发引导 / 可选本地模型**）
+
+触发：用户要求把「解析、获取、感知、定位界面元素」的各种途径统一补齐，让强/弱 Agent 都能被项目能力引导着正确操作；并继续探索用项目内小模型或 Chrome 内置模型，为弱 Agent 提供高并发时的排队管理、等待引导与工具遍历能力。
+
+### 交付
+
+- **P1 本地 OCR**：`browser_ocr` + `src/ocr-adapter.js` + `scripts/windows-ocr.ps1`（Windows.Media.Ocr，无权重/无网络）。只接受 PNG，校验 IHDR 尺寸与 OCR 输出一致；截图以 0600 写入临时目录并在 `finally` 删除；像素框换算为 CSS 视口矩形与 0..1000 点；输出有界并报告截断；识别失败不回显 stdout。`status:"partial"` 表示视口不可读但文本可用；结果 `noRefs:true`，写动作仍须 `browser_prepare_coordinate` + `browser_action_verified`。本地账本新增 `ocr_runs`（无识别文本/URL/截图/凭据）。
+- **P2 深度感知（只读）**：新增 `extension/deep-perception.js`，经 `worker.js` 命名路由接入五个工具：
+  - `browser_script_inventory`：Sources 文件列表（scriptId/URL/大小/行范围/module/sourceMappingURL），可选 `urlFilter`、`includeSource`；有界窗口并报告 `totalScripts/matchedCount`。
+  - `browser_source_map`：解析 source map（含 indexed map），支持行列映射与 `sourceIndex` 预览；先按页面源获取再以扩展源兜底；`maxBytes` 默认 8 MB、硬上限 20 MB，超限 `partial`；无声明为 `not_found`。
+  - `browser_event_listeners`：元素/document 监听器（类型、capture/passive/once、脚本位置、处理器预览）；多匹配 `ambiguous`，支持 `includeAncestors`/`types`，不穿 shadow root。
+  - `browser_dom_snapshot`：含 open shadow root 的有界结构树，报告 `shadowRoots/iframes/truncated`；不返回 href/src/value；`includeText/includeRects/includeVisibility` 显式开启；主 frame only。
+  - `browser_framework_tree`：React/Vue 2/3/Angular/Svelte 一次检测并全部报告；值默认省略；组件元数据不是 ref。
+  - `browser_network_summary includeTiming:true` 增加 Resource Timing 瀑布（DNS/connect/TLS/request/response、nextHopProtocol、redirectCount、transfer/encoded/decoded、renderBlockingStatus、responseStatus、Server-Timing），仍不含 header/body。
+- **P3 弱 Agent 引导**：新增 `browser_agent_advice`（service-local、只读、永不入队）。输入目标、`toolName`、`lastResult`、可选 `hostId/tabId/urgency/allowSwitchHost/modelProvider/includeModel`；输出单个 `decision`（proceed/wait/diagnose/plan/retry_with_changes/switch_host/start_browser/escalate/stop）、`estimatedWaitMs`（250–120000，带 basis/confidence）、`blockers`、`toolTrail` 与可直接执行的 `nextStep`。决策顺序把 `nextStepFor` 的具体失败建议放在最前；`uncertain` 写变成重新观察的读，`duplicate_suppressed` 直接 `stop`；宿主切换必须显式 `allowSwitchHost:true`。
+- **队列证据**：`queueSnapshot()` 新增 `activeByHost`（lane/tabId/readOnly）、`queuedJobs`（hostId/tabId/readOnly）、`queueLimit`、`extensionPaused` 与每工具 EWMA `toolDurations`；等待估算只使用这些元数据，读车道等待是下界。
+- **Chrome 内置模型**：`browser_local_judge` 新增 `mode:"triage"`，只接收队列元数据，不接收页面文本；`modelProvider:"chrome"` 只准备 triage 参数，不在服务端调用模型。
+- **项目内小模型**：新增 `src/local-model.js`，仅 loopback OpenAI 兼容端点；拒绝 URL 凭据/查询/片段与非 http(s) 协议；可选 bearer token 只从环境变量读取且不回显；最多 2 并发、有界超时与输出、严格 JSON；任何失败降级 `unavailable` 且从不抛错。`auto`（默认）只在 `includeModel:true` 或 `AIB_LOCAL_MODEL_AUTO=1` 时调用；`off` 纯确定性；`local` 强制调用。
+- **模型边界**：`mergeModelAdvice` 保留确定性决策；模型只能增加谨慎或建议候选链内的工具，不能把 `wait` 改成 `proceed`、不能授权写、不能改变宿主路由；`browser_local_judge` 的 triage 永远 `authority:"advisory_only"`，不计入写风险判定。
+- **引导与文档**：`browser_agent_guide` 首步、`capability-guide.js` 的 `multi-agent` 意图、`FOCUS_POLICY.backgroundSafeTools`、`priority-engine` 读分类、`tool-index` debug 组与别名（排队/并发/建议/下一步/queue/advisory/guidance）同步；紧凑索引仍 3472 字节。README、AGENTS、SKILL、AGENT-FIRST-STRATEGY、AGENT-HANDOFF、FALLBACK-CHANNELS、OPEN-SOURCE-CAPABILITY-RADAR、PRODUCT-ROADMAP 同步。
+
+### 验收
+
+- 全量 `npm test` → **1031/1031**（exit 0，0 fail，约 153s）。
+- P3 定向：`test/agent-advice.test.js` 24、`test/local-model.test.js` 15、`test/agent-advice-bridge.test.js` 5 → 39/39。
+- P2 定向：`test/deep-perception.test.js` → 15/15（会话复用、busy debugger、注入包装、受限页 blocked）。
+- 工具索引预算：3472 字节（<3500），每个工具恰好出现一次；`browser_agent_advice` 在 `TOOL_CATEGORIES.read` 且不在 `WRITE_TOOLS`/`LEASE_TOOLS`。
+- **未部署**：本版只升源码版本；运行服务与 Chrome 扩展仍为 0.43.0，需单独授权后重启服务/重载扩展。未做 P2 五工具真机冒烟，未做真实高并发基准（P4）。
+
+### 边界
+
+- P1 OCR 只覆盖当前视口内已绘制像素；滚动区外、未绘制内容、跨源 iframe 文字不在结果中；空结果不是「页面无文字」的证据。
+- P2 深度感知是证据而非动作：source/组件/监听器结果不返回 ref；Debugger 只在 domain 开启后收集，脚本列表是有界窗口；DOM snapshot/framework tree 只覆盖主 frame。
+- P3 建议不授予权限：`browser_agent_advice` 在 `policy.evaluate` 之后执行，仍受维护/宿主/租约/写验证治理；`estimatedWaitMs` 是估计，不是完成承诺。
+- 本地账本只含队列/耗时/状态元数据，无页面文本、URL、查询词、OCR 文本、截图、Cookie 或凭据。
+
 ## 0.42.3 — 2026-11-15（**退出可归因 / 祖先进程守卫 / 面板判定可机读**）
 
 触发：用户要求对 0.42.2 遗留的三条诚实边界「详细调查根因并永久解决」——回归窗口内旧服务退出原因未取证、wrapper-shell 父进程场景不武装守卫、`none_recorded` 是「无证据」而非「面板已清空」。

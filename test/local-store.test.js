@@ -44,6 +44,7 @@ test('the ledger records strategy health without any page data', t => {
   const summary = store.summary();
   assert.equal(summary.runs, 1);
   assert.equal(summary.strategyRows, 2);
+  assert.equal(summary.ocrRuns, 0);
   assert.equal(summary.file, 'bridge.db');
   assert.deepEqual(summary.excluded, LOCAL_STORE_EXCLUDED);
   assert.doesNotMatch(JSON.stringify(summary), /secret|https?:|query/i);
@@ -86,17 +87,25 @@ test('the schema has no column that could hold a query, URL or label', t => {
     query: 'secret-query', url: 'https://secret.example/', label: 'secret-label',
     strategies: [{ id: 'semantic-dom', status: 'ok', matched: 1, durationMs: 4 }]
   });
+  store.recordOcrRun({
+    status: 'success', provider: 'windows_media_ocr', language: 'en-US',
+    lineCount: 3, imageWidth: 1280, imageHeight: 720, truncated: false, durationMs: 210,
+    text: 'secret-ocr-text', url: 'https://secret.example/', query: 'secret-query'
+  });
   store.close();
 
   const db = new DatabaseSync(file);
   try {
     const runColumns = db.prepare('PRAGMA table_info(locator_runs)').all().map(row => row.name);
     const healthColumns = db.prepare('PRAGMA table_info(locator_strategy_health)').all().map(row => row.name);
+    const ocrColumns = db.prepare('PRAGMA table_info(ocr_runs)').all().map(row => row.name);
     assert.deepEqual(runColumns.sort(), ['action', 'candidate_count', 'coverage_complete', 'duration_ms', 'id', 'status', 'strategy_count', 'top_confidence', 'ts'].sort());
     assert.deepEqual(healthColumns.sort(), ['action', 'errors', 'matched', 'runs', 'strategy', 'total_ms', 'updated_at'].sort());
+    assert.deepEqual(ocrColumns.sort(), ['duration_ms', 'id', 'image_height', 'image_width', 'language', 'line_count', 'provider', 'status', 'truncated', 'ts'].sort());
     const raw = JSON.stringify(db.prepare('SELECT * FROM locator_runs').all())
-      + JSON.stringify(db.prepare('SELECT * FROM locator_strategy_health').all());
-    assert.doesNotMatch(raw, /secret-query|secret-label|secret\.example/);
+      + JSON.stringify(db.prepare('SELECT * FROM locator_strategy_health').all())
+      + JSON.stringify(db.prepare('SELECT * FROM ocr_runs').all());
+    assert.doesNotMatch(raw, /secret-query|secret-label|secret\.example|secret-ocr-text/);
   } finally {
     db.close();
   }
@@ -124,4 +133,12 @@ test('retention bounds the run table instead of growing forever', t => {
   assert.equal(summary.strategyRows, 1);
   const health = store.strategyHealth();
   assert.equal(health[0].runs, 51);
+
+  for (let i = 0; i < 51; i++) {
+    store.recordOcrRun({
+      status: 'success', provider: 'windows_media_ocr', language: 'en-US',
+      lineCount: 1, imageWidth: 10, imageHeight: 10, truncated: false, durationMs: 1
+    });
+  }
+  assert.equal(store.summary().ocrRuns, 11);
 });

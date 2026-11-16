@@ -57,30 +57,25 @@ test('running=null -> 服务不可达 step, no crash, no extension step', () => 
   assert.equal(report.steps.some(s => s.layer === 'extension'), false);
 });
 
-test('buildId mismatch -> read-only identity check, never a blind kill by server.pid', () => {
+test('buildId mismatch -> official idle-gated restart command, never a blind kill by server.pid', () => {
   const ctx = healthyContext();
   ctx.running.buildId = 'old-build-111';
   const report = buildUpgradeCheck(ctx);
   const step = report.steps.find(s => s.layer === 'service');
   assert.ok(step);
   // A stale server.pid can point at a dead process while another node owns the
-  // port. The copyable command must be read-only (status + LISTENING-PID
-  // evidence), never a blind kill by that file. The note carries the gated
-  // decision: compare PIDs, confirm cmdline + idle, else only report, then
-  // delegate the restart to the watchdog and never use stop.ps1.
+  // port. The copyable command must be the official dry-run-first restart, never
+  // a blind kill or an unverified signal.
   assert.doesNotMatch(step.command, /process\.kill/);
   assert.doesNotMatch(step.command, /SIGTERM/);
   assert.doesNotMatch(step.command, /taskkill/i);
-  assert.match(step.command, /node src\/cli\.js status/);
-  assert.match(step.command, /netstat -ano -p TCP \| findstr 19387/);
-  assert.match(step.note, /LISTENING PID/);
-  assert.match(step.note, /src\/server\.js/);
-  assert.match(step.note, /完全空闲|queued=0/);
-  assert.match(step.note, /不是进程存活证据/);
-  assert.match(step.note, /只报告/);
-  assert.match(step.note, /绝不终止不明进程/);
-  assert.match(step.note, /看门狗/);
-  assert.match(step.note, /绝对不要用 stop\.ps1/);
+  assert.match(step.command, /node src\/cli\.js restart-service-when-idle/);
+  assert.match(step.command, /--apply/);
+  assert.match(step.note, /restart-service-when-idle/);
+  assert.match(step.note, /--apply/);
+  assert.match(step.note, /restart_intent/);
+  assert.match(step.note, /restart_endpoint_unavailable/);
+  assert.match(step.note, /绝不要用 stop\.ps1/);
   assert.match(step.note, /service-paused/);
   assert.equal(report.layers.service.buildIdCurrent, false);
 });

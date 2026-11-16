@@ -24,6 +24,7 @@ try {
 
 export const LOCAL_STORE_EXCLUDED = [
   'page text or HTML',
+  'recognized OCR text',
   'URLs and origins',
   'search queries',
   'element labels or refs',
@@ -58,6 +59,18 @@ const SCHEMA = `
     updated_at TEXT NOT NULL,
     PRIMARY KEY (strategy, action)
   );
+  CREATE TABLE IF NOT EXISTS ocr_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    status TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    language TEXT,
+    line_count INTEGER NOT NULL,
+    image_width INTEGER NOT NULL,
+    image_height INTEGER NOT NULL,
+    truncated INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL
+  );
 `;
 
 function safeString(value, max = 120) {
@@ -78,7 +91,7 @@ export function createLocalStore({ file = null, retention = 500 } = {}) {
       db.exec('PRAGMA synchronous = NORMAL;');
       db.exec(SCHEMA);
       db.prepare('INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-        .run('schema_version', '1');
+        .run('schema_version', '2');
     } catch (error) {
       reason = `sqlite_open_failed: ${error?.message ?? String(error)}`.slice(0, 300);
       try { db?.close(); } catch { /* already unusable */ }
@@ -87,6 +100,7 @@ export function createLocalStore({ file = null, retention = 500 } = {}) {
   }
 
   let runsSinceRetention = 0;
+  let ocrRunsSinceRetention = 0;
 
   const write = (fn, fallback) => {
     if (!db) return fallback;
@@ -143,6 +157,27 @@ export function createLocalStore({ file = null, retention = 500 } = {}) {
       }, false);
     },
 
+    recordOcrRun(entry = {}) {
+      if (!db) return false;
+      const ts = new Date().toISOString();
+      const status = safeString(entry.status, 20) ?? 'unknown';
+      const provider = safeString(entry.provider, 40) ?? 'unknown';
+      const language = safeString(entry.language, 35);
+      const lineCount = Number.isFinite(entry.lineCount) ? Math.max(0, Math.round(entry.lineCount)) : 0;
+      const imageWidth = Number.isFinite(entry.imageWidth) ? Math.max(0, Math.round(entry.imageWidth)) : 0;
+      const imageHeight = Number.isFinite(entry.imageHeight) ? Math.max(0, Math.round(entry.imageHeight)) : 0;
+      const durationMs = Number.isFinite(entry.durationMs) ? Math.max(0, Math.round(entry.durationMs)) : 0;
+      return write(() => {
+        db.prepare('INSERT INTO ocr_runs (ts, status, provider, language, line_count, image_width, image_height, truncated, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(ts, status, provider, language, lineCount, imageWidth, imageHeight, entry.truncated === true ? 1 : 0, durationMs);
+        if (++ocrRunsSinceRetention >= 50) {
+          ocrRunsSinceRetention = 0;
+          db.prepare('DELETE FROM ocr_runs WHERE id NOT IN (SELECT id FROM ocr_runs ORDER BY id DESC LIMIT ?)').run(Math.max(1, retention));
+        }
+        return true;
+      }, false);
+    },
+
     strategyHealth({ action = null, limit = 20 } = {}) {
       return read(() => {
         const capped = Math.max(1, Math.min(100, limit));
@@ -165,9 +200,10 @@ export function createLocalStore({ file = null, retention = 500 } = {}) {
       return read(() => {
         const runs = db.prepare('SELECT COUNT(*) AS count FROM locator_runs').get()?.count ?? 0;
         const strategies = db.prepare('SELECT COUNT(*) AS count FROM locator_strategy_health').get()?.count ?? 0;
+        const ocrRuns = db.prepare('SELECT COUNT(*) AS count FROM ocr_runs').get()?.count ?? 0;
         const latest = db.prepare('SELECT MAX(ts) AS latest FROM locator_runs').get()?.latest ?? null;
-        return { available: true, file: file ? basename(file) : null, runs, strategyRows: strategies, latestRunAt: latest, excluded: EXCLUDED_DATA };
-      }, { available: false, file: file ? basename(file) : null, runs: 0, strategyRows: 0, latestRunAt: null, excluded: EXCLUDED_DATA });
+        return { available: true, file: file ? basename(file) : null, runs, strategyRows: strategies, ocrRuns, latestRunAt: latest, excluded: EXCLUDED_DATA };
+      }, { available: false, file: file ? basename(file) : null, runs: 0, strategyRows: 0, ocrRuns: 0, latestRunAt: null, excluded: EXCLUDED_DATA });
     },
 
     close() {

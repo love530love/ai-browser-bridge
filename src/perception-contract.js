@@ -107,18 +107,36 @@ export const PERCEPTION_MATRIX = {
     backgroundSafe: true
   },
   ocr: {
-    status: 'not_implemented',
-    note: 'Pixels are not classified into text or widgets. A canvas-rendered label must be addressed by screenshot plus coordinates, or by the page data that drew it. An OCR adapter is planned, not implied by the visual channel.'
+    status: 'available_local',
+    tools: ['browser_ocr', 'browser_screenshot'],
+    scope: 'Windows.Media.Ocr over a fresh viewport screenshot; text plus CSS-pixel and 0..1000 boxes, no DOM refs; the current viewport only',
+    requires: 'a Windows OCR language pack; browser_ocr reports availableLanguages when the requested engine is missing',
+    privacy: 'runs locally with no network, API key or downloaded weights; the temporary screenshot is mode-0600 and deleted after the call; recognized text is returned to the caller and never written to the local ledger',
+    backgroundSafe: true,
+    note: 'OCR reads painted pixels, including text in a canvas, image or video that the DOM cannot expose. It is evidence, not an address: a line has no ref, role or proof of clickability, so confirm its point with browser_prepare_coordinate and perform any write through browser_action_verified. Scrolled-off text is absent. The engine inserts spaces between Han glyphs; adjacent-Han spacing is compacted and other spacing is preserved.'
   },
   canvas: {
     status: 'partial',
-    tools: ['browser_screenshot', 'browser_prepare_coordinate'],
-    scope: 'canvas content has no DOM children; only visual and coordinate addressing reaches it'
+    tools: ['browser_screenshot', 'browser_ocr', 'browser_prepare_coordinate'],
+    scope: 'canvas content has no DOM children; OCR reads painted labels and coordinates reach the surface, but there is no DOM ref or semantic identity'
   },
   source: {
+    status: 'available',
+    tools: ['browser_script_inventory', 'browser_source_map', 'browser_debugger', 'browser_devtools_capture'],
+    scope: 'runtime script inventory with sourceMappingURL, source-map parsing and generated-position lookup, breakpoints and call frames; no source editing (V8 removed setScriptSource)',
+    backgroundSafe: true
+  },
+  eventListeners: {
+    status: 'available',
+    tools: ['browser_event_listeners'],
+    scope: 'DOMDebugger listener inventory for one element or the document, including delegated listeners on ancestors',
+    requires: 'a temporary debugger attachment, which may show Chrome\'s debugging banner',
+    backgroundSafe: true
+  },
+  frameworkTree: {
     status: 'partial',
-    tools: ['browser_debugger'],
-    scope: 'runtime scripts, breakpoints and call frames; a source map walker and an event-listener inventory are planned',
+    tools: ['browser_framework_tree'],
+    scope: 'React fiber and Vue 2/3 instance trees with component names and prop/state keys; Angular is a flat component list where only ownership is public; Svelte reports per-element source locations, not an instance tree',
     backgroundSafe: true
   }
 };

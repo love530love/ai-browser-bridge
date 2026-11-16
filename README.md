@@ -4,7 +4,11 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.43.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.45.0**（部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.45.0 让「升级没完成」变得可见且可安全收尾。`/status`、WebSocket `ready` 与扩展面板现在携带 `deploymentStale` / `runningBuildId` / `diskBuildId` / 扩展版本偏差，不再出现「`git pull` 后旧代码仍在跑、面板却显示已连接」。新增 `node src/cli.js restart-service-when-idle [--apply]`：先只读核对 `/status` pid 与 LISTENING pid、进程命令行、看门狗身份与全部空闲闸门，通过后写 `restart_intent`、请服务自查空闲并自行退出，由看门狗拉起新源码，CLI 轮询到 `buildId === 磁盘 buildId` 才算完成；任一预检不符即拒绝且不发信号，`uncertain` 永不重放。旧版本服务没有该端点时如实返回 `restart_endpoint_unavailable`。`scripts/upgrade.ps1` 默认弃用为只读 `upgrade-check`（旧流程需 `-Legacy`），升级文档只保留一个官方流程。自启侧新增 `-AdoptExternal`（按 `schtasks /query /xml` 核验动作后才收养外部守护任务）与 `-Heartbeat` 二路巡检冲突预检（发现即退出码 3 拒绝，需 `-Force` 显式覆盖），卸载新增只读 `[residual]` 残留报告。本版目前只在工作树，服务与扩展仍为 0.43.0，部署需单独授权；首次迁移到含该端点的构建仍需一次手工重启。
+
+0.44.0 把「看不见的页面」和「不知道下一步的弱调用方」一起补齐。感知侧新增 5 个只读深度工具——`browser_script_inventory`（Sources 脚本清单）、`browser_source_map`（索引映射与原始行列）、`browser_event_listeners`（事件接线）、`browser_dom_snapshot`（含 open shadow root 的有界结构树）、`browser_framework_tree`（React/Vue/Angular/Svelte 组件树），`browser_performance` 补 Resource Timing 瀑布；它们给的是**证据不是 ref**，动作仍回 `browser_locate`/`browser_find_element` 取 ref 并走 `_verified`。`browser_ocr` 用 Windows.Media.Ocr 在本地读 canvas/图片/视频里已绘制的文字，无权重、无网络。决策侧新增 `browser_agent_advice`：本地、只读、永不入队，把实时队列与租约折成单个 `proceed|wait|diagnose|plan|switch_host|start_browser|stop` 决策、`estimatedWaitMs` 与可直接执行的 `nextStep`；`uncertain` 写只给「重新读」，重复抑制直接 `stop`。模型只是可选第二意见：Chrome 内置模型走只含队列元数据的 `browser_local_judge mode:"triage"`，项目内小模型只允许 loopback OpenAI 兼容端点（≤2 并发、严格 JSON、失败降级），模型不能把 `wait` 变成 `proceed`。
 
 0.43.0 把「元素在哪」从一组各自为战的读工具收敛成一个只读入口 **`browser_locate`**：它并行跑语义 DOM、文本匹配、Shadow DOM、跨 frame 与可选的 AX 树，把每个命中归一成带 `ref`、可操作性、遮挡/禁用状态与确定性 `basis` 的 `TargetCandidate`，同节点跨来源合并、跨 frame 的 ref 只加一次 `@frameN`，最后给出一个必须按字面理解的 `status`——`found` 才是单个可用 ref，`ambiguous` 需要调用方从候选里明确选一个，`partial`/`inconclusive` 表示搜索范围被截断/未覆盖/某路报错，`not_found` 只在所有已搜索范围都完整时才成立，`blocked`/`unavailable` 是治理或连接原因而非「页面没有」。只有 AX 证据的命中没有 ref，会降级为 `ambiguous`/`partial` 并带 `accessibility_match_without_ref`，要求用 role+name 再解析；分数是排名不是概率，`coverage.complete:false` 时禁止断言元素不存在。另新增可选的本地 SQLite 元数据账本（`.local/bridge.db`，`node:sqlite`），只存定位器运行计数与各策略健康度，不含页面正文、URL、查询词、元素标签、截图或凭据；数据库缺失或损坏只会 `available:false`，绝不改变定位判定。`browser_capabilities.perception` 会如实报告 OCR 尚未实现、canvas 只有坐标/截图部分覆盖等空缺，避免把「未实现」说成「不可达」。
 
@@ -100,7 +104,7 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 - 版本号必须同时更新 `package.json`、`package-lock.json`、`extension/manifest.json` 和 `CHANGELOG.md`，再创建同名 Git tag 与 GitHub Release。
 - Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
 
-### 当前版本升级指南（0.42.3）
+### 当前版本升级指南（0.45.0）
 
 > **只 `git pull` 不等于升级完成。** 磁盘代码、运行中的服务进程、Chrome 里加载的扩展、`.local/config.json` 的新字段是四层独立状态；只更新第一层会出现「面板已连接、体检却跑在旧代码上」的假健康状态。
 
@@ -113,12 +117,14 @@ node src/cli.js upgrade-check
 固定五步：
 
 1. `git pull --ff-only origin main`（浅克隆或落后很多个提交同样适用）。
-2. **重启服务**：`doctor` 的 `service-build-current` 会比较运行 buildId 与磁盘 buildId；落后时需在**服务完全空闲**时重启。不要用 `stop.ps1`（它会写 `service-paused`，让守护自我暂停）；交给看门狗拉起，或启用 `-Heartbeat` 让心跳白名单动作在空闲时处理。
+2. **重启服务**：`doctor` 的 `service-build-current` 会比较运行 buildId 与磁盘 buildId；落后时执行 `node src/cli.js restart-service-when-idle --apply`。它先只读核对 `/status` pid、LISTENING pid、进程命令行、看门狗身份与队列空闲，任一不符即拒绝且不发信号；通过后写 `restart_intent`，服务自查空闲后自行退出，看门狗拉起新源码，CLI 轮询到 `buildId === 磁盘 buildId`（`status:verified`）才算完成。只看预检可去掉 `--apply`。旧服务没有该端点时返回 `restart_endpoint_unavailable` 且不发信号，按 [升级文档](docs/UPGRADE-OPERATIONS.md) 做一次性手工迁移。不要用 `stop.ps1`（它会写 `service-paused`，让守护自我暂停），也不要按 `.local/server.pid` 杀进程。
 3. **重载扩展**：扩展已连接时 `browser_reload_extension` 走 `chrome.runtime.reload()` 自我重载；多宿主时先 `browser_hosts`，按每个 `hostId` 分别调用，不要只重载 primary。
 4. **补配置字段**：旧配置缺 `browserTarget` 时用 `node src/cli.js set-browser-target --from-running-chrome`（默认只打印建议与证据，确认后加 `--write` 才写回）；其它缺项见 `upgrade-check` 输出。
 5. **复验**：`doctor-lite.bat` → `doctor.bat`，期望 `ok:true`，`service-build-current` 与 `version-match` 全通过。
 
 `upgrade-check` 是只读的：不重启服务、不重载扩展、不改配置。每条建议都带可直接复制的命令。
+
+`scripts/upgrade.ps1` 已弃用：默认只运行只读 `upgrade-check` 并以其结果退出，不拉取、不安装、不重启；旧流程（`npm ci` → `start.ps1` → UIA 重载）只有显式加 `-Legacy` 才会执行。完整流程与首次迁移说明见 [docs/UPGRADE-OPERATIONS.md](docs/UPGRADE-OPERATIONS.md)。
 
 > **自动重启的边界**：默认守护只做**只读**的源码陈旧报告（状态 `build-stale-restart-needed`），不会擅自杀进程——心跳白名单自愈要求完全空闲、冷却、单实例锁与动作后复核，守护看不到 in-flight 命令。需要无人值守时可用 `install-autostart.ps1 -Heartbeat` 把心跳常驻纳入自启，自动重启仍走心跳白名单。**`-Heartbeat` 与已有的每小时单次巡检 automation 不要同时启用**，混用首轮会报时钟漂移并冻结自愈。
 
@@ -168,6 +174,9 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 - **扩展错误列表只读判定（0.42.0）**：`browser_extension_errors action:"read"` 只读取 `chrome://extensions` 错误列表，不点 `Clear all`，返回 `state: errors_present|empty|unknown`；`empty` 必须同时有地址栏验证、可读文档与 Clear all 控件缺失证据。真机验证本机当前为 `empty`（0 条错误，非“未知”）。
 - **使用遥测（0.42.0）**：审计行携带 `hostId`；`node src/cli.js usage --hours N` 输出每工具/每个宿主的 p50/p95/max、错误分类与不确定计数；心跳快照携带 1 小时聚合。只含工具名、宿主 id、分类与耗时，不含页面内容、URL 或凭据。见 [docs/USAGE-TELEMETRY.md](docs/USAGE-TELEMETRY.md)。
 - **后台优先、零抢焦点（0.42.1）**：Chrome 最小化或被人类的其他软件完全遮挡时，DOM 注入与 CDP 照常完成读写；`browser_open` 默认 `active:false`，导航与截图不激活窗口，一次常规任务的前台变更为 0。隐藏文档不绘制导致的 rAF/定时器限制改为有界等待与重新观察，不再建议调用方激活窗口。新增 `npm run test:background`：3 个后台 tab、30 路混合并发、同 tab 突发写共 51 项断言，并对比 OS 前台窗口 identity 与 Chrome 窗口 `focused/state` 前后不变；契约见 [docs/FALLBACK-CHANNELS.md](docs/FALLBACK-CHANNELS.md) §7。
+- **源码 / F12 / 网络深度感知（工作树，待发布）**：新增 5 个只读工具——`browser_script_inventory`（有界脚本清单、按 `urlFilter` 收窄、单个 `scriptId` 可读运行源码）、`browser_source_map`（读 `sourceMappingURL` 或 `data:` 内联 map，返回 sources、sourceIndex 预览与 generated→original 行列映射；map 过大/不可读如实 `partial`/`failed`，绝不把截断前缀当 URL）、`browser_event_listeners`（`DOMDebugger.getEventListeners`，可含祖先与影子根，handler 只给有界摘要）、`browser_dom_snapshot`（可选文本/矩形/可见性/Shadow DOM 的结构树）与 `browser_framework_tree`（React/Vue/Angular/Svelte 组件树，`includeValues` 默认关闭）。全部只返回结构证据、不返回 ref，源码与页面元数据均标注为不可信内容；`browser_performance` 补充 Resource Timing（DNS/连接/TLS/请求/响应/编码体积/render-blocking/server-timing）。写操作仍必须回到 `browser_locate`/`browser_find_element` 取 ref，再走 `_verified`。
+- **弱 Agent 并发引导（工作树，待发布）**：新增只读、永不入队的本地工具 `browser_agent_advice`。给它目标、准备调用的 `toolName`、可选 `lastResult`，它把实时队列（每宿主写车道、读快车道、同 tab 互斥、tab 租约、维护窗口、桌面操作、全局任务租约、队列上限、最近实测耗时）折成一个决策：`proceed` / `wait` / `diagnose` / `plan` / `switch_host` / `start_browser` / `stop`，并给出 `estimatedWaitMs`、`pollAfterMs`、阻断原因、可用工具链与可直接执行的 `nextStep`。上一笔写若已派发但结果未知，它只给“重新读页面”，绝不建议重放；重复抑制则直接 `stop`。模型是可选第二意见：`modelProvider:"chrome"` 只生成 `browser_local_judge mode:"triage"` 的参数（仅队列元数据，无页面正文），`"local"` 才调用本机 loopback OpenAI 兼容端点（最多 2 并发、严格 JSON、有界超时/输出、失败降级 `unavailable`）；模型只能增加谨慎或从候选工具中建议一个，不能把 `wait` 变成 `proceed`。
+- **统一感知与本地 OCR（工作树，待发布）**：`browser_locate` 并行运行语义 DOM/文本/Shadow DOM/iframe（可选 a11y）只读路由，返回带具名依据的候选与字面状态（`found`/`ambiguous`/`partial`/`inconclusive`/`not_found`/`unavailable`/`blocked`），`coverage.complete:false` 时禁止宣称元素不存在。`browser_ocr` 使用 Windows.Media.Ocr 在本地识别 canvas、图片、视频中已绘制的文字，不需要权重、API key 或网络；返回行文本、像素框、CSS 矩形与 0..1000 视口坐标，但**不返回 ref、不证明可点击**。临时截图以 0600 写入并在调用后删除，识别文本只返回调用方、不写 `.local/bridge.db`；该库只记录 OCR 运行元数据。`status:"partial"` 表示视口不可读，空结果不证明页面没有文字。
 - **退出可归因、面板判定可机读（0.42.3）**：新增 `.local/service-lifecycle.jsonl` 与服务 `service-history`，心跳在 SIGTERM 前写 `restart_intent`，下次启动把上一轮分类为 `planned_restart` / `crash` / `signal_shutdown_unattributed` / `unrecorded_exit`，计划重启不再与崩溃混淆。父进程守卫改为祖先链锚定（PowerShell 7 `Get-Process.Parent`，跳过 shell/launcher，锚定 `pid + creation time`），wrapper-shell 场景也武装；无法验证时显式 `passive` 并写入 `processes`，不猜不杀。`browser_extension_errors` 返回 `claims.cleanClaim`，只有面板实际读为空且日志无错误才为 `true`；`none_recorded` 永不等于「面板已清空」。见 [docs/PROCESS-LIFECYCLE.md](docs/PROCESS-LIFECYCLE.md)。
 - **错误列表零窗口判定 / 读快车道 / 进程治理（0.42.2）**：`browser_reload_extension` 与 `browser_extension_errors` 默认用桥内错误日志作答（`errorJournal`，无需 Chrome 窗口），重载默认不打开也不激活 `chrome://extensions`；只有 `clearErrors:true` 才后台清理。同长度文本变更由页内 MutationObserver 修订号证明，重复抑制不变。读任务每宿主可 2 路并行（不同 tab），写任务等待本宿主读排空；agent `queuePriority`（-100..100）提供快车道且不饿死长任务。新增 `node src/cli.js processes`（report-only 进程清单）与 `node src/cli.js runtime`（跨设备运行时预检）；adapter 父进程守卫见 [docs/PROCESS-LIFECYCLE.md](docs/PROCESS-LIFECYCLE.md)。根因与决策见 [docs/ITERATION-20261115-0422.md](docs/ITERATION-20261115-0422.md)。
 - 可选的多 agent 治理：用 `node src/cli.js agent set <name> '{"scopes":["read"],"origins":["example.com"],"maxLeaseMs":60000}'` 注册具名 agent 后，超出作用域的写入/上传/认领租约、白名单外的导航都会被服务直接拒绝并返回 `status:"denied"`、`reason`、`retryable:false`，租约时长会被钳制到上限；未注册或未具名的调用保持默认开放，不会削弱单机使用。所有工具都接受可选 `agent`，建议读操作也带上以便审计归属。同一份策略还可配 `tools.allow/tools.deny`（工具级白/黑名单）、`judge:"require"`（写前过本机模型，默认 `judgeTtlMs` 120s）、`contentBoundaries:true`（读输出加不可信内容边界）。策略存放于 `.local/agents.json`，运维改动无需重启。
@@ -240,7 +249,10 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 .\install-autostart.ps1 -ScheduledTask   # 登录触发的计划任务，适合无人值守
 .\install-autostart.ps1 -Heartbeat       # 把心跳常驻纳入自启（与每小时单次巡检 automation 二选一）
 .\install-autostart.ps1 -StatusOnly      # 只读列出本次注册的所有条目
+.\install-autostart.ps1 -AdoptExternal   # 把已存在的外部 Watchdog 任务纳入清单（先核验其动作指向本项目）
 ```
+
+`-Heartbeat` 在写入任何注册前会只读扫描 HKCU Run、启动文件夹与计划任务，发现第二条巡检路线（命令含本项目 `heartbeat` 但不含 `--watch`）时以退出码 3 拒绝，且不做任何写入；只有确认要两者并存时才加 `-Force`，首轮仍会报 `clock_drift` 并冻结自愈。`-AdoptExternal` 只接受 `schtasks /query /xml` 证明动作指向本项目 `scripts/watch-service.ps1` 的外部任务；核验失败会拒绝收养，避免卸载时删错任务。
 
 两种方式都会写进 `.local/autostart-registry.json`，`uninstall-autostart.bat` 按清单逐项清理并输出「已移除 / 未找到」。沙箱或权限不足时计划任务会报 `unknown` 并给出可复制命令，不会中断安装。项目移动目录或删除便携运行时目录后，**外部手工注册**的任务不会自动更新，迁移时需人工核对。
 
@@ -259,7 +271,7 @@ AI Browser Bridge 默认是本机桥接，不是公网浏览器网关：HTTP 服
 
 运行期调用、连接恢复、队列等待、权限拒绝和错误分类会自动追加到 `.local\logs\audit.jsonl`；单文件超过 10 MB 时滚动为 `audit.1.jsonl`。这些日志用于下一次版本升级的回归分析，不包含页面正文、输入值、Cookie 或 Authorization。
 
-撤销：双击 `uninstall-autostart.bat`。它按 `.local/autostart-registry.json` **逐项清理**并输出「已移除 / 未找到」，最后把 `entries` 清空（文件保留作为证据），**保留配对密钥和你的配置**。若你自己额外注册过计划任务（例如 `AI Browser Bridge Watchdog`），卸载器只会如实报告并给出清理命令，**不会擅自删除**——否则「卸载了却没卸干净」会反过来变成「删了不该删的东西」。
+撤销：双击 `uninstall-autostart.bat`。它按 `.local/autostart-registry.json` **逐项清理**并输出「已移除 / 未找到」，最后把 `entries` 清空（文件保留作为证据），**保留配对密钥和你的配置**。若你自己额外注册过计划任务（例如 `AI Browser Bridge Watchdog`），卸载器只会如实报告并给出清理命令，**不会擅自删除**——否则「卸载了却没卸干净」会反过来变成「删了不该删的东西」。卸载结束还会扫描 HKCU Run 与启动文件夹，把命令指向本项目、但不在清单内的残留标成 `[residual]` 报告；该扫描只报告不删除，并明确说明计划任务只核对已知任务名。
 
 此外，扩展只需要加载 `extension/` 并用 `pair.bat` 配对**一次**；密钥保存在扩展里，之后自动重连。
 

@@ -30,6 +30,19 @@ function clampText(value, limit = MAX_RESULT_CHARS) {
   return text.length > limit ? `${text.slice(0, limit)}…[truncated ${text.length - limit} chars]` : text;
 }
 
+// A non-data sourceMapURL is a URL and 500 chars is plenty. A data: URL is the
+// whole map, so it needs a bounded but much larger budget; a truncated data URI
+// is not a shorter map, it is an unreadable one. Mark that case explicitly so
+// browser_source_map can return partial instead of a misleading JSON parse error.
+const MAX_INLINE_SOURCE_MAP_URL_CHARS = 1000000;
+function sourceMapUrlFields(value) {
+  if (typeof value !== 'string' || !value) return { sourceMapURL: null, sourceMapURLTruncated: false };
+  const inline = /^data:/i.test(value);
+  const limit = inline ? MAX_INLINE_SOURCE_MAP_URL_CHARS : 500;
+  if (value.length <= limit) return { sourceMapURL: value, sourceMapURLTruncated: false };
+  return { sourceMapURL: value.slice(0, limit), sourceMapURLTruncated: true };
+}
+
 function summarizeFrame(frame, index) {
   return {
     index,
@@ -194,7 +207,17 @@ export function createSessionManager({
         scriptId,
         url: clampText(params.url ?? '', 300),
         startLine: Number.isSafeInteger(params.startLine) ? params.startLine + 1 : null,
-        endLine: Number.isSafeInteger(params.endLine) ? params.endLine + 1 : null
+        endLine: Number.isSafeInteger(params.endLine) ? params.endLine + 1 : null,
+        // Depth reads the same script list. Keeping the source-map URL here is
+        // what lets browser_source_map work when this session already owns the
+        // debugger: Chrome does not replay scriptParsed for an enabled session.
+        // An inline data: map is the map itself, so clipping it at the ordinary
+        // 500-char URL limit made it unreadable. Keep it up to a bounded inline
+        // budget and mark a larger one honestly instead of returning a prefix.
+        ...sourceMapUrlFields(params.sourceMapURL),
+        length: Number.isSafeInteger(params.length) ? params.length : null,
+        isModule: params.isModule === true,
+        hasSourceURL: params.hasSourceURL === true
       });
       while (session.scripts.size > MAX_SCRIPTS) session.scripts.delete(session.scripts.keys().next().value);
       return;

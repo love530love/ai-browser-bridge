@@ -120,6 +120,17 @@ export const TOOLS = [
   tool('browser_launch', 'Start the user\'s own Chrome when nothing is running. This is normally automatic: any call that needs the extension starts the browser and then runs itself, so "the browser is not open" is not a dead end. Call it explicitly only to warm the browser up before a batch of work. Refuses with status=not_dispatched/reason=chrome_already_running when any chrome process exists, because a second instance means a second profile and that loses cookies and logins. Refuses with reason=no_used_profile_available when no installed Chrome channel has a profile with history in it, because opening an empty profile looks like a wiped session. The binary is chosen by which user-data directory actually holds a used profile, so a Canary/SxS/Beta install is not used just because the registry resolves to it first. Passes no --user-data-dir, no --profile-directory and no --incognito, so Chrome opens with the same profile a human double-clicking the icon gets. The window is created with SW_SHOWNOACTIVATE, so a background task does not pull the screen away from the user; activated:false is measured before/after, not promised. Returns extensionConnected:true only after the bridge extension actually dials back in; if the browser started but the extension did not connect, the result is uncertain rather than success. Never use this to "reset" a browser that is already running.', { url: text(8000), agent }, []),
   tool('browser_execution_profile', 'Read the deterministic browser execution profile and offline fallback order. This is answered locally by the bridge and does not depend on GPT, Chrome built-in AI, or an extension round trip.', { tabId, agent }, [], true),
   tool('browser_queue_status', 'Read service queue, active command, connected extension, and scheduling guidance. Use when coordinating multiple agents or after a waiting result.', { agent }, [], true),
+  tool('browser_agent_advice', 'Local, read-only guidance for a weak caller under concurrency: may I call this tool now, if not how long should I wait, and which tool should I try instead. Answer is one structured decision (proceed, wait, diagnose, plan, retry_with_changes, switch_host, start_browser, escalate, stop) plus a ready-to-call nextStep when its arguments are already known. It reads queue, lane, tab-lease, maintenance and host metadata from the service, never page text, and it never dispatches, approves a write or proves an outcome. Pass the tool you intend to call and the previous bridge reply as lastResult so an uncertain write becomes a re-read rather than a retry. modelProvider:"off" keeps it purely deterministic; "auto" (default) returns chromeTriage arguments for browser_local_judge mode:"triage" and calls a configured loopback OpenAI-compatible endpoint only when includeModel:true or AIB_LOCAL_MODEL_AUTO=1; "local" forces that endpoint; "chrome" only prepares the built-in-model triage call. Model output is advisory and can add caution, never turn a wait into a proceed.', {
+    goal: text(2000),
+    toolName: { type: 'string', minLength: 1, maxLength: 120 },
+    tabId,
+    urgency: { type: 'string', enum: ['interactive', 'normal', 'batch'] },
+    lastResult: { type: 'object', additionalProperties: true },
+    allowSwitchHost: { type: 'boolean' },
+    modelProvider: { type: 'string', enum: ['off', 'auto', 'local', 'chrome'] },
+    includeModel: { type: 'boolean' },
+    agent
+  }, [], true),
   tool('browser_scheduler_status', 'Report whether the intelligent scheduler is actually wired into the /call path, whether multi-instance mode is active, and which capabilities are reachable. Use instead of assuming cross-instance routing works.', { agent }, [], true),
   tool('browser_route_task', 'Explicitly dispatch ONE tool call to the least-loaded sibling bridge instance in multi-instance mode. This is the only cross-instance dispatch path: /call never forwards implicitly; the agent decides whether to use it. A routing timeout returns status=uncertain with dispatched=null and is NEVER replayed, because the sibling may already have executed the call. Routing browser_route_task itself is refused to prevent recursion. In single-instance mode this returns waiting instead of forwarding.', {
     name: text(120),
@@ -211,6 +222,13 @@ export const TOOLS = [
     mode: { type: 'string', enum: ['normal', 'cheap'] },
     agent,
   }, ['tabId', 'query'], true),
+  tool('browser_ocr', 'Read-only local OCR over a fresh viewport screenshot, using Windows.Media.Ocr when this host provides it. Returns recognized lines with untrusted text, CSS-pixel rects, and 0..1000 viewport points, plus the language actually used and the available OCR languages. No network, API key, downloaded weights or cloud service is involved. It is the route for text painted into a canvas, image, video or other pixels that the DOM cannot expose. OCR is evidence, not an address: lines carry no DOM ref, role or proof of clickability, so confirm a point with browser_prepare_coordinate and perform any write through browser_action_verified. Coverage is the current viewport only: text outside it, unpainted text and cross-origin iframe text are absent, and an empty result is not evidence that the page has no text. Requires a Windows OCR language pack; an unavailable engine or language is reported with availableLanguages instead of guessed. The temporary screenshot is mode-0600 and deleted after the call; recognized text is returned to the caller but never written to the local ledger.', {
+    tabId,
+    language: { type: 'string', maxLength: 35, pattern: '^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{2,8})*$', description: 'Optional Windows OCR language tag such as en-US or zh-Hans-CN. Omit to use the user profile languages; the reply always reports the language actually used.' },
+    maxLines: { type: 'integer', minimum: 1, maximum: 400, description: 'Default 100. Lines beyond this are dropped and truncated:true is set; the screenshot is still recognized in full.' },
+    includeWords: { type: 'boolean', description: 'Default false. Adds per-word text and boxes (capped at 40 words per line) for clicking one word inside a line.' },
+    agent,
+  }, ['tabId'], true),
   tool('browser_prepare_action', 'Read-only action planner for complex pages. Combines overlay scan and element search to recommend dismiss/scroll/read/pick/click/fill next steps without executing writes.', {
     tabId,
     goal: text(2000),
@@ -222,7 +240,7 @@ export const TOOLS = [
   }, ['tabId', 'query'], true),
   tool('browser_debug', 'Read-only document diagnostics: readyState, document visibilityState and hasFocus, viewport/scroll, visible combobox options, file inputs, dialogs, iframe count, and role counts. Use browser_health to compare these with Chrome tab.active and window.focused before any coordinate input.', { tabId, agent }, ['tabId'], true),
   tool('browser_performance', 'Read-only Chrome DevTools performance snapshot: navigation timing, layout metrics, long-task hints, and page readiness. Use to diagnose heavy SPA pages before choosing a read budget or screenshot.', { tabId, agent }, ['tabId'], true),
-  tool('browser_network_summary', 'Read current main-frame Resource Timing buffer, including entries from before extension attachment if still retained. Empty does not prove no requests occurred. Omits query strings, credentials, headers and bodies. Not a network capture; other frames/workers and evicted records are excluded.', { tabId, maxEntries: { type: 'integer', minimum: 1, maximum: 200 }, agent }, ['tabId'], true),
+  tool('browser_network_summary', 'Read current main-frame Resource Timing buffer, including entries from before extension attachment if still retained. Empty does not prove no requests occurred. Omits query strings, credentials, headers and bodies. Not a network capture; other frames/workers and evicted records are excluded. includeTiming:true adds the per-request waterfall Resource Timing recorded: DNS, connect, TLS, request and response phases, next-hop protocol, redirect count, transfer/encoded/decoded sizes, render-blocking status, response status and Server-Timing names and durations. That is deeper than a duration, but still excludes headers and bodies - use browser_devtools_capture for a live bounded capture.', { tabId, maxEntries: { type: 'integer', minimum: 1, maximum: 200 }, includeTiming: { type: 'boolean' }, agent }, ['tabId'], true),
   tool('browser_scan_overlays', 'Read-only scan for dialogs, ads, cookie banners, guide overlays, chat widgets, transparent blockers, close buttons, hit-test blockers, and scrollable containers. Use before clicking through complex or ad-heavy pages.', { tabId, agent }, ['tabId'], true),
   tool('browser_devtools_capture', 'Read-only CDP capture of what a human reads in the DevTools Console, Network, Sources script list and Performance metrics for one tab, inside one bounded observation window. Domains are enabled only after the debugger attaches, so events emitted earlier are invisible and an empty list is not proof that nothing happened. Only this tab target is observed; other tabs, workers, service workers and out-of-process iframes are separate targets. Console object arguments are summarised by type and never serialised; network records exclude headers, cookies and bodies. Buffer overflow is reported as dropped/truncated counters. This is not request replay, not script editing, and not breakpoint debugging. If another debugger already owns the tab the call fails without dispatching.', {
     tabId,
@@ -328,7 +346,7 @@ export const TOOLS = [
   }, ['tabId', 'attemptedAction', 'error'], true),
   tool('browser_observe', 'Unified observation: browser_read + browser_debug + basic element geometry/occlusion signals from the allowed page. Prefer this before choosing actions on complex pages. maxChars is a budget for the WHOLE payload, not just the text: when it is exceeded, geometry is dropped first, then the bulky debug lists, then elements, then text, and `trimmed` names exactly what went. Pass sections to ask for less - ["read"] is usually enough, because geometry repeats read.elements and debug repeats the active element. browser_read already reports `notices` (visible alerts, toasts and form errors) and `refsReusable`, so a second observe is often unnecessary.', { tabId, maxChars: { type: 'integer', minimum: 100, maximum: 50000 }, sections: { type: 'array', items: { type: 'string', enum: ['read', 'debug', 'geometry'] }, minItems: 1, maxItems: 3 }, agent }, ['tabId'], true),
   tool('browser_ai_status', 'Read-only check for Chrome built-in AI availability in the extension context. Does not create a model session or download a model.', { agent }, [], true),
-  tool('browser_local_judge', 'Optional local Chrome AI judge. Two modes: (1) risk (default): asks Chrome AI to classify a proposed browser action as allow, warn, block, or unsure. Requires goal, observation, proposedAction, and optional riskLevel. (2) discovery: when deterministic rules (nextStep) cannot provide a clear next step, analyzes page structure, recommends optimal tool chain, and provides operation guidance. Requires goal, observation, and optional attemptedTools/failureReasons/context. If Chrome AI unavailable in either mode, returns verdict unavailable. Never executes the action.', {
+  tool('browser_local_judge', 'Optional local Chrome AI judge. Three modes: (1) risk (default): asks Chrome AI to classify a proposed browser action as allow, warn, block, or unsure. Requires goal, observation, proposedAction, and optional riskLevel. (2) discovery: when deterministic rules (nextStep) cannot provide a clear next step, analyzes page structure, recommends optimal tool chain, and provides operation guidance. Requires goal, observation, and optional attemptedTools/failureReasons/context. (3) triage: queue-only advisory planning for a weak caller under concurrency. It receives tool, urgency, queue metadata and allowedTools - deliberately no page text - and returns decision proceed|wait|switch_tool|escalate|stop with waitMs, a nextTool chosen only from allowedTools, a short why and confidence. A triage answer never approves a write and never counts as a risk verdict for judge:"require" policies. If Chrome AI is unavailable in any mode, returns verdict unavailable. Never executes the action.', {
     goal: text(4000),
     observation: text(12000),
     proposedAction: text(4000),
@@ -336,7 +354,11 @@ export const TOOLS = [
     attemptedTools: { type: 'array', items: { type: 'string' } },
     failureReasons: { type: 'array', items: { type: 'string' } },
     context: text(8000),
-    mode: { type: 'string', enum: ['risk', 'discovery'] },
+    mode: { type: 'string', enum: ['risk', 'discovery', 'triage'] },
+    tool: { type: 'string', minLength: 1, maxLength: 120 },
+    urgency: { type: 'string', enum: ['interactive', 'normal', 'batch'] },
+    queue: { type: 'object', additionalProperties: true },
+    allowedTools: { type: 'array', maxItems: 24, items: { type: 'string', minLength: 1, maxLength: 120 } },
     agent,
   }, ['goal', 'observation'], true),
   tool('browser_click', 'Click a current element ref from browser_read. May submit or publish; caller must have user authorization. Never retry an uncertain result automatically. The reply carries effect (dom|network|dialog|none) and diagnoseFlow (DOM/resource/dialog/file-input deltas plus recent resource requests), so a clicked:true with zero side effects is visible; throttled:true warns when document.visibilityState is hidden and timers may be throttled. settleMs (default 120, 0..2000) bounds the observation window; set 0 for the old timing. Downloads and console errors are not observable from the page world and are reported as unknown, never as proof that nothing happened. If the tab is leased, pass the matching agent.', { tabId, ref, settleMs: { type: 'integer', minimum: 0, maximum: 2000 }, agent }, ['tabId', 'ref']),
@@ -556,6 +578,60 @@ export const TOOLS = [
     interactiveOnly: { type: 'boolean' },
     maxNodes: { type: 'integer', minimum: 1, maximum: 3000 },
     maxDepth: { type: 'integer', minimum: 1, maximum: 200 },
+    agent
+  }, ['tabId'], true),
+  tool('browser_script_inventory', 'List the scripts the page is actually running - the DevTools Sources file list - with scriptId, URL, size, line range, module flag and the sourceMappingURL each script advertises. Read-only: it never sets a breakpoint, edits a script or leaves a debugger session open; a temporary attachment is detached before the reply. Chrome only emits Debugger.scriptParsed after the domain is enabled, so this reads a bounded window and reports totalScripts/matchedCount instead of implying the list is complete. Pass urlFilter (case-insensitive substring) on a script-heavy page. includeSource:true needs one exact scriptId and returns page JavaScript, which is untrusted data. When a browser_debugger session is already open the same attachment is reused, so no second debugging banner appears; script records captured before this call are included.', {
+    tabId,
+    urlFilter: { type: 'string', maxLength: 1000 },
+    maxScripts: { type: 'integer', minimum: 1, maximum: 300 },
+    settleMs: { type: 'integer', minimum: 0, maximum: 3000 },
+    scriptId: { type: 'string', maxLength: 200 },
+    includeSource: { type: 'boolean' },
+    maxSourceChars: { type: 'integer', minimum: 1, maximum: 20000 },
+    agent
+  }, ['tabId'], true),
+  tool('browser_source_map', 'Read and parse the source map a running script advertises, the way DevTools resolves a bundle back to its original files: source list, sourceRoot, names count, mappings size, indexed-map sections, and whether sourcesContent is embedded. Pass line (1-based) and column (0-based) to map one generated position to its original source, line and column, including inside an indexed map. sourceIndex previews one embedded source inside previewChars; nothing else returns source text. The map is fetched from the page first so the page\'s own cookies and origin apply, then from the extension origin as a fallback; both are read-only GETs. The body is capped by maxBytes (default 8 MB, hard cap 20 MB) and an oversized map is reported as partial rather than truncated into invalid JSON. A script with no sourceMappingURL is not_found, not an empty map.', {
+    tabId,
+    scriptId: { type: 'string', maxLength: 200 },
+    url: { type: 'string', maxLength: 1000 },
+    urlFilter: { type: 'string', maxLength: 1000 },
+    maxSources: { type: 'integer', minimum: 1, maximum: 200 },
+    sourceIndex: { type: 'integer', minimum: 0, maximum: 100000 },
+    previewChars: { type: 'integer', minimum: 1, maximum: 20000 },
+    line: { type: 'integer', minimum: 1, maximum: 10000000 },
+    column: { type: 'integer', minimum: 0, maximum: 10000000 },
+    maxBytes: { type: 'integer', minimum: 1000, maximum: 20000000 },
+    settleMs: { type: 'integer', minimum: 0, maximum: 3000 },
+    agent
+  }, ['tabId'], true),
+  tool('browser_event_listeners', 'List the event listeners on one element or on the document - what DevTools shows in the Event Listeners pane - with type, capture/passive/once, the script URL and 1-based line and column, and a bounded handler preview. This answers "what handles this click" before a caller guesses at a selector or simulates a click, and it is read-only: no listener is added or removed. selector must resolve to exactly one element; several matches are ambiguous because their handlers are different facts, and a document selector does not pierce shadow roots. Omit selector for document-level listeners, or pass includeAncestors:true to see delegated listeners on ancestors. types filters to named events. A listener list is evidence about wiring, not proof that the business action will happen.', {
+    tabId,
+    selector: { type: 'string', maxLength: 1000 },
+    types: { type: 'array', maxItems: 30, items: { type: 'string', maxLength: 80 } },
+    includeAncestors: { type: 'boolean' },
+    maxListeners: { type: 'integer', minimum: 1, maximum: 200 },
+    settleMs: { type: 'integer', minimum: 0, maximum: 3000 },
+    agent
+  }, ['tabId'], true),
+  tool('browser_dom_snapshot', 'Read the document as a bounded structural tree, including open shadow roots, with tag, id, class, role, type, name, data-/aria- attribute names, optional text and rects. This is the full-DOM view browser_observe compresses: it keeps wrappers and hidden nodes, and it reports shadowRoots, iframes and a truncated flag so a partial walk is never mistaken for a complete document. It returns structure, not action refs - resolve the node with browser_find_element or browser_locate before acting. rootSelector starts the walk at one element and reports its matchCount. Attribute values are limited to the fields a selector needs; href, src and value are deliberately not returned. includeText and includeRects are opt-in because they enlarge the reply; includeVisibility adds a computed-style hidden flag. Runs in the main frame only and never mutates the page.', {
+    tabId,
+    rootSelector: { type: 'string', maxLength: 1000 },
+    maxNodes: { type: 'integer', minimum: 1, maximum: 2000 },
+    maxDepth: { type: 'integer', minimum: 1, maximum: 60 },
+    includeText: { type: 'boolean' },
+    includeRects: { type: 'boolean' },
+    includeShadow: { type: 'boolean' },
+    includeVisibility: { type: 'boolean' },
+    agent
+  }, ['tabId'], true),
+  tool('browser_framework_tree', 'Read the component tree the framework itself holds, which the DOM cannot show: React fibers (function/class/memo/forwardRef components with prop keys, class state keys and keys), Vue 2 $children or Vue 3 instance subTree (props and setup-state keys), Angular components through window.ng.getComponent, and Svelte per-element source locations. Detects React, Vue, Angular and Svelte in one pass and reports every framework found, because micro-frontends can run several at once. Values are omitted by default; includeValues:true returns short primitive previews deliberately. includeHost:true adds host elements. Angular is listed flat where only ownership is public, and Svelte has no instance tree in production - the reply says so instead of inventing one. Component metadata is evidence, not an action ref; use browser_find_element or browser_locate to act. Main frame only; cross-origin iframes are separate documents.', {
+    tabId,
+    framework: { type: 'string', enum: ['auto', 'react', 'vue', 'angular', 'svelte'] },
+    maxNodes: { type: 'integer', minimum: 1, maximum: 1500 },
+    maxDepth: { type: 'integer', minimum: 1, maximum: 100 },
+    includeHost: { type: 'boolean' },
+    includeValues: { type: 'boolean' },
+    scanLimit: { type: 'integer', minimum: 100, maximum: 20000 },
     agent
   }, ['tabId'], true),
   tool('browser_drag', 'Drag from one element to another, or from an element to a point. Both ends are resolved to geometry first, so a stale ref is refused rather than dragged from wherever the element used to be. mode:"auto" first tries to intercept a native HTML5 drag (Input.setInterceptDrags plus Input.dispatchDragEvent, which is what a draggable="true" element needs) and falls back to a press-move-release sequence, which is what canvas and pointer-based sortable libraries need; mode:"mouse" and mode:"html5" force one path, and mode:"synthetic" builds the drag events in the page with a real DataTransfer - measured: setInterceptDrags produced no dragIntercepted for a plain draggable div, so that is the only path that makes such an element drop, and it reports accepted when a drop listener called preventDefault. The reply says which path ran. verified is always false: nothing here proves the page accepted the drop, so observe the result before the next step.', {

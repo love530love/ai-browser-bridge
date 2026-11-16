@@ -15,6 +15,8 @@ $registryPath = Join-Path $root '.local/autostart-registry.json'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $valueName = 'AIBrowserBridge'
 $linkPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'AI Browser Bridge.lnk'
+$heartbeatValueName = 'AIBrowserBridgeHeartbeat'
+$heartbeatLinkPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'AI Browser Bridge Heartbeat.lnk'
 $watchdogTaskName = 'AI Browser Bridge Watchdog'
 
 function Get-WatchdogTaskState([string]$TaskName) {
@@ -121,11 +123,61 @@ function Remove-AutostartEntry($e) {
   return "跳过（不自动删除）清单项 kind=$kind：外部项交由用户自行处理"
 }
 
+function Show-UnmanagedResiduals($entries) {
+  # Report-only. A leftover registration outside the manifest can relaunch the
+  # supervisor after uninstall ("orphan"). These are listed, never deleted:
+  # only items this project can prove it owns are removed.
+  $normalizedRoot = ($root -replace '\\', '/').ToLowerInvariant()
+  $managedNames = @()
+  $managedPaths = @()
+  foreach ($entry in @($entries)) {
+    if ($null -eq $entry) { continue }
+    if ($entry.name) { $managedNames += [string]$entry.name }
+    if ($entry.path) { $managedPaths += [string]$entry.path }
+  }
+  $rows = @()
+  try {
+    $key = Get-Item -LiteralPath $runKey -ErrorAction Stop
+    foreach ($name in @($key.GetValueNames())) {
+      if ($name -eq $valueName -or $name -eq $heartbeatValueName -or ($managedNames -contains $name)) { continue }
+      $value = [string]$key.GetValue($name)
+      $normalized = ($value -replace '\\', '/').ToLowerInvariant()
+      if ($normalized.Contains($normalizedRoot) -and ($normalized.Contains('watch-service.ps1') -or $normalized.Contains('heartbeat') -or $normalized.Contains('src/cli.js'))) {
+        $rows += "[registry-run] $runKey\$name = $value"
+      }
+    }
+  } catch { }
+  try {
+    $startup = [Environment]::GetFolderPath('Startup')
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($file in @(Get-ChildItem -LiteralPath $startup -Filter '*.lnk' -ErrorAction SilentlyContinue)) {
+      if ($file.FullName -eq $linkPath -or $file.FullName -eq $heartbeatLinkPath -or ($managedPaths -contains $file.FullName)) { continue }
+      try {
+        $shortcut = $shell.CreateShortcut($file.FullName)
+        $evidence = ([string]$shortcut.TargetPath) + ' ' + ([string]$shortcut.Arguments)
+        $normalized = ($evidence -replace '\\', '/').ToLowerInvariant()
+        if (($file.Name -like 'AI Browser Bridge*') -or ($normalized.Contains($normalizedRoot) -and ($normalized.Contains('watch-service.ps1') -or $normalized.Contains('heartbeat') -or $normalized.Contains('src/cli.js')))) {
+          $rows += "[startup-shortcut] $($file.FullName) target=$($shortcut.TargetPath) args=$($shortcut.Arguments)"
+        }
+      } catch { }
+    }
+  } catch { }
+  Write-Host ''
+  Write-Host '--- unmanaged residual scan (reported, never deleted) ---'
+  if ($rows.Count -eq 0) {
+    Write-Host 'no unmanaged residual detected in HKCU Run / Startup shortcuts (the known scheduled-task name is reported above; unrelated task names are outside this scan)'
+  } else {
+    foreach ($row in $rows) { Write-Host "  [residual] $row" }
+    Write-Host '  Review each residual manually. This script never deletes items that are not in its manifest.'
+  }
+}
+
 New-Item -ItemType Directory -Force -Path (Join-Path $root '.local') | Out-Null
 # Keep the supervisor disabled marker (project convention, .NET-friendly write).
 Set-Content -LiteralPath (Join-Path $root '.local/watchdog-disabled') -Value 'Autostart removed; supervisor exits on its next check.' -Encoding utf8
 
 $lines = @()
+$managedEntries = @()
 $reg = Read-AutostartRegistry
 if ($null -eq $reg) {
   # No valid manifest: report unknown (never pretend clean) and fall back to
@@ -136,9 +188,11 @@ if ($null -eq $reg) {
     [ordered]@{ kind = 'startup-shortcut'; path = $linkPath }
     [ordered]@{ kind = 'registry-run'; key = $runKey; name = $valueName }
   )
+  $managedEntries = $fallback
   foreach ($e in $fallback) { $lines += Remove-AutostartEntry $e }
 } else {
   $entries = @($reg.entries)
+  $managedEntries = $entries
   if ($entries.Count -eq 0) {
     Write-Host '清单 entries 为空：没有项目管理的自启注册项需要清理。'
   }
@@ -191,6 +245,8 @@ if ($state -eq 'registered') {
   Write-Host ('  schtasks /query /tn "' + $watchdogTaskName + '"')
   Write-Host ('  schtasks /delete /tn "' + $watchdogTaskName + '" /f')
 }
+
+Show-UnmanagedResiduals $managedEntries
 
 Write-Host ''
 Write-Host '项目管理的登录自启注册已按清单清理；外部注册的计划任务（若有）不受本脚本管理，也不会被自动删除。'

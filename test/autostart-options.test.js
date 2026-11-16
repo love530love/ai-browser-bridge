@@ -81,6 +81,33 @@ test('-ScheduledTask 用 schtasks /create 注册登录触发任务（PT0S / 失�
   assert.match(installSrc, /copyable create command/, '应给出可复制创建命令');
 });
 
+test('外部任务收养必须核验动作，心跳二路冲突在写入前拒绝且需 -Force', () => {
+  assert.match(installSrc, /\[switch\]\$AdoptExternal/, '缺少 -AdoptExternal');
+  assert.match(installSrc, /\[switch\]\$Force/, '缺少 -Force');
+  // Adoption is identity-bound: existence alone is not enough.
+  assert.match(installSrc, /Get-ScheduledTaskActionEvidence/, '收养前应核验计划任务动作');
+  assert.match(installSrc, /matchesProject/, '应比较任务动作是否指向本项目');
+  assert.match(installSrc, /Refusing to adopt/, '动作不符时应拒绝收养');
+  assert.match(installSrc, /adopted\s*=\s*\$true/, '收养项应带 adopted 标记');
+  assert.match(installSrc, /evidence\s*=\s*'schtasks \/query \/xml/, '收养项应留下核验证据');
+  // The heartbeat preflight must run before any write and refuse without -Force.
+  const preflightIdx = installSrc.indexOf('$secondRoutes = @(Find-SecondInspectionRoutes)');
+  const writesIdx = installSrc.indexOf('# ---- install path (writes) ----');
+  assert.ok(preflightIdx > 0, '缺少心跳二路预检');
+  assert.ok(preflightIdx < writesIdx, '预检必须在写入路径之前');
+  assert.match(installSrc, /REFUSED: -Heartbeat/, '冲突应明确拒绝');
+  assert.match(installSrc, /exit 3/, '冲突拒绝应有独立退出码');
+  assert.match(installSrc, /-Force supplied: continuing with both routes/, '-Force 应保留显式覆盖并继续告警');
+  // -StatusOnly explains the disposition of an unmanaged external task.
+  assert.match(installSrc, /-AdoptExternal/, '状态输出应给出收养选项');
+  // Uninstall reports, but never deletes, residuals outside the manifest.
+  assert.match(uninstallSrc, /Show-UnmanagedResiduals/, '卸载后应扫描未纳管残留');
+  assert.match(uninstallSrc, /\[residual\]/, '残留应以 [residual] 标注');
+  assert.match(uninstallSrc, /never deletes items that are not in its manifest/, '残留只报告不删除');
+  assert.match(uninstallSrc, /\$heartbeatValueName\s*=\s*'AIBrowserBridgeHeartbeat'/, '卸载器应识别心跳注册名');
+});
+
+
 test('-StatusOnly 能列出新 kind 并区分 managed / external', () => {
   assert.match(installSrc, /if \(\$StatusOnly\)/, '保留 -StatusOnly 只读分支');
   assert.match(installSrc, /Show-AutostartStatus/);

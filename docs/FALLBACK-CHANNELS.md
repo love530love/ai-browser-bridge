@@ -33,6 +33,7 @@ browser_health → browser_hosts → browser_tabs → browser_observe/browser_re
 
 - `browser_debugger action:"probe"`：`Target.getTargets`、`Schema.getDomains`、`Page.getFrameTree`、`Runtime.evaluate("1+1")`、`Input.setIgnoreInputEvents`、无效域探测；
 - `browser_devtools_capture`：一次 attach 内有界采集 Console / Network / Sources / Performance；URL 去 query/fragment/凭据，不采集 header/cookie/body。
+- **深度只读感知（0.44.0 工作树）**：`browser_script_inventory`、`browser_source_map`、`browser_event_listeners`、`browser_dom_snapshot`、`browser_framework_tree`。Debugger 只做临时 attachment 并在返回前 detach；已有 `browser_debugger` 会话时复用，不产生第二个调试横幅。source map 以页面源优先、扩展源兜底，只做 GET；DOM/组件树只走主 frame 注入，不修改页面。五者都只返回证据、不返回 ref，动作仍须回到 `browser_locate`/`browser_find_element` + `_verified`。
 
 边界：
 
@@ -62,7 +63,7 @@ browser_health → browser_hosts → browser_tabs → browser_observe/browser_re
 - 动作后必须重新截图/观察验证，不能以“点了”作为成功；
 - 视觉通道不用于绕过验证码、登录或安全提示。
 
-规划中：`browser_visual_elements`（非文本元素检测）、`browser_ocr`（provider 可插拔）。权重默认不随包分发，许可证与选型见 [OPEN-SOURCE-CAPABILITY-RADAR.md](OPEN-SOURCE-CAPABILITY-RADAR.md)。
+已实现：`browser_ocr`（Windows.Media.Ocr 本地后端，无权重/网络；临时截图删除、识别文本不入账本；返回行框与 0..1000 坐标但不返回 ref）。规划中：`browser_visual_elements`（非文本元素检测）、OCR 多 provider 插拔。权重默认不随包分发，许可证与选型见 [OPEN-SOURCE-CAPABILITY-RADAR.md](OPEN-SOURCE-CAPABILITY-RADAR.md)。
 
 ## 6. Playwright 旁路门禁
 

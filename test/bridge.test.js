@@ -7,7 +7,7 @@ import { createBridge } from '../src/server.js';
 import { validateCall } from '../src/tools.js';
 import { createAgentPolicy } from '../src/policy.js';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const config = { port: 0, agentToken: 'a'.repeat(64), extensionToken: 'b'.repeat(64) };
@@ -24,6 +24,96 @@ async function extension(url, token = config.extensionToken) {
   assert.equal(JSON.parse((await ready)[0]).type, 'ready');
   return ws;
 }
+test('status exposes deployment convergence facts and ready carries them to the panel', async t => {
+  const { b, base, wsUrl } = await setup(t);
+  const headers = { Authorization: `Bearer ${config.agentToken}` };
+  const status = await (await fetch(`${base}/status`, { headers })).json();
+  assert.equal(status.pid, process.pid);
+  assert.equal(status.runningBuildId, status.buildId);
+  assert.equal(typeof status.deploymentStale, 'boolean');
+  assert.equal(status.deployment.deploymentStale, status.deploymentStale);
+  assert.equal(status.deployment.runningBuildId, status.buildId);
+  assert.equal(status.deployment.diskBuildId, status.diskBuildId);
+  assert.ok(Array.isArray(status.deployment.actionRequired));
+
+  const ws = new WebSocket(wsUrl, { origin: `chrome-extension://${'a'.repeat(32)}` });
+  await once(ws, 'open');
+  const ready = once(ws, 'message');
+  ws.send(JSON.stringify({ type: 'hello', token: config.extensionToken }));
+  const message = JSON.parse((await ready)[0]);
+  assert.equal(message.type, 'ready');
+  assert.equal(message.deployment.runningBuildId, status.buildId);
+  assert.equal(typeof message.deployment.upgradeRequired, 'boolean');
+  ws.close();
+});
+
+test('/restart-when-idle refuses when the embedding did not authorize self-exit', async t => {
+  const { base } = await setup(t);
+  const headers = { Authorization: `Bearer ${config.agentToken}`, 'Content-Type': 'application/json' };
+  const res = await fetch(`${base}/restart-when-idle`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ confirmation: 'restart_service_when_idle_once' })
+  });
+  assert.equal(res.status, 501);
+  assert.equal((await res.json()).status, 'unsupported');
+});
+
+test('/restart-when-idle is not_needed when the running build matches disk', async t => {
+  const { base } = await setup(t, { onRestartRequested: () => {} });
+  const headers = { Authorization: `Bearer ${config.agentToken}`, 'Content-Type': 'application/json' };
+  const res = await fetch(`${base}/restart-when-idle`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ confirmation: 'restart_service_when_idle_once', expectedBuildId: 'not-the-running-build' })
+  });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).status, 'stale_request');
+  const current = await fetch(`${base}/restart-when-idle`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ confirmation: 'restart_service_when_idle_once' })
+  });
+  assert.equal(current.status, 200);
+  assert.equal((await current.json()).status, 'not_needed');
+});
+
+test('/restart-when-idle requires the exact confirmation string', async t => {
+  const { base } = await setup(t, { onRestartRequested: () => {} });
+  const headers = { Authorization: `Bearer ${config.agentToken}`, 'Content-Type': 'application/json' };
+  const res = await fetch(`${base}/restart-when-idle`, {
+    method: 'POST', headers, body: JSON.stringify({ confirmation: 'restart' })
+  });
+  assert.equal(res.status, 400);
+});
+
+test('/restart-when-idle closes only after acknowledging a stale build', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'aib-restart-root-'));
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ version: '9.9.9' }));
+  writeFileSync(join(root, 'package-lock.json'), JSON.stringify({ version: '9.9.9' }));
+  mkdirSync(join(root, 'src'));
+  writeFileSync(join(root, 'src', 'app.js'), 'export const value = 1;\n');
+  let requested = null;
+  let finished = null;
+  const done = new Promise(resolve => { finished = resolve; });
+  const { base } = await setup(t, {
+    deploymentRoot: root, deploymentConfigPath: null,
+    onRestartRequested: request => { requested = request; finished(); },
+    exitAfterRestart: () => {}
+  });
+  const headers = { Authorization: `Bearer ${config.agentToken}`, 'Content-Type': 'application/json' };
+  const res = await fetch(`${base}/restart-when-idle`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ confirmation: 'restart_service_when_idle_once', ttlMs: 5000 })
+  });
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.equal(data.status, 'restarting');
+  assert.equal(typeof data.restartId, 'string');
+  await Promise.race([done, new Promise((_, reject) => setTimeout(() => reject(new Error('restart callback was not observed')), 2000))]);
+  assert.equal(requested.restartId, data.restartId);
+  assert.equal(requested.runningBuildId, data.runningBuildId);
+  assert.equal(requested.diskBuildId, data.diskBuildId);
+  assert.notEqual(requested.runningBuildId, requested.diskBuildId);
+});
+
 test('HTTP requires token and rejects browser origins and DNS rebinding hosts', async t => {
   const { base } = await setup(t);
   assert.equal((await fetch(`${base}/status`)).status, 401);

@@ -140,9 +140,14 @@ function buildHarness({ storedEverConnected, sessionGetThrows = false } = {}) {
 // the exact string a user sees in #status. This is the "rendered user-facing
 // text" the assertions below check, not connectionState held in memory.
 const showStatusSource = extractFunction(panelJs, 'showStatus');
+const showDeploymentSource = extractFunction(panelJs, 'showDeployment');
 function renderedStatus(message) {
-  const elements = { status: { textContent: '' }, activity: { textContent: '' } };
-  const context = vm.createContext({ $: id => elements[id] ?? { textContent: '' } });
+  const elements = {
+    status: { textContent: '' }, activity: { textContent: '' },
+    deployment: { textContent: '', hidden: true }
+  };
+  const context = vm.createContext({ $: id => elements[id] ?? { textContent: '' }, deploymentHint: () => null });
+  vm.runInContext(showDeploymentSource, context);
   vm.runInContext(showStatusSource, context);
   context.showStatus(message);
   return elements.status.textContent;
@@ -248,7 +253,7 @@ test('a failing session read defaults to false without breaking the connect path
 test('the captured field is the text panel.js renders into #status', () => {
   // Tie the runtime capture to the real UI: notifyStatus sends connectionState
   // in a connection-status message, and showStatus writes it to #status.
-  assert.match(workerSource, /sendMessage\(\{ type: 'connection-status', connectionState, lastAction \}\)/);
+  assert.match(workerSource, /sendMessage\(\{ type: 'connection-status', connectionState, lastAction, deployment: serviceDeployment \}\)/);
   assert.match(panelJs, /\$\('status'\)\.textContent = state\.connectionState;/);
   assert.match(panelHtml, /id="status"/);
   assert.match(panelJs, /message\.type === 'connection-status'\) showStatus\(message\)/,

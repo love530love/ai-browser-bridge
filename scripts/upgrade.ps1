@@ -1,4 +1,5 @@
 param(
+  [switch]$Legacy,
   [switch]$ApplyGitUpdate,
   [switch]$BestEffort,
   [switch]$SkipReload,
@@ -7,9 +8,28 @@ param(
   [ValidateRange(1, 600)][int]$HealthTimeoutSec = 45
 )
 
+# DEPRECATED. The official upgrade flow is the five-step sequence in README and
+# docs/UPGRADE-OPERATIONS.md: upgrade-check -> restart-service-when-idle --apply
+# (idle-gated) -> per-host extension reload -> upgrade-check/doctor verification.
+# This script's old body (npm ci + start.ps1 + UIA reload) conflicts with that
+# flow: start.ps1 does not replace a running service instance, and the UIA
+# reload path is not the extension's self-reload. It remains only for explicitly
+# requested legacy runs (`-Legacy`) and refuses to apply the git update unless
+# -Legacy is present.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $node = (Get-Command node.exe -ErrorAction Stop).Source
+if (-not $Legacy) {
+  Write-Warning 'scripts/upgrade.ps1 已弃用：默认只运行只读 upgrade-check，不拉取、不安装、不重启。官方升级流程见 README「升级」与 docs/UPGRADE-OPERATIONS.md；空闲重启使用 node src/cli.js restart-service-when-idle --apply。确需旧流程请显式加 -Legacy。'
+  $report = & $node (Join-Path $root 'src\cli.js') upgrade-check 2>&1
+  $text = $report -join "`n"
+  Write-Output $text
+  try {
+    $parsed = $text | ConvertFrom-Json
+    if ($parsed.ok) { exit 0 }
+    exit 2
+  } catch { exit 1 }
+}
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 . (Join-Path $PSScriptRoot 'bounded-process.ps1')
 $state = Join-Path $root '.local\upgrade'

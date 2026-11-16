@@ -1,26 +1,45 @@
 # 升级运行与验收
 
-`scripts/upgrade.ps1` 在修改依赖前读取 doctor。存在执行中任务、排队任务、任务租约或标签租约时，报告 `status: waiting`、`actionRequired: wait-for-idle`，不继续 Git 更新、依赖安装或扩展重载。
+> **DEPRECATED（2026-11-16）**：`scripts/upgrade.ps1` 已不是官方升级入口。它默认只运行只读 `node src/cli.js upgrade-check`，不拉取、不安装、不重启；旧流程（`npm ci` → `start.ps1` → UIA 重载扩展）必须显式加 `-Legacy` 才会执行，且 `-Legacy` 与官方五步流程互斥。不要再把旧脚本描述成“一键升级”。
 
-调用方应保留原任务，等任务完成且释放租约后再安排升级。不要把 waiting 当成任务失败，也不要为升级强制删除租约。
+## 唯一官方升级流程
+
+磁盘源码、运行中的服务、Chrome 扩展和 `.local/config.json` 是四个独立层；`git pull` 只更新第一层。
+
+1. **拉取源码**：`git pull --ff-only origin main`。不要手改版本号，也不要覆盖工作区未提交改动。
+2. **只读预检**：`node src/cli.js upgrade-check`。它按顺序输出每一层的问题、可复制命令和证据；`ok:true` 表示四层已收敛。不重启、不重载、不写配置。
+3. **空闲重启服务**：`node src/cli.js restart-service-when-idle --apply`。命令先做完整预检（`/status` 的 pid 对 LISTENING pid、进程命令行、看门狗身份、队列/租约/维护锁空闲、running 与 disk buildId 不一致），任一不符即拒绝且不发送任何信号；预检通过后写 `restart_intent`，请服务自查空闲并自行退出，由看门狗拉起新源码，CLI 轮询到 `buildId === 磁盘 buildId`（`status:verified`）才算完成。只看预检时去掉 `--apply`。
+4. **重载扩展**：`node src/cli.js call browser_reload_extension '{"confirmation":"reload_extension_once","allowFocus":true}'`，多宿主按各 `hostId` 分别执行一次。扩展已连接时会走 `chrome.runtime.reload()` 自我重载；不再使用 UIA 点击作为官方路径。
+5. **复验**：`doctor-lite.bat && doctor.bat`，并用 `node src/cli.js upgrade-check` 确认 `running.buildId === disk.buildId`、扩展版本一致。面板也会显示 `deploymentStale` / 版本偏差 / 配置缺字段提示。
+
+### 首次迁移（运行中的服务早于本协议）
+
+旧服务没有 `POST /restart-when-idle`。第 3 步会返回 `status: refused`、`reason: restart_endpoint_unavailable`，并且**不发送任何信号**。此时在确认空闲窗口后按“历史流程”手工重启一次；之后该命令即可使用。
+
+### 边界
+
+- 不按 `.local/server.pid` 杀进程；该文件不是存活证明，实际 LISTENING PID 可能属于另一个 node 进程。
+- 除 `restart-service-when-idle` 外，只有心跳白名单 `-Heartbeat` 会在空闲/冷却/单实例锁/复检门控下执行 `build_restart`；看门狗默认只报告 `build-stale-restart-needed`，绝不自动重启。
+- 绝不要用 `stop.ps1` 执行升级重启：它会写 `service-paused` 让守护自我暂停。
+- `uncertain` 结果不可重放；先观察 `/status`、`.local/service-lifecycle.jsonl` 与看门狗日志。
+
+## 历史：旧升级脚本流程（已弃用）
+
+以下内容仅用于理解 `scripts/upgrade.ps1 -Legacy` 的行为，不是推荐路径。
+
+旧脚本在修改依赖前读取 doctor。存在执行中任务、排队任务、任务租约或标签租约时，报告 `status: waiting`、`actionRequired: wait-for-idle`，不继续 Git 更新、依赖安装或扩展重载。
 
 开发版增加经过本机认证的 `POST /maintenance`：`action: acquire` 在同一个服务事件循环中检查队列和租约并关闭新任务入口，成功返回独立持有令牌；`action: release` 必须携带该令牌。状态接口不公开令牌。新浏览器调用返回 `waiting / maintenance / dispatched:false`，读取就绪状态不会错误地返回 ready。CLI 支持 `node src/cli.js maintenance --stdin` 接收 JSON。
 
-升级脚本取得最长 10 分钟的维护窗口，退出时释放，崩溃后自动到期恢复。正式服务把锁同步写入 `.local/maintenance.json` 后才确认取得，服务重启后继续等待至释放或到期；持有令牌不出现在 status 中。损坏的状态文件会使服务启动失败，必须先排查，不会静默解除维护。
+旧脚本取得最长 10 分钟的维护窗口，退出时释放，崩溃后自动到期恢复。正式服务把锁同步写入 `.local/maintenance.json` 后才确认取得，服务重启后继续等待至释放或到期；持有令牌不出现在 status 中。损坏的状态文件会使服务启动失败，必须先排查，不会静默解除维护。
 
-安装依赖前至少需要剩余 5 分钟维护时间；`npm ci` 最长运行 4 分钟，超时只终止本次启动的安装进程树，不继续重载扩展。安装超时可能留下不完整依赖，仍需修复安装，当前尚无依赖回滚。Git 拉取及 UI 重载的完整事务超时也仍待完善。
+安装依赖前至少需要剩余 5 分钟维护时间；`npm ci` 最长运行 4 分钟。旧流程的 `start.ps1` 不会替换已在运行的服务实例，因此“已经运行”不等于“已升级”——这正是官方流程改用自退出重启的原因。
 
-旧版服务没有维护接口时脚本会停止；首次迁移仍需安排空闲窗口更新服务。这不是全流程自动回滚升级器，也不支持多个服务进程共用同一个状态文件。
+旧路径的扩展 Reload 是一次性 UIA 操作，只调用一次，不因非零退出码自动重放；`-ChromeWindowHandle` / `-ChromeProcessId` 用于消歧。`reload-extension.ps1` 退出码 `0` 表示目标版本已观察到，`2` 表示确认未调用 Reload，`3` 表示调用可能已派发但未能验证。遇到 `uncertain` 必须先独立观察扩展连接与版本，不得直接重试。
 
-启动脚本失败时不尝试扩展重载；旧服务仍运行时返回 `restart-service-when-idle`，不会把 start.ps1 的“已经运行”误判为服务更新成功。`-BestEffort` 只使错误以 JSON 输出，不代表成功：失败退出码仍为 1。
+`service-build-current`：服务启动时固定计算 src 中 JS/JSON 源码及 package/lock 声明的 SHA-256 摘要。旧服务不提供 buildId 也视为未验证，避免同一版本号下运行旧代码被误报为部署完成。
 
-每次结果写入 `.local/upgrade/last-result.json`。部署成功需 doctor 比较磁盘、服务和扩展的版本一致；不以“已点击 Reload”作为成功依据。
-
-扩展 Reload 是一次性 UI 操作，升级流程只调用一次，不因非零退出码自动重放。存在多个可见 Chrome 窗口时，重载脚本拒绝猜选目标；先运行 `pwsh -NoProfile -File scripts/reload-extension.ps1 -ListWindows` 查看进程 ID、窗口句柄和标题，再用 `-ChromeWindowHandle <hwnd>` 精确指定窗口，并可用 `-ChromeProcessId <pid>` 限定所属进程；`scripts/upgrade.ps1` 会透传这两个参数。重载只按固定扩展 ID 定位：优先检查 UIA 按钮祖先上下文；若 Chrome 未将 ID 置于祖先，则要求地址栏精确指向该扩展详情 URL、页面中可见的扩展 ID 唯一，并且开发者 Reload 控件唯一且启用；不按产品名回退，歧义即停止。`reload-extension.ps1` 的退出码 `0` 表示目标版本已观察到，`2` 表示确认未调用 Reload，`3` 表示调用可能已派发但未能验证；其他进程错误也按不确定处理。升级结果同时记录 `reload`、`reloadExitCode` 和 `reloadDispatched`（`null` 表示无法确认）。遇到 `uncertain` 时必须先独立观察扩展连接与版本，再决定是否手动操作，不得直接重试。
-
-开发版新增 `service-build-current`：服务启动时固定计算 src 中 JS/JSON 源码及 package/lock 声明的 SHA-256 摘要，doctor 与当前磁盘重新计算的结果比较。旧服务不提供 buildId 也视为未验证，避免同一版本号下运行旧代码被误报为部署完成。升级脚本遇到该项不一致先要求空闲服务更新，不继续尝试扩展重载。
-
-这不是签名、安全扫描或实际依赖文件完整性证明；不覆盖 node_modules、Chrome 扩展实际加载源码，也不读取本机配置、密钥或日志。服务加载与计算期间仍应避免并发修改源码。扩展当前仍以版本及真实行为验收。
+这不是签名、安全扫描或实际依赖文件完整性证明；不覆盖 node_modules、Chrome 扩展实际加载源码，也不读取本机配置、密钥或日志。
 
 ## 2026-10-17 验证
 

@@ -59,7 +59,7 @@
 browser_read / browser_observe / 截图
         │  文本层为空、Canvas、图片型 UI、跨域不可读
         ▼
-browser_ocr  (L0 只读, 可选)
+browser_ocr  (L0 只读, 已实现 Windows.Media.Ocr 本地后端; provider 插拔待做)
         │  能力协商: ocr.providers = ["indra-node", "rapidocr", "tesseract", "external"]
         ▼
 provider 适配器（统一输入: PNG 字节 + 语言提示 + 区域; 统一输出: lines[{text,box,conf}], blocks, markdown, provider, modelVersion, timings）
@@ -68,6 +68,8 @@ provider 适配器（统一输入: PNG 字节 + 语言提示 + 区域; 统一输
         ├─ tesseract: tesseract.js（纯 JS 后备）
         └─ external: 用户自建 HTTP OCR（不回传 Cookie/页面 URL）
 ```
+
+> 状态（2026-11-16）：`browser_ocr` 已以 **Windows.Media.Ocr** 本地后端落地——只读、无权重、无网络、无 API key；返回行文本、词框、CSS 像素矩形与 0..1000 视口坐标，明确 `noRefs:true`，临时截图 0600 并在调用后删除，识别文本不写本地账本。上图的多 provider 协商、markdown 输出、`modelVersion` 与非文本 `browser_visual_elements` 仍未实现。实测：zh-Hans-CN 与 en-US 引擎可用，3840×1823 截图 / 2560×1215 视口按 1.5 缩放正确映射。
 
 设计约束：
 

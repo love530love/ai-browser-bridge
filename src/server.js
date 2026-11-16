@@ -24,9 +24,13 @@ import { createMaintenanceStore } from './maintenance.js';
 import { failureHelp } from './failure-help.js';
 import { capabilityGuide } from './capability-guide.js';
 import { resolveTarget } from './locator-resolver.js';
+import { createOcrAdapter } from './ocr-adapter.js';
+import { ocrTab } from './ocr-tool.js';
 import { PERCEPTION_MATRIX } from './perception-contract.js';
 import { createLocalStore, LOCAL_STORE_EXCLUDED } from './local-store.js';
 import { BUILD_ID } from './build-identity.js';
+import { buildDeploymentStatus } from './deployment-status.js';
+import { RESTART_CONFIRMATION } from './service-restart.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
 import { clearExtensionErrors, describeErrorList, readExtensionErrors } from './extension-errors.js';
 import { readExtensionErrorJournal } from './extension-error-journal.js';
@@ -34,6 +38,8 @@ import { buildErrorClaims } from './extension-error-claims.js';
 import { analyzeRequest, validateVerifySpec } from './request-risk.js';
 import { withNextStep, nextStepForError } from './next-step.js';
 import { toolIndex } from './tool-index.js';
+import { buildAgentAdvice, mergeModelAdvice } from './agent-advice.js';
+import { localModelConfig, adviseWithLocalModel } from './local-model.js';
 import { filterTabs } from './tab-filter.js';
 import { setDevToolsState } from './devtools-menu.js';
 import { recordLifecycle, summarizeLifecycleBeforeStart } from './service-lifecycle.js';
@@ -124,7 +130,7 @@ function withContentBoundaries(result) {
   }
   return next;
 }
-export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), localStoreFile = join(stateDir, 'bridge.db'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true, browserTarget = config.browserTarget ?? null, uploadConfigPath = configPath, lifecycleStartup = null } = {}) {
+export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), localStoreFile = join(stateDir, 'bridge.db'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true, browserTarget = config.browserTarget ?? null, uploadConfigPath = configPath, lifecycleStartup = null, deploymentRoot = ROOT, deploymentConfigPath = configPath, onRestartRequested = null, exitAfterRestart = null } = {}) {
   config = { ...config, uploadRoots: config.uploadRoots ?? [], uploadMaxBytes: config.uploadMaxBytes ?? DEFAULT_UPLOAD_MAX_BYTES };
   // Upload policy is read from disk on demand, cached by mtime. The old code
   // snapshotted config once at boot: `allow-upload-root` DID write the file,
@@ -168,6 +174,16 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   const inFlight = new Map();
   const readsInFlight = new Map(); // hostId -> Map(jobId, job)
   const MAX_READS_PER_HOST = 2;
+  // EWMA of observed execution time per tool. Queue advice can then estimate a
+  // wait from real latencies instead of a fixed guess. Metadata only: no page
+  // text, arguments, host names or credentials are stored here.
+  const toolDurations = new Map();
+  const recordDuration = (name, durationMs) => {
+    if (typeof name !== 'string' || !Number.isFinite(durationMs) || durationMs < 0) return;
+    const previous = toolDurations.get(name);
+    toolDurations.set(name, previous === undefined ? Math.round(durationMs) : Math.round(previous * 0.7 + durationMs * 0.3));
+  };
+  const durationSnapshot = () => Object.fromEntries(toolDurations);
   const readJobsFor = hostId => readsInFlight.get(hostId) ?? null;
   const readCountFor = hostId => readJobsFor(hostId)?.size ?? 0;
   const readCounts = () => new Map([...readsInFlight].map(([hostId, jobs]) => [hostId, jobs.size]));
@@ -289,6 +305,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     },
     firstSteps: [
       'Call browser_queue_status to inspect connected/active/queued state.',
+      'Under concurrency, call browser_agent_advice with your goal and intended toolName before queueing: it is local, read-only, never queued, and returns one decision (proceed/wait/switch/stop), estimatedWaitMs, blockers and a simpler candidate tool chain. Follow it instead of polling blindly. modelProvider:"chrome" or "auto" only prepares an advisory browser_local_judge mode:"triage" second opinion, and a model can add caution but never turn a wait into a proceed.',
       'Start with browser_at on any page you do not already know: it answers "where am I and what can I touch" in a fixed shape (short text head, at most 8 actionable elements, counts of what was left out) instead of a page dump you would have to truncate yourself. Use browser_read only when you need the full element set, and browser_find_text/browser_find_element for a targeted look.',
       'A failed result carries nextStep with one executable call (tool, arguments, why, and a kind of wait/diagnose/retry_with_changes/escalate/stop). Follow it instead of inventing a call. When nextStep is absent the failure has no safe single next call, so re-read rather than guess. nextStep never grants permission: a step that needs a confirmation string carries the one the gate already requires, and no other.',
       'A write result carries receipt: before/after page fingerprints (url, title, text length, interactive count, focus, dialog, scroll) plus a changed flag. changed:false is not evidence the action failed - an async update may not have rendered yet. Read before concluding either way.',
@@ -427,15 +444,16 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     perception: {
       ...PERCEPTION_MATRIX,
       locateTool: 'browser_locate',
+      ocrTool: 'browser_ocr',
       mergeRule: 'The same node found by more than one route is merged into one candidate, keeping every source; refs from different snapshots are never compared as if they were the same address.',
       ranking: 'Deterministic points from named facts (match kind, strategy weight, actionability, covered, disabled, text-only, cross-frame). No model, no probability, no hidden confidence.',
       statusRule: 'not_found only when every searched scope completed; a truncated scan, unsearched frame or failed strategy yields partial or inconclusive instead.',
       localStore: {
         enabled: localStoreFile !== null,
         file: 'bridge.db',
-        scope: 'locator strategy health and run counters only',
+        scope: 'locator strategy health and OCR run counters only',
         excluded: LOCAL_STORE_EXCLUDED,
-        failureMode: 'a missing node:sqlite or an unreadable database disables the ledger without changing any locate answer'
+        failureMode: 'a missing node:sqlite or an unreadable database disables the ledger without changing any locate or OCR answer'
       }
     },
     policy: { installOrRemoveExtension: 'not_implemented_even_with_user_approval', developerMode: 'not_implemented_even_with_user_approval', browserSecuritySettings: 'not_implemented_even_with_user_approval', cookiesAndSecrets: 'the open tab\'s own origin cookies are readable and writable through browser_storage_*; other origins\' cookies, the OS credential store and browser security settings are not' },
@@ -459,6 +477,18 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (localStoreFile === null) return null;
     localStore ??= createLocalStore({ file: localStoreFile });
     return localStore;
+  };
+  // The OCR adapter spawns one bounded Windows PowerShell process per call and
+  // writes a temporary screenshot only because Windows.Media.Ocr reads files.
+  // It is lazy so a bridge that never OCRs starts no process and creates no
+  // directory.
+  let ocrAdapter = null;
+  const getOcrAdapter = () => {
+    ocrAdapter ??= createOcrAdapter({
+      scriptPath: join(ROOT, 'scripts', 'windows-ocr.ps1'),
+      tempDir: join(stateDir, 'ocr-tmp')
+    });
+    return ocrAdapter;
   };
   // Chrome's on-device model layer. `browser_local_judge` is answered by the
   // extension and never executes anything; the service only remembers the last
@@ -493,10 +523,27 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     return detail;
   };
   const boundariesFor = decision => decision?.contentBoundaries ?? (config.contentBoundaries === true || process.env.AIB_CONTENT_BOUNDARIES === '1');
-  const queueSnapshot = () => ({
+  // These facts answer "does the connected service actually run the code on
+  // disk?" without requiring doctor. The disk build id is cached in the probe;
+  // this function itself never writes and never restarts anything.
+  const deploymentSnapshot = () => buildDeploymentStatus({
+    root: deploymentRoot,
+    configPath: deploymentConfigPath,
+    runningBuildId: BUILD_ID,
+    runningVersion: VERSION,
+    extensionVersion
+  });
+  const queueSnapshot = () => {
+    const deployment = deploymentSnapshot();
+    return ({
     service: 'ai-browser-bridge',
     version: VERSION,
     buildId: BUILD_ID,
+    pid: process.pid,
+    deployment,
+    deploymentStale: deployment.deploymentStale,
+    diskBuildId: deployment.diskBuildId,
+    runningBuildId: BUILD_ID,
     ...(lifecycleStartup ? { startup: lifecycleStartup } : {}),
     extensionVersion,
     extensionId,
@@ -525,6 +572,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     activeCount: allInFlightJobs().length,
     activeByHost: allInFlightJobs().map(job => ({
       hostId: job.hostId, id: job.id, tool: job.name, ageMs: Math.max(0, Date.now() - job.created),
+      tabId: Number.isInteger(job.args?.tabId) ? job.args.tabId : null,
+      readOnly: !!job.tool.annotations?.readOnlyHint,
       lane: inFlight.get(job.hostId) === job ? 'write' : 'read'
     })),
     // Derived from the registry rather than the primary compatibility mirror:
@@ -535,10 +584,13 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     maintenance: maintenanceState(),
     tabLeases: leases.list(),
     connected: extension?.readyState === WebSocket.OPEN,
+    extensionPaused,
     queued: queue.length,
+    queueLimit: Math.max(16, 16 * Math.max(1, hosts.size())),
     queueSummary: queue.reduce((acc, job) => { acc[job.priorityName] = (acc[job.priorityName] || 0) + 1; return acc; }, {}),
-    active: current ? { id: current.id, tool: current.name, priority: current.priorityName, ageMs: Date.now() - current.created, readOnly: !!current.tool.annotations?.readOnlyHint } : null,
-    queuedJobs: queue.map((job, index) => ({ index, id: job.id, tool: job.name, priority: job.priorityName, ageMs: Date.now() - job.created, readOnly: !!job.tool.annotations?.readOnlyHint, tabId: job.args.tabId ?? null, agent: job.args.agent ?? null, conflictEvidence: !!job.conflictEvidence })),
+    active: current ? { id: current.id, tool: current.name, priority: current.priorityName, ageMs: Date.now() - current.created, readOnly: !!current.tool.annotations?.readOnlyHint, tabId: Number.isInteger(current.args?.tabId) ? current.args.tabId : null } : null,
+    queuedJobs: queue.map((job, index) => ({ index, id: job.id, tool: job.name, priority: job.priorityName, ageMs: Date.now() - job.created, readOnly: !!job.tool.annotations?.readOnlyHint, tabId: job.args.tabId ?? null, hostId: job.hostId ?? null, agent: job.args.agent ?? null, conflictEvidence: !!job.conflictEvidence })),
+    toolDurations: durationSnapshot(),
     taskLease: lease,
     desktopOperation: desktopOperation ? { tool: desktopOperation.tool, ageMs: Date.now() - desktopOperation.startedAt } : null,
     uploadRoots: liveUploadPolicy().value.uploadRoots.length,
@@ -558,6 +610,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       writeTimeout: 'Write timeouts still disconnect because the outcome may be unknown.'
     }
   });
+  };
   const readyState = () => {
     const snapshot = queueSnapshot();
     const ready = snapshot.connected && !snapshot.active && snapshot.queued === 0 && !snapshot.taskLease && !snapshot.desktopOperation && !snapshot.maintenance;
@@ -591,6 +644,48 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       recommendedNextAction: 'Keep the task alive and call browser_wait_until_ready again before retrying the browser operation.',
       ...state
     };
+  }
+  // Local, deterministic advice for weak callers. The queue facts are read from
+  // this process; no browser round trip is needed, so the guide still answers
+  // while the extension is paused, disconnected or busy - the exact moments a
+  // caller needs it. A local model or Chrome's built-in model is at most a
+  // second opinion; neither can change the deterministic safety rules.
+  async function agentAdviceCall(args) {
+    const snapshot = queueSnapshot();
+    const lastResult = args.lastResult && typeof args.lastResult === 'object' && !Array.isArray(args.lastResult) ? args.lastResult : null;
+    const tabId = Number.isInteger(args.tabId) ? args.tabId : (Number.isInteger(lastResult?.tabId) ? lastResult.tabId : null);
+    const advice = buildAgentAdvice({
+      queue: snapshot,
+      durations: snapshot.toolDurations,
+      agent: args.agent ?? null,
+      goal: args.goal ?? '',
+      toolName: args.toolName ?? null,
+      tabId,
+      hostId: args.hostId ?? null,
+      urgency: args.urgency ?? 'normal',
+      lastResult,
+      allowSwitchHost: args.allowSwitchHost === true
+    });
+    const provider = args.modelProvider ?? 'auto';
+    const config = localModelConfig(process.env);
+    const localModel = config.configured
+      ? { configured: true, model: config.model, endpointHost: new URL(config.endpoint).host, timeoutMs: config.timeoutMs, authConfigured: config.authConfigured === true }
+      : { configured: false, reason: config.reason };
+    const base = { ...advice, localModel };
+    if (provider === 'off') return mergeModelAdvice(base, { status: 'disabled', provider: 'none', reason: 'model_provider_off' });
+    const autoLocal = provider === 'auto' && config.configured &&
+      (args.includeModel === true || process.env.AIB_LOCAL_MODEL_AUTO === '1');
+    if (provider === 'local' || autoLocal) {
+      const model = await adviseWithLocalModel({ config, context: advice.modelContext });
+      return mergeModelAdvice(base, { provider: 'local_endpoint', ...model });
+    }
+    return mergeModelAdvice(base, {
+      status: 'delegated',
+      provider: 'chrome-built-in-ai',
+      tool: 'browser_local_judge',
+      arguments: advice.chromeTriage?.arguments ?? null,
+      note: 'The local endpoint was not called. Send model.arguments to browser_local_judge mode:"triage" when a second opinion is wanted; this advice is already complete without it.'
+    });
   }
   const status = queueSnapshot;
   // A replay may legitimately wait for its own 60s ceiling before it answers. If
@@ -627,6 +722,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   }
   function finish(job, error, result) {
     clearTimeout(job.timer);
+    if (job.startedAt) recordDuration(job.name, Date.now() - job.startedAt);
     if (inFlight.get(job.hostId) === job) inFlight.delete(job.hostId);
     const hostReads = readsInFlight.get(job.hostId);
     if (hostReads?.get(job.id) === job) {
@@ -784,6 +880,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       inFlight.set(job.hostId, job);
     }
     job.lane = readOnly ? 'read' : 'write';
+    job.startedAt = Date.now();
     current = job;
     lastAgent = job.args?.agent ?? null;
     host.commandsDispatched += 1;
@@ -1942,6 +2039,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       const routedArgs = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments) ? args.arguments : {};
       return schedulerBridge.routeExplicitly({ name: args.name, arguments: routedArgs, agent: args.agent ?? null });
     }
+    if (name === 'browser_agent_advice') return agentAdviceCall(args);
     if (name === 'browser_failure_help') return failureHelp(args, { readOnly: TOOLS.find(item => item.name === args.attemptedAction)?.annotations?.readOnlyHint === true });
     // Locate is a read coordinator, not a new privilege: every child read goes
     // back through call() and is therefore governed a second time, so an agent
@@ -1954,6 +2052,21 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       return resolveTarget({
         args,
         store: getLocalStore(),
+        callTool: (toolName, toolArgs) => call(toolName, { ...toolArgs, ...routing }, owner, context)
+      });
+    }
+    // OCR is the same shape as locate: a read coordinator whose screenshot and
+    // page-state children go back through call(), so an agent denied those reads
+    // cannot use OCR as a side door, and no OCR result can grant write authority.
+    if (name === 'browser_ocr') {
+      const routing = {
+        ...(typeof args.agent === 'string' && args.agent.trim() ? { agent: args.agent } : {}),
+        ...(typeof args.hostId === 'string' ? { hostId: args.hostId } : {})
+      };
+      return ocrTab({
+        args,
+        store: getLocalStore(),
+        adapter: getOcrAdapter(),
         callTool: (toolName, toolArgs) => call(toolName, { ...toolArgs, ...routing }, owner, context)
       });
     }
@@ -2084,7 +2197,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     }
     // The judge is a normal queued call answered by the extension; the service
     // only remembers its verdict so a later write can be checked against it.
-    if (name === 'browser_local_judge') result = result.then(value => { rememberVerdict(args, value); return value; });
+    if (name === 'browser_local_judge') result = result.then(value => { if (value?.mode !== 'triage') rememberVerdict(args, value); return value; });
     if (tool.annotations?.readOnlyHint && boundariesFor(decision)) result = result.then(withContentBoundaries);
     // A closed tab can never be written again; drop its lease so the next agent
     // is not blocked by a record pointing at a tab that no longer exists.
@@ -2123,6 +2236,57 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         // No await between idle check and admission closure: atomic in this process.
         const acquired = maintenance.acquire(ttlMs);
         return json(res, 200, { status: 'acquired', ...acquired });
+      }
+      if (req.method === 'POST' && req.url === '/restart-when-idle') {
+        if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON required' });
+        if (typeof onRestartRequested !== 'function') {
+          return json(res, 501, { status: 'unsupported', error: 'This embedding did not authorize a service restart.' });
+        }
+        const data = await body(req);
+        if (data.confirmation !== RESTART_CONFIRMATION) {
+          return json(res, 400, { error: 'Exact confirmation required', required: RESTART_CONFIRMATION });
+        }
+        const deployment = deploymentSnapshot();
+        if (data.expectedBuildId && data.expectedBuildId !== BUILD_ID) {
+          return json(res, 409, { status: 'stale_request', runningBuildId: BUILD_ID, diskBuildId: deployment.diskBuildId });
+        }
+        if (data.diskBuildId && data.diskBuildId !== deployment.diskBuildId) {
+          return json(res, 409, { status: 'disk_changed', runningBuildId: BUILD_ID, diskBuildId: deployment.diskBuildId });
+        }
+        if (!deployment.deploymentStale) {
+          return json(res, 200, { status: 'not_needed', runningBuildId: BUILD_ID, diskBuildId: deployment.diskBuildId });
+        }
+        const busy = current || queue.length > 0 || lease || desktopOperation || leases.list().length > 0 || allInFlightJobs().length > 0;
+        if (busy) {
+          return json(res, 200, {
+            status: 'waiting', reason: 'service_busy', retryable: true,
+            active: current ? { id: current.id, tool: current.name } : null, queued: queue.length, tabLeases: leases.list().length
+          });
+        }
+        if (maintenanceState()) return json(res, 200, { status: 'waiting', reason: 'maintenance', retryable: true });
+        const ttlMs = Number.isInteger(data.ttlMs) ? Math.min(60000, Math.max(5000, data.ttlMs)) : 30000;
+        const acquired = maintenance.acquire(ttlMs);
+        if (!acquired) return json(res, 200, { status: 'waiting', reason: 'maintenance', retryable: true });
+        const restartId = randomUUID();
+        json(res, 200, {
+          status: 'restarting', restartId, runningBuildId: BUILD_ID, diskBuildId: deployment.diskBuildId,
+          maintenanceExpiresAt: acquired.expiresAt
+        });
+        res.on('finish', () => {
+          setTimeout(() => {
+            try {
+              onRestartRequested({
+                restartId, runningBuildId: BUILD_ID, diskBuildId: deployment.diskBuildId,
+                listenerPid: process.pid, requestedAt: new Date().toISOString()
+              });
+            } catch { /* the exit below is still the requested outcome */ }
+            closeBridge()
+              .then(() => { try { maintenance.release(acquired.token); } catch { /* process is exiting */ } })
+              .catch(() => {})
+              .finally(() => (exitAfterRestart ?? (() => process.exit(0)))());
+          }, 200);
+        });
+        return;
       }
       if (req.method === 'GET' && req.url === '/tools') return json(res, 200, TOOLS);
       if (req.method === 'GET' && req.url === '/agent/status') return json(res, 200, tasks.status());
@@ -2195,7 +2359,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
           ws.send(JSON.stringify({
             type: 'ready', hostId: record.hostId, protocolVersion: handshake.protocolVersion,
             serviceVersion: VERSION, hostCount: hosts.size(), primaryHostId: hosts.primaryHostId,
-            warnings: handshake.warnings
+            warnings: handshake.warnings, deployment: deploymentSnapshot()
           }));
           pump(); return;
         }
@@ -2305,22 +2469,49 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       console.error(`[Scheduler] Queue cleanup failed:`, error.message);
     }
   }, 5000);
+
+  // A pull changes the disk build id while every already-open panel keeps its
+  // last "connected" snapshot. Push the convergence facts when they change, so
+  // the hint appears without a manual refresh. Host-only; unauthenticated
+  // sockets never reach this list.
+  let lastDeploymentSignature = null;
+  const deploymentBroadcastInterval = setInterval(() => {
+    const records = hosts.list().filter(record => record.ws.readyState === WebSocket.OPEN);
+    if (!records.length) return;
+    const deployment = deploymentSnapshot();
+    const signature = JSON.stringify(deployment);
+    if (signature === lastDeploymentSignature) return;
+    lastDeploymentSignature = signature;
+    const payload = JSON.stringify({ type: 'deployment-status', deployment });
+    for (const record of records) record.ws.send(payload);
+  }, 15000);
   
+  // Idempotent: an idle restart runs this from the HTTP response handler while
+  // a signal handler may race it. The second caller awaits the same promise
+  // instead of closing an already-closed server twice.
+  let closePromise = null;
+  const closeBridge = () => {
+    if (closePromise) return closePromise;
+    closePromise = (async () => {
+      stopped = true;
+      try { localStore?.close(); } catch { /* an unreadable ledger cannot block shutdown */ }
+      leases.flush();
+      if (lease) tasks.cancel();
+      if (queueCleanupInterval) clearInterval(queueCleanupInterval);
+      if (deploymentBroadcastInterval) clearInterval(deploymentBroadcastInterval);
+      drop('Bridge stopped');
+      for (const ws of clients) ws.terminate();
+      wss.close();
+      server.closeIdleConnections();
+      await new Promise(resolve => server.close(resolve));
+    })().catch(() => {});
+    return closePromise;
+  };
+
   return {
     server, status, call, tasks, scheduler,
     listen: () => new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, '127.0.0.1', () => resolve(server.address())); }),
-    close: async () => { 
-      stopped = true; 
-      try { localStore?.close(); } catch { /* an unreadable ledger cannot block shutdown */ }
-      leases.flush(); 
-      if (lease) tasks.cancel(); 
-      if (queueCleanupInterval) clearInterval(queueCleanupInterval);
-      drop('Bridge stopped'); 
-      for (const ws of clients) ws.terminate(); 
-      wss.close(); 
-      server.closeIdleConnections(); 
-      await new Promise(resolve => server.close(resolve)); 
-    }
+    close: closeBridge
   };
 }
 function appendAuditLog(row) {
@@ -2409,7 +2600,21 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(1);
   });
 
-  const bridge = createBridge(config, { audit: appendAuditLog, maintenanceStateFile: join(stateDir, 'maintenance.json'), lifecycleStartup });
+  const bridge = createBridge(config, {
+    audit: appendAuditLog,
+    maintenanceStateFile: join(stateDir, 'maintenance.json'),
+    lifecycleStartup,
+    // Only the standalone process may authorize a self-exit. An embedded/test
+    // bridge leaves this null and /restart-when-idle answers 501.
+    onRestartRequested: ({ restartId, runningBuildId, diskBuildId }) => {
+      lifecycleState.reason = 'idle_restart';
+      recordLifecycle(stateDir, {
+        event: 'shutdown_requested', pid: process.pid, signal: null,
+        reason: 'idle_restart', restartId, runningBuildId, diskBuildId,
+        buildId: BUILD_ID, uptimeMs: Date.now() - startedAtMs
+      });
+    }
+  });
   await bridge.listen();
   console.log(`AI Browser Bridge listening on 127.0.0.1:${config.port}`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {

@@ -34,13 +34,13 @@ const CONFIG_FIELD_FIX = {
 // NOT proof of process identity: measured on this machine, it pointed at a dead
 // PID while a different node process (started with a relative `src/server.js`)
 // owned port 19387. A blind SIGTERM would kill nothing, or kill an unrelated
-// process. Only the heartbeat allow-list restarts a service, and only after an
-// idle / cooldown / single-instance-lock / recheck gate.
-// Read-only evidence gathering only: /status proves the service answers and is
-// idle, netstat exposes the PID that actually owns 19387 (LISTENING). The user
-// compares that PID with .local/server.pid and the process command line before
-// any restart is delegated to the watchdog - see the step note. No kill here.
-const RESTART_COMMAND = 'node src/cli.js status && netstat -ano -p TCP | findstr 19387';
+// process. The official command is a dry run by default: it proves the
+// LISTENING pid against the authenticated /status reply, proves the watchdog,
+// proves the queue is idle and the disk build differs, and only then - with
+// --apply - asks the service to close itself. The watchdog starts the new
+// source. The service re-checks the same gates before it exits.
+const RESTART_COMMAND = 'node src/cli.js restart-service-when-idle --apply';
+const RESTART_NOTE = '该命令（node src/cli.js restart-service-when-idle）先做完整只读预检：核对 /status 的 pid 与 LISTENING pid、进程命令行、看门狗与空闲闸门，并显示 running/disk buildId；任一不符即拒绝且不发送任何信号。预检通过后才写 restart_intent、请服务自查空闲并自行退出，由看门狗拉起新源码；CLI 轮询到 buildId 等于磁盘 buildId（status=verified）才算完成。想只看预检不重启时，先去掉 --apply 运行一次。旧版本服务没有该端点时会返回 restart_endpoint_unavailable 且不发送任何信号，此时按文档做一次性手工迁移。绝不要用 stop.ps1（它会写 service-paused 让守护自我暂停），也不要按 .local/server.pid 杀进程。';
 const RELOAD_COMMAND = "node src/cli.js call browser_reload_extension '{\"confirmation\":\"reload_extension_once\",\"allowFocus\":true}'";
 const VERIFY_COMMAND = 'doctor-lite.bat && doctor.bat';
 
@@ -76,7 +76,7 @@ export function buildUpgradeCheck({ disk = {}, running = null, config = {}, git 
   } else if (running.buildId !== diskBuildId) {
     push('service', '服务仍跑旧源码（running.buildId 与磁盘 buildId 不一致）',
       RESTART_COMMAND,
-      '先只读复核，不要杀任何进程：确认 netstat -ano -p TCP 里 19387 的 LISTENING PID 与 .local/server.pid 一致、该进程命令行确实指向本项目 src/server.js、且 /status 显示完全空闲（queued=0、无 in-flight）。任一不符或无法确认时只报告证据、绝不终止不明进程——server.pid 不是进程存活证据。确认一致后在空闲窗口交给看门狗拉起新源码（约 10 秒），或启用 install-autostart.ps1 -Heartbeat 让心跳白名单动作处理；随后 node src/cli.js status 核对 buildId。绝对不要用 stop.ps1（它会写 service-paused 让守护自我暂停）。');
+      RESTART_NOTE);
   }
 
   // 3. Extension layer. Only meaningful while the service answers; a connected

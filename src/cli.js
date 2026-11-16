@@ -18,6 +18,7 @@ import { startInstance, stopInstance, statusInstance, listAllInstances, startAll
 import { listAdapters, pruneStaleAdapters } from './adapter-registry.js';
 import { isProcessAlive, probeParentName, SHELL_PARENT_NAMES } from './mcp-parent-guard.js';
 import { readLifecycle } from './service-lifecycle.js';
+import { restartServiceWhenIdle } from './service-restart.js';
 
 async function rawToolCall(name, args) {
   return await request('/call', { name, arguments: args });
@@ -641,6 +642,23 @@ try {
     const context = await collectUpgradeContext();
     const report = buildUpgradeCheck(context);
     console.log(JSON.stringify({ ...context, ...report }, null, 2));
+  } else if (cmd === 'restart-service-when-idle') {
+    // Dry run unless --apply. The same idle/listener/watchdog/build gates are
+    // re-evaluated inside the service before anything exits; a signal is never
+    // sent to an unverified pid.
+    const timeoutAt = rest.indexOf('--timeout-ms');
+    const pollAt = rest.indexOf('--poll-ms');
+    const timeoutMs = timeoutAt >= 0 ? Number(rest[timeoutAt + 1]) : undefined;
+    const pollMs = pollAt >= 0 ? Number(rest[pollAt + 1]) : undefined;
+    if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 5000)) throw new Error('--timeout-ms must be at least 5000');
+    if (pollMs !== undefined && (!Number.isFinite(pollMs) || pollMs < 250)) throw new Error('--poll-ms must be at least 250');
+    const config = loadConfig();
+    const result = await restartServiceWhenIdle({
+      request, root: ROOT, stateDir, port: config.port,
+      apply: rest.includes('--apply'), timeoutMs, pollMs
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ok) process.exitCode = result.status === 'waiting' ? 2 : 1;
   } else if (cmd === 'set-browser-target') {
     const flags = rest.slice(1);
     if (!flags.includes('--from-running-chrome')) throw new Error('Usage: node src/cli.js set-browser-target --from-running-chrome [--write]');
@@ -660,6 +678,6 @@ try {
       ? await raw()
       : await callWithWaitingRecovery({ name, args: parsed, rawCall: rawToolCall, maxWaitMs: Number(process.env.AIB_AUTO_WAIT_MS || 120000) });
     console.log(JSON.stringify(result, null, 2));
-  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | adapters [--stale-ms N] [--prune [--older-than-hours N] [--dry-run]] | processes | service-history [--limit N] | runtime | cdp-probe [--tab-id N] [--host-id ID] [--out FILE] | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | usage [--hours N] | upgrade-check | set-browser-target --from-running-chrome [--write]');
+  } else throw new Error('Usage: node src/cli.js setup | doctor | diagnose-upgrade | allow-upload-root ABSOLUTE_PATH | agent list | agent show NAME | agent set NAME [JSON|--stdin] | agent remove NAME | instance list | instance add [NAME] | instance remove NAME | instance start NAME | instance stop NAME | instance start-all | instance stop-all | status | adapters [--stale-ms N] [--prune [--older-than-hours N] [--dry-run]] | processes | service-history [--limit N] | runtime | cdp-probe [--tab-id N] [--host-id ID] [--out FILE] | tools | call TOOL [JSON|--stdin] | call-raw TOOL [JSON|--stdin] | heartbeat [--watch] [--interval-ms N] [--timeout-ms N] [--max-cycles N] [--remediate] [--no-remediate] [--dry-run] | usage [--hours N] | upgrade-check | restart-service-when-idle [--apply] [--timeout-ms N] [--poll-ms N] | set-browser-target --from-running-chrome [--write]');
 } catch (e) { console.error(e.message); process.exitCode = 1; }
 

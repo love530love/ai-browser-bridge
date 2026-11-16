@@ -93,8 +93,12 @@ test('not_found requires complete coverage; an incomplete search is inconclusive
 
 test('the status vocabulary is closed and honest', () => {
   assert.deepEqual(LOCATE_STATUSES, ['found', 'ambiguous', 'partial', 'inconclusive', 'not_found', 'unavailable', 'blocked']);
-  assert.equal(PERCEPTION_MATRIX.ocr.status, 'not_implemented');
+  assert.equal(PERCEPTION_MATRIX.ocr.status, 'available_local');
+  assert.deepEqual(PERCEPTION_MATRIX.ocr.tools, ['browser_ocr', 'browser_screenshot']);
+  assert.equal(PERCEPTION_MATRIX.ocr.backgroundSafe, true);
+  assert.match(PERCEPTION_MATRIX.ocr.note, /evidence, not an address/);
+  assert.match(PERCEPTION_MATRIX.ocr.privacy, /runs locally with no network/);
+  assert.match(PERCEPTION_MATRIX.ocr.privacy, /never written to the local ledger/);
   assert.equal(PERCEPTION_MATRIX.canvas.status, 'partial');
   assert.equal(PERCEPTION_MATRIX.accessibility.status, 'available_opt_in');
-  assert.match(PERCEPTION_MATRIX.ocr.note, /screenshot plus coordinates/);
 });

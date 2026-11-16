@@ -12,10 +12,11 @@
 // renamed or removed.
 
 export const TOOL_GROUPS = [
-  { id: 'read', purpose: '读页面、定位元素、拿 ref；扫不到就 eval', tools: [
+  { id: 'read', purpose: '读页面/定位/ref；扫不到就eval', tools: [
     'browser_at', 'browser_read', 'browser_eval', 'browser_observe', 'browser_ax_snapshot', 'browser_find_text',
-    'browser_find_element', 'browser_locate', 'browser_shadow_tree', 'browser_frames', 'browser_performance',
-    'browser_wait_for_selector'
+    'browser_find_element', 'browser_locate', 'browser_ocr', 'browser_shadow_tree', 'browser_frames', 'browser_performance',
+    'browser_wait_for_selector', 'browser_script_inventory', 'browser_source_map', 'browser_event_listeners',
+    'browser_dom_snapshot', 'browser_framework_tree'
   ] },
   { id: 'act', purpose: '点、填、选、按键、滚动', tools: [
     'browser_prepare_action', 'browser_click', 'browser_click_verified', 'browser_fill',
@@ -28,7 +29,7 @@ export const TOOL_GROUPS = [
   { id: 'overlay', purpose: '遮挡层、浮层、toast、tooltip', tools: [
     'browser_scan_overlays', 'browser_dismiss_overlay', 'browser_transient', 'browser_popup'
   ] },
-  { id: 'network', purpose: '同源请求：先判风险、再发、再回读', tools: [
+  { id: 'network', purpose: '同源请求：风险/发送/回读', tools: [
     'browser_prepare_request', 'browser_fetch', 'browser_replay_request',
     'browser_network_summary', 'browser_network_rules', 'browser_devtools_capture'
   ] },
@@ -42,24 +43,24 @@ export const TOOL_GROUPS = [
     'browser_otp_fetch', 'browser_identity', 'browser_cookies', 'browser_cookies_write',
     'browser_storage_read', 'browser_storage_write'
   ] },
-  { id: 'capture', purpose: '截图、PDF/MHTML保存、剪贴板、模拟、注入', tools: [
+  { id: 'capture', purpose: '截图/PDF/剪贴板/模拟/注入', tools: [
     'browser_screenshot', 'browser_pdf_save', 'browser_save_page', 'browser_clipboard',
     'browser_clipboard_write', 'browser_emulation', 'browser_init_script'
   ] },
-  { id: 'download', purpose: '查下载列表、等待一个精确下载ID完成、管理下载项', tools: [
+  { id: 'download', purpose: '下载/等待/管理', tools: [
     'browser_downloads', 'browser_download_wait', 'browser_downloads_control'
   ] },
 
   { id: 'fleet', purpose: '宿主', tools: [
     'browser_hosts', 'browser_scheduler_status', 'browser_route_task'
   ] },
-  { id: 'debug', purpose: '诊断/队列', tools: [
+  { id: 'debug', purpose: '诊断', tools: [
     'browser_health', 'browser_debug', 'browser_failure_help', 'browser_queue_status',
-    'browser_wait_until_ready', 'browser_capability_guide', 'browser_bridge_modes',
+    'browser_agent_advice', 'browser_wait_until_ready', 'browser_capability_guide', 'browser_bridge_modes',
     'browser_execution_profile', 'browser_debugger', 'browser_ai_status',
     'browser_local_judge', 'browser_agent_guide', 'browser_capabilities', 'browser_tool_index'
   ] },
-  { id: 'desktop', purpose: '原生窗口与 UI Automation（chrome:// 等）', tools: [
+  { id: 'desktop', purpose: '原生窗口与UIA(chrome://)', tools: [
     'browser_desktop_windows', 'browser_native_snapshot', 'browser_native_action',
     'browser_devtools', 'browser_protected_ui_plan', 'browser_reload_extension',
     'browser_extension_errors'
@@ -67,7 +68,7 @@ export const TOOL_GROUPS = [
   { id: 'recipe', purpose: '把一段流程存成可复用的 recipe', tools: [
     'browser_recipe_save', 'browser_recipe_run', 'browser_recipe_list', 'browser_recipe_delete'
   ] },
-  { id: 'maintenance', purpose: '浏览器自身设置（低频）', tools: [
+  { id: 'maintenance', purpose: '浏览器设置', tools: [
     'browser_bookmarks', 'browser_bookmarks_write', 'browser_history', 'browser_history_search',
     'browser_history_delete', 'browser_extensions', 'browser_extension_state', 'browser_clear_browsing_data',
     'browser_site_settings', 'browser_site_settings_write', 'browser_privacy_settings',
@@ -82,13 +83,13 @@ export const TOOL_GROUPS = [
 const ALIASES = {
   network: ['api', '接口', 'post', 'get', 'http', '请求', '回读', 'verify', '写操作', 'fetch'],
   act: ['点击', '输入', '填写', '上传', '附件', 'click', 'fill', 'type', 'upload', 'attach file', '提交', 'submit'],
-  read: ['读', '文本', '元素', 'text', 'dom', '内容', 'js', 'eval', 'evaluate', '脚本', 'script', 'expression', '执行'],
+  read: ['读', '文本', '元素', 'text', 'dom', '内容', 'js', 'eval', 'evaluate', '脚本', 'script', 'expression', '执行', 'ocr', '识别文字', '图片文字', '画布文字', '源码', 'source map', 'sourcemap', 'f12', '脚本清单', '脚本列表', '事件监听', 'listener', '监听器', '组件树', 'react', 'vue', 'angular', 'svelte', 'component tree', 'dom快照', 'dom 快照', '框架'],
   overlay: ['遮挡', '弹窗', '蒙层', 'covered', 'popup', 'toast'],
   tab: ['标签页', '窗口', 'tab', 'navigate', '打开'],
   auth: ['登录', '密码', 'login', 'password', 'cookie', 'token'],
   capture: ['截图', 'screenshot', 'pdf', '打印成pdf', '保存网页为pdf', '剪贴板'],
   download: ['下载', '下载列表', '下载记录', '下载状态', '下载项', 'download', 'download list', 'download history', 'download status', 'download item'],
-  debug: ['报错', '卡住', '失败', 'error', 'stuck', '诊断'],
+  debug: ['报错', '卡住', '失败', 'error', 'stuck', '诊断', '排队', '并发', '建议', '下一步', 'queue', 'advisory', 'guidance'],
   desktop: ['原生', 'chrome://', 'uia', '窗口句柄'],
   recipe: ['流程', '复用', 'flow'],
   maintenance: ['书签', '历史', '扩展', '代理', '证书', '设置']
@@ -132,7 +133,7 @@ export function toolIndex({ goal = '', group: only = '', format = 'text' } = {})
       matchedGoal: term || null,
       nextStep: 'Call browser_capability_guide with the same goal for the detailed path, foreground requirements and fallbacks.' };
   }
-  const lines = groups.map(item => `${item.id.padEnd(12)} ${item.purpose}\n${' '.repeat(13)}${item.tools.join(', ')}`);
+  const lines = groups.map(item => `${item.id.padEnd(11)} ${item.purpose}\n${' '.repeat(12)}${item.tools.join(', ')}`);
   return {
     status: 'success', retryable: false, matchedGoal: term || null,
     groups: groups.map(item => item.id),

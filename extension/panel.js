@@ -1,8 +1,15 @@
+import { deploymentHint } from './panel-status.js';
 const $ = id => document.getElementById(id);
 const say = text => { $('message').textContent = text; };
+function showDeployment(deployment, connected) {
+  const hint = deploymentHint(deployment, { connected });
+  $('deployment').textContent = hint ?? '';
+  $('deployment').hidden = !hint;
+}
 function showStatus(state) {
   $('status').textContent = state.connectionState;
   $('activity').textContent = state.lastAction || '尚无操作';
+  showDeployment(state.deployment, state.connectionState === '已连接');
 }
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (sender.id === chrome.runtime.id && message.type === 'connection-status') showStatus(message);

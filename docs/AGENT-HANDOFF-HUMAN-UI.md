@@ -4,6 +4,121 @@
 
 ## 目标
 
+## 2026-11-16 接手增量（0.45.0，工作树）：部署陈旧可见 / 空闲门控重启 / 自启纳管
+
+触发：另一台 Windows 11 笔记本（love-PC，0.37.4 → 0.42.3）的安装部署与热更新反馈，已固化为用户级技能 `ai-browser-bridge-upgrade`。反馈中的 P1-1 / P1-2 / P2-3 / P2-4 / P2-5 / P2-6 全部落地，未削弱 `-Heartbeat` 既有安全门控。
+
+### 交付内容
+
+- **部署陈旧可见（P1-1 / P2-3）**：`src/deployment-status.js` 由服务每 15 秒重算一次，`queueSnapshot()`、`/status`、WebSocket `ready` 均携带 `deployment { runningBuildId, diskBuildId, runningVersion, manifestVersion, extensionVersion, deploymentStale, actionRequired }`；只在变化时向认证连接广播 `deployment-status`。扩展面板（`extension/panel-status.js` + `panel.html`）在源码落后或扩展版本偏差时显示提示，不再只显示「已连接」。
+- **空闲门控官方重启（P1-1 / P2-6）**：新增 `src/service-restart.js` + `node src/cli.js restart-service-when-idle [--apply] [--timeout-ms N] [--poll-ms N]`。预检：认证 `/status` pid === LISTENING pid、进程命令行证明 `src/server.js`（绝对路径须在项目根内，相对路径可接受）、看门狗 pwsh/powershell + `watch-service.ps1` + 项目根、队列/租约/桌面操作/维护锁全空闲、running ≠ disk buildId。通过后写 `restart_intent`，`POST /restart-when-idle`（精确确认串 + 可选 `expectedBuildId`/`diskBuildId`），服务自查空闲后自行退出，看门狗拉起新源码，CLI 有界轮询到 `buildId === 磁盘 buildId`（`status:verified`）。拒绝不发信号；旧服务返回 `restart_endpoint_unavailable`；`uncertain` 不重放；永不使用 `stop.ps1` 或按 pid 文件杀进程。
+- **升级入口收敛（P1-2）**：`scripts/upgrade.ps1` 默认只运行只读 `upgrade-check`，旧流程需 `-Legacy`；`docs/UPGRADE-OPERATIONS.md` 重写为唯一官方五步流程；`upgrade-check` 服务层直接输出官方重启命令与迁移说明。
+- **自启外部任务纳管（P2-4）**：`install-autostart.ps1 -AdoptExternal` 先以 `schtasks /query /xml` 核验任务动作引用本项目 `watch-service.ps1`，通过才写 `adopted:true` 清单条目与证据；动作不符即拒绝。`uninstall-autostart.ps1` 新增只读 `[residual]` 扫描（HKCU Run + 启动文件夹），只报告不删除。
+- **巡检二路冲突预检（P2-5）**：`-Heartbeat` 在任何写入前扫描 HKCU Run、启动快捷方式、计划任务中的第二路巡检；发现即打印 `REFUSED`、证据与 clock_drift 警示并 `exit 3`，仅 `-Force` 可显式覆盖。
+
+### 验收状态（接手必复核）
+
+- 定向：`service-restart` / `upgrade-check` / `deployment-status` / `panel-status` → 27/27；`bridge` → 35/35；`autostart-options` → 10/10。
+- PowerShell 解析检查（install / uninstall / upgrade）→ `PARSE_OK`。
+- 全量 `npm test` → **1057/1057**（exit 0，0 fail，约 163s，0.45.0 升版后）。
+- **未部署**：源码 0.45.0 只在工作树；运行服务与扩展仍为 0.43.0。首次迁移到含 `/restart-when-idle` 的构建仍需一次手工重启，之后该命令才可用。
+
+### 已知边界
+
+- 重启命令只让服务换到磁盘源码：不拉取、不重载扩展、不改配置；四层仍由 `upgrade-check` 逐层报告。
+- 看门狗默认仍只报告 `build-stale-restart-needed`；除官方重启命令与心跳白名单外没有新增自动重启路径。
+- 收养是显式所有权声明；未收养的外部计划任务卸载后仍可能拉起守护，卸载只报告不删除。
+- `deploymentStale` 是构建摘要比较，不是签名或依赖完整性证明。
+
+## 2026-11-16 接手增量（P3，工作树）：弱 Agent 并发排队、恢复与工具遍历引导 + 可选本地模型
+
+触发：用户要求在 P0/P1/P2 之后继续补齐「弱 Agent 在高并发时主动管理排队、引导等待、引导遍历可用能力工具」的能力，并探索项目内小模型 / Chrome 内置模型作为可选增强。
+
+### 交付内容
+
+- **`browser_agent_advice`（service-local，只读，永不入队）**：输入目标、打算调用的 `toolName`、可选 `urgency`、`hostId`、`tabId`、`lastResult`、`allowSwitchHost`、`modelProvider`、`includeModel`；输出**一个** `decision`（`proceed|wait|diagnose|plan|retry_with_changes|switch_host|start_browser|escalate|stop`）、`estimatedWaitMs`（250–120000，含 basis/confidence）、`blockers`、`toolTrail`、可直接执行的 `nextStep`。它只读队列、车道、tab 租约、维护与宿主元数据，不读页面文本，不派发、不批准写、不证明结果。
+- **决策来源优先级**：`nextStepFor(lastResult)` 的具体失败建议 > 通用重复抑制/不确定写 > 未知工具 > 无宿主/扩展暂停/需启动 > 请求宿主缺失/断连 > 维护门禁 > 桌面通道 > 全局租约 > 无工具 plan/diagnose > 本地工具 proceed > tab 租约 > 同 tab 忙 > 写车道（读排空/读车道满）> 队列满 > AI 耗尽 escalate > proceed。`uncertain` 写会变成重新观察的读；`duplicate_suppressed` 直接 `stop`，不劝重试。
+- **等待估算**：使用 `queueSnapshot()` 新增的 `activeByHost`（lane/tabId/readOnly）、`queuedJobs`、`queueLimit`、`extensionPaused` 与工具 EWMA `toolDurations`；无样本时给 `confidence:"low"` 的默认延迟，读车道等待是下界而不是承诺。
+- **排队主动管理**：写任务遇到本宿主读排空、读车道满、同 tab 忙时给出带 `browser_wait_until_ready` 的 `wait` 步骤；本地工具（health/capabilities/index/queue/hosts/lease/desktop 等）在队列满或维护期间仍可 proceed；`switch_host` 只有在调用方显式 `allowSwitchHost:true` 且目标宿主可连接时才出现，绝不静默迁移。
+- **工具遍历**：建议携带 `toolTrail` 与更简单的候选链（来自 `capabilityGuide`），弱调用方无需自己读完 index。
+- **Chrome 内置模型**：`browser_local_judge` 新增第三种 `mode:"triage"`，只接收队列元数据（工具名、车道、队列深度、估算等待、blockers 等），不接收页面文本；`modelProvider:"chrome"` 只准备 triage 参数，不在服务端调用模型。
+- **项目内小模型**：新增 `src/local-model.js`，仅 loopback OpenAI 兼容端点；无 URL 凭据/查询/片段；可选 bearer token 只从环境变量读取且不回显；最多 2 并发、有界超时与输出、严格 JSON；失败降级 `unavailable` 且从不抛错。`modelProvider:"auto"`（默认）在 `includeModel:true` 或 `AIB_LOCAL_MODEL_AUTO=1` 时才真正调用；`"off"` 纯确定性；`"local"` 强制调用。
+- **模型只作第二意见**：`mergeModelAdvice` 保留确定性决策，模型只能增加谨慎或建议候选链内的工具，不能把 `wait` 改成 `proceed`，不能授权写，不能改变宿主路由。
+- **引导接入**：`browser_agent_guide` 首步、`capability-guide.js` 的 `multi-agent` 意图、`FOCUS_POLICY.backgroundSafeTools`、`priority-engine` 读分类、`tool-index` debug 组与别名（排队/并发/建议/下一步/queue/advisory/guidance）同步；紧凑索引仍 **3472 字节**（<3500 预算）。
+
+### 验收状态（接手必复核）
+
+- P3 定向：`node --test test/agent-advice.test.js test/local-model.test.js test/agent-advice-bridge.test.js` → **39/39**（24 + 15 + 5）。
+- 全量 `npm test` → **1031/1031**（exit 0，0 fail，约 152s，0.44.0 升版后复跑）。
+- P2/发现链定向（deep-perception、perception-contract、locator-resolver、capability-guide、tool-index、local-store）在同一轮全量中通过。
+- **未部署**：服务仍为 0.43.0 / 旧 buildId，扩展仍 0.43.0；`browser_agent_advice` 只存在于工作树。MCP 工具清单需宿主重连后才会出现。
+- 未做真实页面高并发压测；P4 基准仍待执行。
+
+### 已知边界
+
+- `estimatedWaitMs` 是 EWMA 估计，不是完成承诺；新到达任务可能延长等待。
+- 建议不授予写权限：`browser_agent_advice` 在 `policy.evaluate` 之后、维护/宿主门禁之前执行，仍受策略治理。
+- 模型不可用、未配置或超时不影响确定性路径；`chrome` 模式需要调用方自行执行 triage，且结果始终 `authority:"advisory_only"`。
+- `toolDurations` 来自本地账本，只含工具名、宿主与耗时，不含页面内容。
+
+## 2026-11-16 接手增量（P2，工作树）：源码 / F12 / 网络深度感知
+
+触发：继续 P1 之后的「页面理解纵深」——DOM 看不到的脚本来源、source map、事件监听、组件树与资源瀑布，用只读证据补齐，不新增写通道。
+
+### 交付内容
+
+- **`extension/deep-perception.js`**：五个只读工具统一经 `worker.js` 命名路由接入，复用已有 debugger 会话时不会出现第二个调试横幅；临时 attachment 在返回前 detach。
+  - `browser_script_inventory`：DevTools Sources 文件列表（scriptId、URL、大小、行范围、module、sourceMappingURL），可选 `urlFilter`、`includeSource`（需唯一 scriptId，返回页面 JavaScript，属不可信数据）。只读有界窗口，报告 `totalScripts/matchedCount`，不假装完整。
+  - `browser_source_map`：读取并解析脚本声明的 source map；支持 indexed map、`line/column` 原始位置映射、`sourceIndex` 预览嵌入源码。先按页面源获取（带上页面 Cookie/origin），再以扩展源兜底；`maxBytes` 默认 8 MB、硬上限 20 MB，超限返回 `partial` 而不是把 JSON 截断成解析错误；无 `sourceMappingURL` 是 `not_found`。
+  - `browser_event_listeners`：元素或 document 上的监听器（类型、capture/passive/once、脚本 URL、行列、处理器预览）。选择器必须唯一，多匹配为 `ambiguous`；支持 `includeAncestors`、`types`；只读，document 选择器不穿 shadow root。
+  - `browser_dom_snapshot`：有界结构树（含 open shadow root），保留 wrapper 与隐藏节点，报告 `shadowRoots`/`iframes`/`truncated`；只返回标签、id/class/role/type/name 与 data-/aria- 属性名，不返回 href/src/value；`includeText`/`includeRects`/`includeVisibility` 为显式可选项；主 frame only，不修改页面。
+  - `browser_framework_tree`：React fibers、Vue 2/3、Angular、Svelte 一次检测并全部报告；默认省略值，`includeValues`/`includeHost` 显式开启；Angular 只给公开归属的扁平列表，Svelte 生产环境无实例树时如实说明；组件元数据不是 ref。
+- **网络瀑布**：`browser_network_summary` 的 `includeTiming:true` 增加 Resource Timing 各阶段（redirect/DNS/connect/TLS/request/response）、`nextHopProtocol`、`redirectCount`、transfer/encoded/decoded sizes、`renderBlockingStatus`、`responseStatus` 与 Server-Timing 名称/耗时；仍不含 header 与 body。
+- **工具治理**：五个工具均为只读，未加入 `WRITE_TOOLS`；`tool-index`、`priority-engine` 读分类、`capability-guide.js` 的 source/事件/framework 意图与 `FOCUS_POLICY.backgroundSafeTools` 同步；source/组件证据不返回 ref，动作仍须 `browser_find_element` / `browser_locate` + `_verified`。
+- **文档**：`README.md`、`AGENTS.md`、`skills/ai-browser-bridge/SKILL.md`、`docs/AGENT-FIRST-STRATEGY-2026.md` 写明深度感知工具的用途与「证据非 ref」边界。
+
+### 验收状态（接手必复核）
+
+- `node --test test/deep-perception.test.js` → **15/15**（含会话复用、busy debugger、注入包装、受限页 blocked）。
+- 全量 `npm test` → **1031/1031**（exit 0，约 152s，0.44.0 升版后复跑，与 P3 同一轮）。
+- **未做真机冒烟**：五个工具尚未在真实页面逐项验证；未部署，扩展仍 0.43.0。
+
+### 已知边界
+
+- Debugger 只在 domain 开启后才产生 `scriptParsed`，有界窗口不是完整脚本列表；跨源 iframe、worker 脚本需单独处理。
+- `browser_dom_snapshot` / `browser_framework_tree` 只覆盖主 frame；跨源 iframe 是独立文档。
+- 事件监听不穿透 shadow root；监听器列表是接线证据，不是业务动作必然发生的证明。
+- source map 依赖页面实际声明 `sourceMappingURL`；生产包常缺失，不得把 `not_found` 当作「没有源码」的结论。
+
+## 2026-11-16 接手增量（P1，工作树）：本地 OCR / 视觉 / Canvas 文字感知
+
+触发：继续 0.43.0 P0 之后的 P1，补齐 canvas、图片、视频等「DOM 不可见」文字的只读感知，并保持 Pixel 证据与写权限分离。
+
+### 交付内容
+
+- **Windows 本地 OCR 脚本**：新增 `scripts/windows-ocr.ps1`，使用 Windows.Media.Ocr，无权重、无网络、无 API key。脚本解析可用语言（精确或唯一前缀），检查 `OcrEngine.MaxImageDimension`，输出压缩 JSON：`language / requestedLanguage / availableLanguages / width / height / lines[{text,x,y,width,height,words[]}]`；错误码区分 `ocr_runtime_unavailable`、`ocr_language_unavailable`、`ocr_engine_unavailable`、`image_too_large`、`ocr_failed`。固定使用 Windows PowerShell 5.1（PowerShell 7 的 WinRT 投影不可靠）。
+- **OCR 适配器**：新增 `src/ocr-adapter.js`。只接受 PNG；直接解析 IHDR 得到截图尺寸并与 OCR 输出尺寸比对，不一致即 `ocr_dimensions_mismatch`。截图以 0600 写入 `stateDir/ocr-tmp`，在 `finally` 中删除（3 次重试），6 小时以上残留文件惰性清理；`cleanup.tempFileRemoved` 可机读。坐标换算：像素 ÷ (`image.width / viewport.width`, `image.height / viewport.height`) → CSS 视口矩形；中心点 → 0..1000。缺视口时保留像素框、rect/point 为 null。行数 ≤400、每行词 ≤40、文本 ≤20000 字符，并分别报告 `truncation.lines / wordsPerLine / text`。识别失败不回显 stdout，避免识别文本泄入错误日志。Windows OCR 在汉字间插空格，适配器只压紧「相邻汉字之间的空格」，其他空格保留，并返回 `textNormalization` 说明。
+- **只读 OCR 工具**：新增 `src/ocr-tool.js` 与 `browser_ocr`（service-local，不新增扩展分支）。先 `browser_screenshot`，再 best-effort `browser_debug` 取视口；截图等待/拒绝/阻断会原样传播且不启动 OCR；成功但视口不可读时降级为 `status:"partial"`、`reason:"viewport_unavailable"`，文本仍返回。结果固定 `noRefs:true`、`actionSafety`、`contentTrust`、`scope`（仅当前视口像素），`nextStep:null`，并给出 `recommendedNextAction`：用 `browser_prepare_coordinate` 验证 `line.point`，写操作走 `browser_action_verified`。每个子读都经 `call()` 重新治理，OCR 不能成为绕过 `browser_screenshot` 策略的侧门。
+- **本地 SQL**：`src/local-store.js` 新增 `ocr_runs`（状态、provider、语言、行数、图像尺寸、是否截断、耗时），schema_version 2，保留 `retention` 条并在每 50 次运行裁剪。识别文本、URL、查询词、截图、Cookie、凭据均不入库；`LOCAL_STORE_EXCLUDED` 明确包含 `recognized OCR text`。
+- **能力引导**：`browser_capabilities.perception.ocr` 改为 `available_local`，写明能力、依赖、隐私、覆盖与「无 ref」边界；`canvas` 工具补 `browser_ocr`；`locator-resolver` 的 `not_found` 建议增加 OCR 路线。`capability-guide.js` 新增 `ocr-or-image-text` 意图（图片/画布/截图文字、OCR、text in image），置于定位意图之前；`read-or-locate` 的 fallback 增加 OCR；`FOCUS_POLICY.backgroundSafeTools` 收录 `browser_ocr`；`priority-engine` 读列表与 `tool-index` 读组同步；工具索引仍保持 3500 字节预算内（实测 3457 字节）。
+- **文档**：`AGENTS.md`、`skills/ai-browser-bridge/SKILL.md`、`README.md`、`docs/AGENT-FIRST-STRATEGY-2026.md`、`docs/OPEN-SOURCE-CAPABILITY-RADAR.md`、`docs/FALLBACK-CHANNELS.md`、`docs/PRODUCT-ROADMAP.md` 同步 OCR 的用法、隐私与覆盖边界。
+
+### 验收状态（接手必复核）
+
+- 定向测试：`node --test --test-concurrency=1 test/ocr-adapter.test.js test/ocr-tool.test.js test/capability-guide.test.js test/perception-contract.test.js test/local-store.test.js test/tool-index.test.js` → 52/52。
+- 新增 `test/ocr-adapter.test.js`（PNG 校验、CSS/0..1000 映射、越界裁切、缺视口、成功清理、语言不可用、超时、非 PNG、垃圾 stdout 不回显、尺寸不一致、截断、残留清理、汉字间距压紧）与 `test/ocr-tool.test.js`（成功元数据、partial、waiting 传播、denied 传播、无效截图、adapter 异常、空结果、路由透传）。
+- 全量 `npm test` → **976/976**（exit 0，版本 0.43.0，约 128s）。
+- 部署（经白名单 `build_restart`）：服务从 buildId `fc9e2322…` 重启到当前源码 buildId `ee3d1f48…`，`upgrade-check ok:true`，扩展仍 0.43.0 且已连接。
+- 真实页面 OCR 冒烟（只读，tab 663195857 FlagOS 赛事页，后台 `visibilityState:"hidden"`）：`browser_ocr {language:"zh-Hans-CN",maxLines:8}` → `status:"success"`、`ok:true`、`availableLanguages:["en-US","zh-Hans-CN"]`、图像 3840×1823、视口 2560×1215、`scale:1.5`、8 行、`coordinatesAvailable:true`、`cleanup.tempFileRemoved:true`、`ledgerRecorded:true`；截图 sideEffects 为 `hidden_tab_frames_forced_for_capture`，未激活窗口。
+- MCP 客户端仍是本会话启动时的旧工具清单，`browser_ocr` 尚未出现在 `mcp_list` 中；服务 `/tools` 与 CLI `call browser_ocr` 已验证可用。需宿主重连/重启 MCP 服务后才能经 MCP 调用，属于客户端 schema 缓存，不是服务或扩展缺失。
+
+### 已知边界
+
+- OCR 只覆盖**当前视口内已绘制**的像素：滚动区外、未绘制内容、跨源 iframe 内文字不在结果中；空结果不是「页面无文字」的证据。
+- OCR 不返回 DOM ref、角色或可点击性证明；`line.point` 必须先经 `browser_prepare_coordinate`，写操作必须走 `_verified`。
+- 当前只有 Windows.Media.Ocr 一个 provider；多 provider 插拔、markdown 输出、`modelVersion`、非文本 `browser_visual_elements` 未实现。
+- 汉字间距压紧只处理「两个相邻汉字之间」的空格；其他语言/标点间距保持原样。
+
 ## 2026-11-16 接手增量（0.43.0）：统一感知契约、只读 browser_locate 与本地元数据账本
 
 触发：用户要求把「解析/感知/定位元素」的各种途径统一补齐，让强弱 Agent 都能被项目能力引导着正确操作，并允许加入本地 SQL 库提升健壮性；同时要求项目内 skills 等引导文件覆盖这些选择。
@@ -14,7 +129,7 @@
 - **状态语义封闭**：`status` 只允许 `found / ambiguous / partial / inconclusive / not_found / unavailable / blocked`。`found` 要求单个可用 ref 且分数 ≥45，或分数 ≥70 且领先第二名 ≥10；存在多个可用候选即 `ambiguous`。`not_found` 只在所有已搜索范围完整时成立；存在截断、未搜索、某路报错或连接不可用时只能是 `partial` / `inconclusive` / `unavailable` / `blocked`。只有 AX 证据而无 ref 时降级为 `ambiguous`（完整）或 `partial`，reason `accessibility_match_without_ref`。
 - **只读定位工具**：新增 `src/locator-resolver.js` 与 `browser_locate`（service-local，不需要扩展分发）。先 `browser_frames`，再语义 `browser_find_element`，按需 `browser_find_text`（多 frame 或强匹配缺失时覆盖全部 frame）、`browser_shadow_tree`，最后可选 `browser_ax_snapshot`（仅证据，`maxNodes` 有界）。返回 `frames`、`selection`、`ref`、`candidates`、`coverage`、`strategyHealth`、`refLifetime`、`verifiedWriteContract`、`recommendedNextAction`；`nextStep` 固定为 `null`，避免通用 next-step 逻辑把 `found` 当成失败再劝一次 `browser_read`。治理顺序不变：locate 在 `policy.evaluate` 之后执行，每个子读仍经 `call()` 二次治理。
 - **本地 SQL（仅元数据）**：新增 `src/local-store.js`，使用 `node:sqlite` 的 `DatabaseSync` 打开 `.local/bridge.db`。schema 只有 `meta`、`locator_runs`、`locator_strategy_health`；不建页面正文、URL、查询词、元素标签、截图、Cookie 或凭据列，调用方多传的 query/url/label 会被忽略。每 50 次运行按 `retention`（默认 500）裁剪。缺 `node:sqlite`、文件打不开或目录不可写时降级为 `available:false`，异常被捕获，绝不改变定位判定。`browser_capabilities.perception.localStore` 暴露状态、作用域与排除项。
-- **能力矩阵如实标注**：`browser_capabilities.perception` 列出 `semantic-dom` / `accessibility` / `shadow-dom` / `text-match` 的可用范围，并把 `ocr` 标为 `not_implemented`、`canvas` 与 `source` 标为 `partial`，写明截图+坐标、canvas 无 DOM 子节点、source map/事件监听盘点尚待补齐等真实边界。
+- **能力矩阵如实标注**：`browser_capabilities.perception` 列出 `semantic-dom` / `accessibility` / `shadow-dom` / `text-match` 的可用范围，并把 `ocr` 标为 `not_implemented`（P1 已改为 `available_local`，见上节）、`canvas` 与 `source` 标为 `partial`，写明截图+坐标、canvas 无 DOM 子节点、source map/事件监听盘点尚待补齐等真实边界。
 - **弱 Agent 引导**：`capability-guide.js` 新增 `locate-target` 意图（「元素定位不了」「找不到提交按钮」「which element should I click」等），把 `browser_locate` 放在读工具首位并标记后台安全；`tool-index.js` 的读组与 `priority-engine.js` 的读列表同步收录。`skills/ai-browser-bridge/SKILL.md`、`AGENTS.md`、`AGENT-QUICKSTART.md` 写明状态必须按字面使用、`coverage.complete:false` 禁止断言不存在、AX-only 需二次解析，以及本地 SQL 的元数据边界。
 
 ### 验收状态（接手必复核）
@@ -32,7 +147,7 @@
 
 ### 已知边界
 
-- OCR 尚未接入；canvas 内容只能靠截图+坐标或页面脚本，不声称已能识别像素中的文字/控件。
+- OCR 已在 P1 接入（Windows.Media.Ocr 本地后端），但只覆盖当前视口内已绘制文字，且不返回 ref；多 provider 插拔与 canvas 非文本视觉元素仍未实现。
 - `source` 感知仍是部分覆盖：`browser_debugger` 能看运行时脚本/断点/调用帧，但 source map 走读与事件监听器盘点尚未实现。
 - 本地 SQL 是路由参考，不是页面事实来源；不得用历史成功率替代当前观察。
 - `browser_locate` 不执行动作，不绕过 planned/policy 治理，也不改变任何现有写工具的门禁。
@@ -208,7 +323,7 @@
   （唯一发现 `version_skew`）。扩展重载需要当次明确授权，本轮未做。
 - 已知待决：Qoder MCP 仍缓存 0.41.0 的 `browser_extension_errors` schema（只有 `open`），需宿主重连/重启后
   才能经 MCP 调用 `read`；CLI 直连服务已验证可用。
-- 雷达后续（未实现）：`browser_ocr` provider 接口（Indra 权重为 OpenRAIL-M，不可内置分发）、
+- 雷达后续（未实现）：OCR 多 provider 插拔（当前已实现 Windows.Media.Ocr 本地后端；Indra 权重为 OpenRAIL-M，不可内置分发）、
   `browser_visual_elements`、`browser_read mode:"main"`、弱 agent 引导扩展。
 
 ## 2026-11-03 接手增量（0.29.0）：一次真实登录暴露的 7 个缺陷

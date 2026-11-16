@@ -1,11 +1,29 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-test('Windows upgrade preserves active work and records waiting even in best-effort mode', { skip: process.platform !== 'win32' }, () => {
+test('默认（无 -Legacy）升级脚本只读：运行 upgrade-check，不写 .local，按 ok 决定退出码', { skip: process.platform !== 'win32' }, () => {
+  for (const scenario of [{ ok: true, expected: 0 }, { ok: false, expected: 2 }]) {
+    const root = mkdtempSync(join(tmpdir(), 'bridge-upgrade-default-'));
+    try {
+      mkdirSync(join(root, 'scripts'));
+      mkdirSync(join(root, 'src'));
+      copyFileSync(new URL('../scripts/upgrade.ps1', import.meta.url), join(root, 'scripts', 'upgrade.ps1'));
+      writeFileSync(join(root, 'src', 'cli.js'), `console.log(${JSON.stringify(JSON.stringify(scenario))});`);
+      const run = spawnSync('pwsh.exe', ['-NoProfile', '-File', join(root, 'scripts', 'upgrade.ps1')], { encoding: 'utf8', timeout: 20000 });
+      assert.equal(run.status, scenario.expected, `${run.stderr}\n${run.stdout}`);
+      assert.match(run.stdout, new RegExp(`"ok":${scenario.ok}`), '应输出 upgrade-check 报告原文');
+      assert.match(`${run.stdout}\n${run.stderr}`, /scripts\/upgrade\.ps1[\s\S]*upgrade-check[\s\S]*-Legacy/,
+        '应打印弃用警示并给出官方命令与 -Legacy 出口');
+      assert.ok(!existsSync(join(root, '.local')), '默认模式不得写任何 .local 状态');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test('Windows upgrade -Legacy preserves active work and records waiting even in best-effort mode', { skip: process.platform !== 'win32' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'bridge-upgrade-'));
   try {
     mkdirSync(join(root, 'scripts'));
@@ -14,7 +32,7 @@ test('Windows upgrade preserves active work and records waiting even in best-eff
     copyFileSync(new URL('../scripts/bounded-process.ps1', import.meta.url), join(root, 'scripts', 'bounded-process.ps1'));
     for (const status of [{ active: { id: 'inflight' } }, { queued: 1 }, { taskLease: 'agent-a' }, { tabLeases: [{ owner: 'agent-a' }] }]) {
       writeFileSync(join(root, 'src', 'cli.js'), `console.log(${JSON.stringify(JSON.stringify({ ok: true, status }))});`);
-      const run = spawnSync('pwsh.exe', ['-NoProfile', '-File', join(root, 'scripts', 'upgrade.ps1'), '-BestEffort', '-SkipReload'], { encoding: 'utf8', timeout: 20000 });
+      const run = spawnSync('pwsh.exe', ['-NoProfile', '-File', join(root, 'scripts', 'upgrade.ps1'), '-Legacy', '-BestEffort', '-SkipReload'], { encoding: 'utf8', timeout: 20000 });
       assert.equal(run.status, 1, run.stderr);
       const report = JSON.parse(readFileSync(join(root, '.local', 'upgrade', 'last-result.json'), 'utf8').replace(/^\uFEFF/, ''));
       assert.equal(report.status, 'waiting');
@@ -27,7 +45,7 @@ test('Windows upgrade preserves active work and records waiting even in best-eff
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('Windows upgrade never replays an uncertain extension reload', { skip: process.platform !== 'win32' }, () => {
+test('Windows upgrade -Legacy never replays an uncertain extension reload', { skip: process.platform !== 'win32' }, () => {
   for (const scenario of [
     { exitCode: 0, outcome: 'verified', dispatched: true, chromeProcessId: 8412, chromeWindowHandle: 10854 },
     { exitCode: 1, outcome: 'uncertain', dispatched: null, chromeProcessId: 8412, chromeWindowHandle: 10854 },
@@ -65,7 +83,7 @@ test('Windows upgrade never replays an uncertain extension reload', { skip: proc
         BRIDGE_RELOAD_EXIT_CODE: String(scenario.exitCode),
         BRIDGE_DOCTOR_COUNTER: join(root, 'doctor-counter.txt'),
       };
-      const run = spawnSync('pwsh.exe', ['-NoProfile', '-File', join(root, 'scripts', 'upgrade.ps1'), '-BestEffort', '-ChromeProcessId', String(scenario.chromeProcessId), '-ChromeWindowHandle', String(scenario.chromeWindowHandle), '-HealthTimeoutSec', '1'], { encoding: 'utf8', timeout: 30000, env });
+      const run = spawnSync('pwsh.exe', ['-NoProfile', '-File', join(root, 'scripts', 'upgrade.ps1'), '-Legacy', '-BestEffort', '-ChromeProcessId', String(scenario.chromeProcessId), '-ChromeWindowHandle', String(scenario.chromeWindowHandle), '-HealthTimeoutSec', '1'], { encoding: 'utf8', timeout: 30000, env });
       assert.equal(run.status, scenario.finalDoctorHealthy === false ? 1 : 0, `${run.stderr}\n${run.stdout}`);
       const report = JSON.parse(readFileSync(join(root, '.local', 'upgrade', 'last-result.json'), 'utf8').replace(/^\uFEFF/, ''));
       assert.equal(report.reloadAttempts, 1);
