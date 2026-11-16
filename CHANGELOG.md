@@ -16,7 +16,8 @@
 - 全量 `npm test` → **1057/1057**（exit 0，0 fail，约 163s；0.45.0 升版后）。新增 `test/service-restart.test.js` 12 项、`test/bridge.test.js` +5 项、`test/autostart-options.test.js` +1 项、`test/upgrade-preflight.test.js` +1 项。
 - 定向：`service-restart` / `upgrade-check` / `deployment-status` / `panel-status` → 27/27；`bridge` → 35/35；`autostart-options` → 10/10。
 - PowerShell 解析检查（install/uninstall/upgrade）→ `PARSE_OK`。
-- **未部署**：本版只升源码版本；运行服务与 Chrome 扩展仍为 0.43.0。首次迁移到含 `/restart-when-idle` 的构建仍需按文档做一次手工重启，之后该命令才可用。
+- **已部署（2026-11-16 21:07 本地）**：按项目自身的 `restart_intent` → `SIGTERM` → 看门狗拉起路径完成首次手工迁移（running `4f49e1b5…` → disk `4aac61ae…`），服务 4 秒内以 0.45.0 启动（pid 47708），`service-history` 归类为 `planned_restart`；两个宿主均经 `chrome.runtime.reload` 自重载至扩展 0.45.0（`foregroundTaken:false`）。部署后 `upgrade-check` 全 `ok:true`、`doctor-lite.bat`/`doctor.bat` 退出 0、`heartbeat --no-remediate` → `verdict:"clean"`、`restart-service-when-idle` 只读预检 → `not_needed`（listener/watchdog 身份均 verified）。
+- 部署中发现 `doctor-lite.bat` 工作树为 LF 换行，cmd.exe 解析为乱码并退 1；已就地转 CRLF，并新增 `.gitattributes` 固定 `*.bat` 以 CRLF 检出。
 
 ### 边界
 

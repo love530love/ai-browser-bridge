@@ -4,7 +4,7 @@
 
 ## 目标
 
-## 2026-11-16 接手增量（0.45.0，工作树）：部署陈旧可见 / 空闲门控重启 / 自启纳管
+## 2026-11-16 接手增量（0.45.0，已部署）：部署陈旧可见 / 空闲门控重启 / 自启纳管
 
 触发：另一台 Windows 11 笔记本（love-PC，0.37.4 → 0.42.3）的安装部署与热更新反馈，已固化为用户级技能 `ai-browser-bridge-upgrade`。反馈中的 P1-1 / P1-2 / P2-3 / P2-4 / P2-5 / P2-6 全部落地，未削弱 `-Heartbeat` 既有安全门控。
 
@@ -21,7 +21,11 @@
 - 定向：`service-restart` / `upgrade-check` / `deployment-status` / `panel-status` → 27/27；`bridge` → 35/35；`autostart-options` → 10/10。
 - PowerShell 解析检查（install / uninstall / upgrade）→ `PARSE_OK`。
 - 全量 `npm test` → **1057/1057**（exit 0，0 fail，约 163s，0.45.0 升版后）。
-- **未部署**：源码 0.45.0 只在工作树；运行服务与扩展仍为 0.43.0。首次迁移到含 `/restart-when-idle` 的构建仍需一次手工重启，之后该命令才可用。
+- **已部署（2026-11-16 21:07 本地）**：首次迁移按项目自身模式执行——复核 LISTENING pid 39432 与 NtQuery 命令行后，写 `restart_intent`（`requestedBy:"cli"`、`reason:"idle_restart_migration"`、running `4f49e1b5…` → disk `4aac61ae…`）并 `SIGTERM`；看门狗 4 秒内以 0.45.0 启动（pid 47708，buildId `4aac61ae…`，命令行证明为本项目 `src/server.js`）。`service-history` 将该次退出归类为 `planned_restart`（`exitRecorded:false`：Windows 上 SIGTERM 为强制终止，不影响有 intent 的归因）。
+- 两个宿主均经 `chrome.runtime.reload` 自重载至扩展 0.45.0（`foregroundTaken:false`，未开 tab、未抬窗口）：默认 Chrome 宿主 `h-0b47a521c4384e90beb4`、内嵌宿主 `h-b76b872f85d347a49e00`（ChatGPT）。`/status.deployment` → `deploymentStale:false`、`extensionVersionSkew:false`、`upgradeRequired:false`、`actionRequired:[]`、`errors:[]`。
+- 部署后复验：`upgrade-check` 服务/扩展/清单/配置/git 全 `ok:true`；`doctor-lite.bat` 退出 0（4 通过 / 0 失败 / 2 未知）；`doctor.bat` 退出 0 且 `ok:true`、`version-match` 通过；`heartbeat --no-remediate` → `verdict:"clean"`、`provenClean:true`、`findings:[]`；`restart-service-when-idle`（只读预检）→ `status:"not_needed"`，listener 与 watchdog 身份均 `identityVerified:true`（新 NtQuery 快路径，CIM 未被调用）。
+- 部署中发现 `doctor-lite.bat` 工作树为 LF 换行，cmd.exe 将其解析为乱码并退 1；已就地转 CRLF（索引为 LF + `core.autocrlf=true`，归一化后 `git diff` 为空），并新增 `.gitattributes` 固定 `*.bat` 以 CRLF 检出。
+- 未推送远端、未打 tag/Release；扩展面板 UI 未做肉眼检查（全程无前台动作），面板提示逻辑由单元测试与 `/status.deployment` 覆盖。
 
 ### 已知边界
 
