@@ -671,3 +671,15 @@ test('without a recorded target nothing is forced on the launcher', async t => {
   assert.equal(seen[0].exePath, null);
   assert.equal(seen[0].profileDirectory, null);
 });
+
+test('locate is answered by the service and never reports absence while disconnected', async t => {
+  const { b } = await setup(t, { leaseStateFile: null, agentPolicyFile: null, localStoreFile: null });
+  const result = await b.call('browser_locate', { tabId: 1, query: '提交' });
+  assert.equal(result.status, 'unavailable');
+  assert.equal(result.reason, 'extension_disconnected');
+  assert.equal(result.selection, null);
+  assert.equal(result.nextStep, null);
+  assert.equal(result.coverage.complete, false);
+  assert.deepEqual(result.candidates, []);
+  assert.match(result.recommendedNextAction, /browser_health/);
+});

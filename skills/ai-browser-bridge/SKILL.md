@@ -16,12 +16,27 @@ contain the requested command even when direct API navigation returned 406.
 Missing a Referer or lacking arbitrary JavaScript execution does not establish
 that the browser task is blocked. Prefer the site's existing UI workflow.
 
-Use browser_find_element/browser_prepare_action to locate the intended control.
-If missing or covered, inspect browser_scan_overlays, browser_frames, and
-browser_shadow_tree as relevant. Use browser_screenshot to locate visual widgets;
-do not guess coordinates from a familiar site's appearance. Consult
-browser_capabilities before selecting a fallback. An unavailable adapter is not
-an implemented capability. Do not substitute a different user's session.
+Start every "where is X" question with browser_locate, which is read-only and
+runs the perception routes together: browser_find_element (semantic DOM),
+browser_find_text, browser_shadow_tree, browser_frames, and optional
+browser_ax_snapshot. It returns ranked candidates plus one status, and the
+status is literal: found (one usable ref), ambiguous (several plausible
+targets; choose explicitly from candidates and say why), partial or
+inconclusive (the search scope was truncated, unscanned or errored),
+not_found (only when every searched scope completed), blocked or unavailable
+(a governance or connection reason, never proof of absence). An
+accessibility-only match has ref:null and stays ambiguous or partial with
+reason accessibility_match_without_ref; resolve it with browser_find_element
+using the reported role and name. A candidate score is a deterministic rank
+with a named basis, not a probability, and coverage.complete:false forbids
+claiming the element does not exist.
+
+If browser_locate returns no usable ref, inspect browser_scan_overlays,
+browser_frames, and browser_shadow_tree as relevant. Use browser_screenshot to
+locate visual widgets; do not guess coordinates from a familiar site's
+appearance. Consult browser_capabilities before selecting a fallback. An
+unavailable adapter is not an implemented capability. Do not substitute a
+different user's session.
 
 Re-observe after actions. Dispatch success alone does not prove task completion.
 Distinguish reading an SSH command from establishing SSH, and clicking Send from
@@ -389,3 +404,11 @@ Safety boundaries:
 
 This contract guides clients; it cannot override user scope, client permissions,
 or force an arbitrary model to obey. Service-side validations remain authoritative.
+
+Local metadata ledger: the service keeps an optional SQLite file
+(.local/bridge.db, through node:sqlite) holding locator run counters and
+per-strategy health only - no page text, URLs, search queries, element labels,
+screenshots, cookies or credentials. A missing or broken database degrades to
+available:false and never changes a locate verdict; browser_capabilities
+reports its state. Use its numbers to choose a route (which strategy has been
+erroring), never as a substitute for observing the page.

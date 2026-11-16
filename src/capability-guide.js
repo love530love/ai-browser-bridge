@@ -6,14 +6,20 @@
 // primitive, does it need the foreground, and what is the fallback" without any
 // model, so it keeps working when every optional service is offline.
 
-const READ = ['browser_at', 'browser_read', 'browser_find_text', 'browser_find_element'];
+const READ = ['browser_locate', 'browser_at', 'browser_read', 'browser_find_text', 'browser_find_element'];
 const WRITE = ['browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified'];
 const PICK = ['browser_select', 'browser_choose', 'browser_pick'];
 const COORDINATE = ['browser_prepare_coordinate', 'browser_action'];
 
 // Ordered: the first matching intent wins, so put the specific ones first.
 const INTENTS = [
-  { id: 'coordinate-or-canvas', match: /坐标|画布|canvas|webgl|坐标点击|coordinate|无法定位元素/i,
+  { id: 'locate-target', match: /定位(?:元素|目标|按钮|输入框|控件|链接|不到|不了)|找不到.{0,8}(?:元素|目标|按钮|输入框|控件|链接)|(?:元素|目标|按钮|输入框|控件|链接).{0,8}找不到|ambiguous|which element|locate (?:the )?(?:element|target)|find the (?:element|target)/i,
+    tools: READ, focusRequired: false,
+    why: 'browser_locate runs several read-only perception routes and answers with one ranked candidate list plus the scope each route actually covered. The same node found twice is merged, and a ranking is a list of named facts rather than a model score.',
+    backgroundSafe: true,
+    prefer: 'Call browser_locate first instead of stacking browser_find_element, browser_find_text and browser_shadow_tree by hand. Read status literally: found means use selection.ref with the matching _verified tool; ambiguous means compare rowText, rect and role, or narrow the query; partial or inconclusive means the search was incomplete, so never report the target as absent; not_found is only returned after every searched scope completed. includeAccessibility:true adds corroboration from the accessibility tree but has no action refs, and needs a temporary debugger attachment. Locate never writes to the page.',
+    fallback: ['browser_locate', 'browser_read', 'browser_prepare_action', 'browser_screenshot', 'browser_shadow_tree', 'browser_frames'] },
+  { id: 'coordinate-or-canvas', match: /坐标|画布|canvas|webgl|坐标点击|coordinate/i,
     tools: COORDINATE, focusRequired: false,
     why: 'The coordinate token is bound to the DOM element under the point and re-hit-tested before the press, and CDP dispatches into the target by tabId, so a backgrounded tab still resolves the same element. Foreground is only needed if you explicitly ask for it with requireForeground:true.',
     backgroundSafe: true,
@@ -249,7 +255,7 @@ const NOT_IMPLEMENTED = [
 
 const FOCUS_POLICY = {
   summary: 'Foreground is required only where the operating system, not the page, decides the target.',
-  backgroundSafeTools: ['browser_read', 'browser_eval', 'browser_find_text', 'browser_find_element', 'browser_shadow_tree', 'browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_scroll', 'browser_key', 'browser_wait', 'browser_screenshot', 'browser_performance', 'browser_network_summary', 'browser_devtools_capture', 'browser_storage_read', 'browser_storage_write', 'browser_replay_request', 'browser_debug', 'browser_debugger', 'browser_health', 'browser_login_state', 'browser_otp_fetch', 'browser_credential_lookup', 'browser_recipe_save', 'browser_recipe_run', 'browser_recipe_list', 'browser_recipe_delete', 'browser_dialog', 'browser_emulation', 'browser_ax_snapshot', 'browser_drag', 'browser_pdf_save', 'browser_init_script', 'browser_network_rules', 'browser_clipboard', 'browser_clipboard_write', 'browser_navigation', 'browser_native_host', 'browser_native_host_install', 'browser_native_messaging', 'browser_native_ports', 'browser_identity', 'browser_certificates', 'browser_certificates_write', 'browser_transient', 'browser_popup', 'browser_download_wait', ...COORDINATE, 'browser_tabs', 'browser_open', 'browser_close', 'browser_launch', 'browser_reload_extension'],
+  backgroundSafeTools: ['browser_read', 'browser_eval', 'browser_find_text', 'browser_find_element', 'browser_locate', 'browser_shadow_tree', 'browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_select', 'browser_choose', 'browser_pick', 'browser_upload', 'browser_upload_verified', 'browser_scroll', 'browser_key', 'browser_wait', 'browser_screenshot', 'browser_performance', 'browser_network_summary', 'browser_devtools_capture', 'browser_storage_read', 'browser_storage_write', 'browser_replay_request', 'browser_debug', 'browser_debugger', 'browser_health', 'browser_login_state', 'browser_otp_fetch', 'browser_credential_lookup', 'browser_recipe_save', 'browser_recipe_run', 'browser_recipe_list', 'browser_recipe_delete', 'browser_dialog', 'browser_emulation', 'browser_ax_snapshot', 'browser_drag', 'browser_pdf_save', 'browser_init_script', 'browser_network_rules', 'browser_clipboard', 'browser_clipboard_write', 'browser_navigation', 'browser_native_host', 'browser_native_host_install', 'browser_native_messaging', 'browser_native_ports', 'browser_identity', 'browser_certificates', 'browser_certificates_write', 'browser_transient', 'browser_popup', 'browser_download_wait', ...COORDINATE, 'browser_tabs', 'browser_open', 'browser_close', 'browser_launch', 'browser_reload_extension'],
   foregroundRequiredTools: ['browser_desktop_windows', 'browser_native_snapshot', 'browser_devtools', 'browser_password_manager_reveal'],
   advisoryOnlyStates: ['tab.active', 'window.focused', 'document.visibilityState', 'document.hasFocus'],
   guidance: 'These four states are reported for diagnosis, not as a gate. A backgrounded tab is a normal working state: do not stop a DOM, CDP or coordinate task because of them. Coordinates do not need the foreground: the token is bound to the DOM element and re-hit-tested, and CDP dispatches into the target by tabId. browser_reload_extension does not either, because the extension reloads itself with chrome.runtime.reload(); only its Windows UI Automation fallback types into a real window. Pass requireForeground:true only when you specifically want foreground evidence.',

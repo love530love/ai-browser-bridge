@@ -199,6 +199,18 @@ export const TOOLS = [
     includeCovered: { type: 'boolean' },
     agent,
   }, ['tabId', 'query'], true),
+  tool('browser_locate', 'Read-only target resolution across several perception routes, answered as one ranked candidate list. It searches the semantic DOM, then visible text (and all accessible frames when frames:"all"), then open shadow roots, and optionally the accessibility tree, and merges the same node found twice into one candidate with every source attached. Each candidate carries ref, geometry, role, covered/disabled state, actionability and a deterministic score with a named basis - there is no model and no hidden probability. status is one of found | ambiguous | partial | inconclusive | not_found | unavailable | blocked. not_found is only returned when every searched scope completed; a truncated scan, an unsearched frame or a failed strategy yields partial or inconclusive instead, so absence is never inferred from an incomplete search. When status is found, use selection.ref with the matching _verified tool; when ambiguous, compare rowText/rect and narrow the query rather than guessing. Never writes to the page.', {
+    tabId,
+    query: text(1000),
+    role: { type: 'string', maxLength: 80 },
+    action: { type: 'string', enum: ['click', 'fill', 'select', 'upload', 'any'] },
+    frames: { type: 'string', enum: ['auto', 'main', 'all'], description: 'auto searches all frames when more than one exists; main stays on the main frame; all forces all-frame text search.' },
+    includeShadow: { type: 'boolean', description: 'Default true. Searches open shadow roots when the main frame has no strong match.' },
+    includeAccessibility: { type: 'boolean', description: 'Opt-in. Reads the CDP accessibility tree as corroboration; it needs a debugger attachment and has no action refs.' },
+    maxResults: { type: 'integer', minimum: 1, maximum: 20 },
+    mode: { type: 'string', enum: ['normal', 'cheap'] },
+    agent,
+  }, ['tabId', 'query'], true),
   tool('browser_prepare_action', 'Read-only action planner for complex pages. Combines overlay scan and element search to recommend dismiss/scroll/read/pick/click/fill next steps without executing writes.', {
     tabId,
     goal: text(2000),
@@ -892,7 +904,8 @@ const TOOL_ARG_ALIASES = {
   // CSS selector sent here would search for the literal string "#name" and
   // report not-found - an honest error is better than a confident empty answer.
   browser_find_text: { text: 'query' },
-  browser_find_element: { text: 'query' }
+  browser_find_element: { text: 'query' },
+  browser_locate: { text: 'query' }
 };
 // "Give me the text" is what mode:"text" means to a person; the enum says
 // normal. Both are accepted, and the canonical value is what travels onward.

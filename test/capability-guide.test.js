@@ -150,6 +150,22 @@ test('capability gaps are stated instead of being hidden behind a refusal', () =
   assert.match(replay.primary.prefer, /Never send it twice/);
 });
 
+test('a target that cannot be located is routed to locate, not to a guessed coordinate', () => {
+  for (const goal of ['页面上找不到提交按钮，元素定位不了', '无法定位元素', 'which element should I click']) {
+    const guide = capabilityGuide({ goal });
+    assert.equal(guide.primary.intent, 'locate-target', goal);
+    assert.ok(guide.primary.tools.includes('browser_locate'), goal);
+    assert.equal(guide.focusRequired, false, goal);
+    assert.match(guide.primary.prefer, /status/, goal);
+    assert.match(guide.primary.prefer, /not_found/, goal);
+  }
+  // A coordinate goal keeps its own route: locate is not a synonym for canvas.
+  assert.equal(capabilityGuide({ goal: '用坐标点一下画布' }).primary.intent, 'coordinate-or-canvas');
+  // The general read route is unchanged for goals that never mentioned a miss.
+  assert.equal(capabilityGuide({ goal: '读取页面内容' }).primary.intent, 'read-or-locate');
+  assert.ok(capabilityGuide({ goal: '读取页面内容' }).primary.tools.includes('browser_locate'));
+});
+
 test('launching and reloading are both advertised as background-safe', () => {
   const launch = capabilityGuide({ goal: '浏览器没启动，帮我拉起来' });
   assert.equal(launch.primary.intent, 'launch-browser');

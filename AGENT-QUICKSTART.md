@@ -67,6 +67,20 @@ native select、ARIA combobox、Element Plus/Ant/react 风格选择器和 portal
 必须传入 `expect`，例如 `textAppears`、`urlContains`、`elementLabelAppears` 或
 `valueMatches`。工具只执行一次动作并等待期望结果；若返回 `failed/uncertain`，先观察诊断，不要自动重放。
 
+**定位优先用只读 `browser_locate`**：传入 `tabId` 和 `query`（可见文本、label 或控件名），
+它会并行走语义 DOM、文本匹配、Shadow DOM、跨 frame 以及可选的 AX 树，返回统一候选和一个
+`status`。`status` 必须按字面使用：`found` 才代表拿到了可直接写入的 ref；`ambiguous`
+表示有多个候选，需自己选一个并说明依据；`partial`/`inconclusive` 表示搜索范围被截断、
+未覆盖或某路出错；`not_found` 只在所有已搜索范围都完整时才成立；`blocked`/`unavailable`
+是治理或连接原因，不是“页面没有该元素”。只有 AX 证据时 `ref` 为 null 且
+`status` 为 `ambiguous`/`partial`（reason `accessibility_match_without_ref`），请用其
+role+name 再调 `browser_find_element`。候选分是带 `basis` 的确定性排名，不是概率；
+`coverage.complete=false` 时禁止向用户断言元素不存在。
+
+本地 SQL 只保存定位器运行计数与策略健康度（`.local/bridge.db`，不含页面正文、URL、
+查询词、元素标签、截图或凭据），数据库缺失/损坏只会让 `available:false`，绝不改变
+定位判定；可在 `browser_capabilities.perception.localStore` 查看其状态。
+
 对于 role-less 可点元素（React/Vue onClick 的 span/div，无 href/role/tabindex）：
 先尝试 `browser_find_text({query:"<文本>", includeMatchElement:true})` 获取包含匹配文本的最深可见元素 ref；
 仍无 ref 时，用 `browser_shadow_tree({includeClickable:true})` 枚举 cursor:pointer 容器；

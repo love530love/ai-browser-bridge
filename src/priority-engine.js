@@ -24,7 +24,7 @@ const TOOL_CATEGORIES = {
   read: {
     tools: [
       'browser_read', 'browser_observe', 'browser_find_element',
-      'browser_find_text', 'browser_at', 'browser_tabs',
+      'browser_find_text', 'browser_locate', 'browser_at', 'browser_tabs',
       'browser_ai_status', 'browser_capabilities', 'browser_tool_index',
       'browser_queue_status', 'browser_wait_until_ready', 'browser_capability_guide',
       'browser_hosts', 'browser_screenshot', 'browser_cookies',

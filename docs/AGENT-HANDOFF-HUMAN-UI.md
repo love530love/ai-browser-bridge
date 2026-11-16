@@ -4,6 +4,38 @@
 
 ## 目标
 
+## 2026-11-16 接手增量（0.43.0）：统一感知契约、只读 browser_locate 与本地元数据账本
+
+触发：用户要求把「解析/感知/定位元素」的各种途径统一补齐，让强弱 Agent 都能被项目能力引导着正确操作，并允许加入本地 SQL 库提升健壮性；同时要求项目内 skills 等引导文件覆盖这些选择。
+
+### 交付内容
+
+- **统一候选契约**：新增 `src/perception-contract.js`。四种读策略（`semantic-dom` 12 / `accessibility` 10 / `shadow-dom` 8 / `text-match` 6）产出同一种 `TargetCandidate`：`score` 为确定性整数排名，`basis` 写明命中的依据（exact_text / prefix_text / contains_text / semantic_control 等），并携带 `actionability`、`covered`、`disabled`、`visible`、`sources`、`ref`。同一节点跨策略合并（矩形重叠 ≥90% 且标签包含）保留全部来源与单一 ref；跨 frame ref 恰好装饰一次 `@frameN`。契约不含模型、概率或不可解释的 confidence。
+- **状态语义封闭**：`status` 只允许 `found / ambiguous / partial / inconclusive / not_found / unavailable / blocked`。`found` 要求单个可用 ref 且分数 ≥45，或分数 ≥70 且领先第二名 ≥10；存在多个可用候选即 `ambiguous`。`not_found` 只在所有已搜索范围完整时成立；存在截断、未搜索、某路报错或连接不可用时只能是 `partial` / `inconclusive` / `unavailable` / `blocked`。只有 AX 证据而无 ref 时降级为 `ambiguous`（完整）或 `partial`，reason `accessibility_match_without_ref`。
+- **只读定位工具**：新增 `src/locator-resolver.js` 与 `browser_locate`（service-local，不需要扩展分发）。先 `browser_frames`，再语义 `browser_find_element`，按需 `browser_find_text`（多 frame 或强匹配缺失时覆盖全部 frame）、`browser_shadow_tree`，最后可选 `browser_ax_snapshot`（仅证据，`maxNodes` 有界）。返回 `frames`、`selection`、`ref`、`candidates`、`coverage`、`strategyHealth`、`refLifetime`、`verifiedWriteContract`、`recommendedNextAction`；`nextStep` 固定为 `null`，避免通用 next-step 逻辑把 `found` 当成失败再劝一次 `browser_read`。治理顺序不变：locate 在 `policy.evaluate` 之后执行，每个子读仍经 `call()` 二次治理。
+- **本地 SQL（仅元数据）**：新增 `src/local-store.js`，使用 `node:sqlite` 的 `DatabaseSync` 打开 `.local/bridge.db`。schema 只有 `meta`、`locator_runs`、`locator_strategy_health`；不建页面正文、URL、查询词、元素标签、截图、Cookie 或凭据列，调用方多传的 query/url/label 会被忽略。每 50 次运行按 `retention`（默认 500）裁剪。缺 `node:sqlite`、文件打不开或目录不可写时降级为 `available:false`，异常被捕获，绝不改变定位判定。`browser_capabilities.perception.localStore` 暴露状态、作用域与排除项。
+- **能力矩阵如实标注**：`browser_capabilities.perception` 列出 `semantic-dom` / `accessibility` / `shadow-dom` / `text-match` 的可用范围，并把 `ocr` 标为 `not_implemented`、`canvas` 与 `source` 标为 `partial`，写明截图+坐标、canvas 无 DOM 子节点、source map/事件监听盘点尚待补齐等真实边界。
+- **弱 Agent 引导**：`capability-guide.js` 新增 `locate-target` 意图（「元素定位不了」「找不到提交按钮」「which element should I click」等），把 `browser_locate` 放在读工具首位并标记后台安全；`tool-index.js` 的读组与 `priority-engine.js` 的读列表同步收录。`skills/ai-browser-bridge/SKILL.md`、`AGENTS.md`、`AGENT-QUICKSTART.md` 写明状态必须按字面使用、`coverage.complete:false` 禁止断言不存在、AX-only 需二次解析，以及本地 SQL 的元数据边界。
+
+### 验收状态（接手必复核）
+
+- 全量 `npm test` → **954/954**（exit 0，0 fail，约 129s，版本 0.43.0 下执行）。
+- 新增定向：`node --test --test-concurrency=1 test/perception-contract.test.js test/locator-resolver.test.js test/local-store.test.js test/tool-index.test.js` → 29/29。
+- 引导与桥：`node --test test/capability-guide.test.js test/bridge.test.js` → 40/40；其中断言服务断连时 locate 返回 `unavailable`/`extension_disconnected`、`selection:null`、`candidates:[]`、`nextStep:null`。
+- 版本四处同步 0.42.3 → **0.43.0**（package.json、package-lock 顶层与 `packages[""]`、extension/manifest.json；`src/version.js` 从 package.json 读取）。
+- 未经扩展执行：`browser_locate` 由服务端编排现有读工具，`extension/worker.js` 无新增分支；`tool-index` 3500 字节预算测试保持通过。
+- 部署（2026-11-16 04:33–04:37Z，均经白名单）：`build_restart` intent `8901256b…`，服务以 0.43.0 启动（pid 57936，buildId `4377d0a4…`）；随后冒烟发现 coverage 漏洞并修复，再次 `build_restart` intent `818dd31d…`，最终 pid 50624 / buildId `fc9e2322…`。两个宿主均经 `chrome.runtime.reload` 自重载至 0.43.0（`foregroundTaken:false`，未开 tab、未抬窗口），`doctor ok:true`。
+- 真实页面冒烟（只读，tab 663195956）：`browser_locate {query:"购买资源包"}` 返回 3 个候选、`selection:null`；首轮暴露 `coverage.complete:true` 与 `text_scan_truncated` 自相矛盾，修复后为 `status:"partial"`、`coverage.complete:false`、reasons 保留 `frame_text_search_incomplete` / `text_scan_truncated`。`strategyHealth` 第二轮读到 semantic-dom/text-match/shadow-dom 各 1 次运行。
+- 未启 Playwright/CDP 网关，未读 Chrome profile / Cookie / Login Data / Local State，未改 `browserTarget`。
+
+### 已知边界
+
+- OCR 尚未接入；canvas 内容只能靠截图+坐标或页面脚本，不声称已能识别像素中的文字/控件。
+- `source` 感知仍是部分覆盖：`browser_debugger` 能看运行时脚本/断点/调用帧，但 source map 走读与事件监听器盘点尚未实现。
+- 本地 SQL 是路由参考，不是页面事实来源；不得用历史成功率替代当前观察。
+- `browser_locate` 不执行动作，不绕过 planned/policy 治理，也不改变任何现有写工具的门禁。
+
+
 ## 2026-11-15 接手增量（0.42.3）：不可归因退出、wrapper-shell 守卫与面板声明语义
 
 触发：用户要求对 0.42.2 遗留的三条边界「详细调查根因并永久解决」：

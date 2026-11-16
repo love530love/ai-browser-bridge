@@ -23,6 +23,9 @@ import { protectedUiPlan } from './protected-ui.js';
 import { createMaintenanceStore } from './maintenance.js';
 import { failureHelp } from './failure-help.js';
 import { capabilityGuide } from './capability-guide.js';
+import { resolveTarget } from './locator-resolver.js';
+import { PERCEPTION_MATRIX } from './perception-contract.js';
+import { createLocalStore, LOCAL_STORE_EXCLUDED } from './local-store.js';
 import { BUILD_ID } from './build-identity.js';
 import { createDesktopAdapter, RELOAD_EXTENSION_CONFIRMATION } from './desktop-adapter.js';
 import { clearExtensionErrors, describeErrorList, readExtensionErrors } from './extension-errors.js';
@@ -121,7 +124,7 @@ function withContentBoundaries(result) {
   }
   return next;
 }
-export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true, browserTarget = config.browserTarget ?? null, uploadConfigPath = configPath, lifecycleStartup = null } = {}) {
+export function createBridge(config, { audit = () => {}, timeoutMs = 20000, modelLoader, desktopAdapter: suppliedDesktopAdapter, leaseStateFile = join(stateDir, 'tab-leases.json'), agentPolicyFile = join(stateDir, 'agents.json'), localStoreFile = join(stateDir, 'bridge.db'), maintenanceStateFile = null, requireAgentIdentity = false, reloadVerifyTimeoutMs = RELOAD_VERIFY_TIMEOUT_MS, launchConnectTimeoutMs = LAUNCH_CONNECT_TIMEOUT_MS, desktopTargetTtlMs = 30000, autoLaunchBrowser = config.autoLaunchBrowser === true, browserTarget = config.browserTarget ?? null, uploadConfigPath = configPath, lifecycleStartup = null } = {}) {
   config = { ...config, uploadRoots: config.uploadRoots ?? [], uploadMaxBytes: config.uploadMaxBytes ?? DEFAULT_UPLOAD_MAX_BYTES };
   // Upload policy is read from disk on demand, cached by mtime. The old code
   // snapshotted config once at boot: `allow-upload-root` DID write the file,
@@ -421,6 +424,20 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         partialRun: 'a failed run reports which steps already ran and states they are not rolled back'
       }
     },
+    perception: {
+      ...PERCEPTION_MATRIX,
+      locateTool: 'browser_locate',
+      mergeRule: 'The same node found by more than one route is merged into one candidate, keeping every source; refs from different snapshots are never compared as if they were the same address.',
+      ranking: 'Deterministic points from named facts (match kind, strategy weight, actionability, covered, disabled, text-only, cross-frame). No model, no probability, no hidden confidence.',
+      statusRule: 'not_found only when every searched scope completed; a truncated scan, unsearched frame or failed strategy yields partial or inconclusive instead.',
+      localStore: {
+        enabled: localStoreFile !== null,
+        file: 'bridge.db',
+        scope: 'locator strategy health and run counters only',
+        excluded: LOCAL_STORE_EXCLUDED,
+        failureMode: 'a missing node:sqlite or an unreadable database disables the ledger without changing any locate answer'
+      }
+    },
     policy: { installOrRemoveExtension: 'not_implemented_even_with_user_approval', developerMode: 'not_implemented_even_with_user_approval', browserSecuritySettings: 'not_implemented_even_with_user_approval', cookiesAndSecrets: 'the open tab\'s own origin cookies are readable and writable through browser_storage_*; other origins\' cookies, the OS credential store and browser security settings are not' },
     fallback: ['ordinary_page', 'protected_ui', 'requires_user'],
     guarantees: ['Protected pages are never misreported as ordinary DOM success.', 'Model outage does not remove deterministic ordinary-page control.', 'High-risk UI changes require a fresh user confirmation and an auditable checkpoint.']
@@ -432,6 +449,17 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   // Governance: scopes/origins per named agent, answered by the service like
   // leases so MCP, CLI and HTTP share one decision point. Default is open.
   const policy = createAgentPolicy({ file: agentPolicyFile, requireIdentity: requireAgentIdentity || config.requireAgentIdentity === true });
+  // Locator health is the only thing the local database stores: strategy,
+  // outcome, runs and timing. Opening it is lazy so a bridge that never locates
+  // does not create a file, and a test fixture can opt out with
+  // localStoreFile:null. A broken database degrades to no learning, never to a
+  // failed call.
+  let localStore = null;
+  const getLocalStore = () => {
+    if (localStoreFile === null) return null;
+    localStore ??= createLocalStore({ file: localStoreFile });
+    return localStore;
+  };
   // Chrome's on-device model layer. `browser_local_judge` is answered by the
   // extension and never executes anything; the service only remembers the last
   // verdict per agent so a policy that asks for a judged write can be enforced
@@ -1915,6 +1943,20 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       return schedulerBridge.routeExplicitly({ name: args.name, arguments: routedArgs, agent: args.agent ?? null });
     }
     if (name === 'browser_failure_help') return failureHelp(args, { readOnly: TOOLS.find(item => item.name === args.attemptedAction)?.annotations?.readOnlyHint === true });
+    // Locate is a read coordinator, not a new privilege: every child read goes
+    // back through call() and is therefore governed a second time, so an agent
+    // whose policy denies browser_find_text cannot reach it through locate.
+    if (name === 'browser_locate') {
+      const routing = {
+        ...(typeof args.agent === 'string' && args.agent.trim() ? { agent: args.agent } : {}),
+        ...(typeof args.hostId === 'string' ? { hostId: args.hostId } : {})
+      };
+      return resolveTarget({
+        args,
+        store: getLocalStore(),
+        callTool: (toolName, toolArgs) => call(toolName, { ...toolArgs, ...routing }, owner, context)
+      });
+    }
     // Answered locally through UI Automation: the error list has no extension
     // API, and a read must not wait on the extension socket it is diagnosing.
     if (name === 'browser_extension_errors' && args.action === 'read') return extensionErrorsReadCall(args);
@@ -2269,6 +2311,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     listen: () => new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, '127.0.0.1', () => resolve(server.address())); }),
     close: async () => { 
       stopped = true; 
+      try { localStore?.close(); } catch { /* an unreadable ledger cannot block shutdown */ }
       leases.flush(); 
       if (lease) tasks.cancel(); 
       if (queueCleanupInterval) clearInterval(queueCleanupInterval);

@@ -12,9 +12,9 @@
 // renamed or removed.
 
 export const TOOL_GROUPS = [
-  { id: 'read', purpose: '读页面、读元素、拿 ref；扫不到就 eval', tools: [
+  { id: 'read', purpose: '读页面、定位元素、拿 ref；扫不到就 eval', tools: [
     'browser_at', 'browser_read', 'browser_eval', 'browser_observe', 'browser_ax_snapshot', 'browser_find_text',
-    'browser_find_element', 'browser_shadow_tree', 'browser_frames', 'browser_performance',
+    'browser_find_element', 'browser_locate', 'browser_shadow_tree', 'browser_frames', 'browser_performance',
     'browser_wait_for_selector'
   ] },
   { id: 'act', purpose: '点、填、选、按键、滚动', tools: [
@@ -42,7 +42,7 @@ export const TOOL_GROUPS = [
     'browser_otp_fetch', 'browser_identity', 'browser_cookies', 'browser_cookies_write',
     'browser_storage_read', 'browser_storage_write'
   ] },
-  { id: 'capture', purpose: '截图、PDF打印保存、整页MHTML保存、剪贴板、模拟与注入', tools: [
+  { id: 'capture', purpose: '截图、PDF/MHTML保存、剪贴板、模拟、注入', tools: [
     'browser_screenshot', 'browser_pdf_save', 'browser_save_page', 'browser_clipboard',
     'browser_clipboard_write', 'browser_emulation', 'browser_init_script'
   ] },
