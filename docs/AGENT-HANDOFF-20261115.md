@@ -132,8 +132,8 @@
 
 ### P1 — 需排期的实现缺口（`TROUBLESHOOTING-MATRIX.md` §4「仍未落地的诊断缺口」）
 
-统一错误码表（`HOST_FLAPPED` / `TAB_OCCLUDED` / `CSP_BLOCKED` / `DEBUGGER_STUCK` / `TARGET_GONE` / `TIMEOUT_UNKNOWN`）；`operationId` + `browser_operation_status` 只读状态查询；hosts 的 `reconnectCount` / `disconnectReason` / `lastSeen` / `flapRate`；`browser_debugger action:"recover"` 与 SW 启动残留 attach 自检；`hostId:tabKey` 稳定跨宿主引用与 `browser_tabs_hung`；`doctor` 的强 CSP 编辑器探针。
-> 当前已有**零散但真实**的 reason（`eval_blocked_by_page_csp`、`devtools_already_attached`、`tab_paused_by_debugger` 等），不要写成「从零建可观测性」。以上六项**均未实现**，别写成已有能力。
+~~统一错误码表~~：**0.46.0 已实现**（`src/error-codes.js`，六个族 + `ERROR_CODE_GUIDE`；服务 `finish()` 统一附加且不覆盖生产方 code；扩展看门狗超预算时先用 tab/窗口证据自报；`browser_dialog wait` 在隐藏标签直接返回 `TAB_OCCLUDED`）。仍未实现：`operationId` + `browser_operation_status` 只读状态查询；hosts 的 `reconnectCount` / `disconnectReason` / `lastSeen` / `flapRate`；`browser_debugger action:"recover"` 与 SW 启动残留 attach 自检；`hostId:tabKey` 稳定跨宿主引用与 `browser_tabs_hung`；`doctor` 的强 CSP 编辑器探针。
+> 当前已有**零散但真实**的 reason（`eval_blocked_by_page_csp`、`devtools_already_attached`、`tab_paused_by_debugger` 等），错误码只是在其上附加稳定族、不改写原文。除统一错误码外，其余五项**均未实现**，别写成已有能力。
 
 ### P2 — 需人决定的处置项（均非现症）
 

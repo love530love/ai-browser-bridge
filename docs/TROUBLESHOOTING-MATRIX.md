@@ -70,7 +70,7 @@
 
 用户 2026-11-14 确认的推进范围是「只落文档」，以下**未实现**，不要写成已有能力：
 
-- 统一错误码表 `HOST_FLAPPED` / `TAB_OCCLUDED` / `CSP_BLOCKED` / `DEBUGGER_STUCK` / `TARGET_GONE` / `TIMEOUT_UNKNOWN`。当前是零散但真实存在的 `eval_blocked_by_page_csp`、`devtools_already_attached`、`tab_paused_by_debugger`、`injection_failed`、`debugger_channel_failed` 等 reason。
+- ~~统一错误码表~~：**0.46.0 已落地**。`src/error-codes.js` 定义 `HOST_FLAPPED` / `TAB_OCCLUDED` / `CSP_BLOCKED` / `DEBUGGER_STUCK` / `TARGET_GONE` / `TIMEOUT_UNKNOWN`，服务 `finish()` 统一附加且不覆盖生产方自报的 code；扩展看门狗在超预算时先用 tab/窗口证据回答，服务侧超时只表示扩展没回话；`ERROR_CODE_GUIDE` 给出 `retryPolicy`（`read_only` / `never`）与下一步。原因文本（`eval_blocked_by_page_csp`、`devtools_already_attached`、`tab_paused_by_debugger` 等）保持不变，错误码只是可分支的稳定族。隐藏标签的 `browser_dialog wait` 直接返回 `TAB_OCCLUDED` / `dialog_suppressed_in_background_tab`，不再空等。
 - `operationId` + `browser_operation_status` 只读状态查询（全仓除现场报告外零命中）。
 - hosts 的 `reconnectCount` / `disconnectReason` / `lastSeen` / `flapRate`。
 - `browser_debugger action:"recover"` 与 SW 启动时的残留 attach 自检。

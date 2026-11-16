@@ -42,7 +42,8 @@ const RULES = [
   ] },
   { code: ERROR_CODES.TAB_OCCLUDED, patterns: [
     /tab_occluded/, /page_not_foreground/, /document_hidden/, /tab_inactive/,
-    /window_not_focused/, /clipboard_needs_visible_document/, /hidden document/i
+    /window_not_focused/, /clipboard_needs_visible_document/, /hidden document/i,
+    /dialog_suppressed_in_background/
   ] },
   { code: ERROR_CODES.TIMEOUT_UNKNOWN, patterns: [
     /read_timeout/, /command_timeout/, /page_timeout/, /timed? ?out/i,
@@ -85,8 +86,8 @@ export const ERROR_CODE_GUIDE = Object.freeze({
   },
   TAB_OCCLUDED: {
     family: 'visibility', retryPolicy: 'read_only',
-    meaning: 'The document was hidden (inactive tab or minimized window) when a path that needs painted frames timed out.',
-    nextAction: 'Retry the read once; DOM and CDP reads normally work in a background tab. Do not activate windows or tabs to make automation succeed. If the path still cannot produce frames, ask the human to bring the tab forward or use a desktop capture route.'
+    meaning: 'The document was hidden (inactive tab or minimized window) when a path that needs painted frames, a visible clipboard document or a browser-shown dialog could not proceed.',
+    nextAction: 'Retry the read once; DOM and CDP reads normally work in a background tab. Do not activate windows or tabs to make automation succeed. If the path still cannot produce frames, a hidden-tab JavaScript dialog has to be shown, or the clipboard needs a visible document, ask the human to bring the tab forward once, then retry.'
   },
   CSP_BLOCKED: {
     family: 'policy', retryPolicy: 'never',

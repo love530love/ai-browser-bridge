@@ -63,11 +63,17 @@ function makeContext(site) {
     notes: [],
     writes: [],
     note(message) { if (message) ctx.notes.push(message); },
-    async attempt(name, args = {}) {
+    async attempt(name, args = {}, { injectTab = true } = {}) {
       ctx.steps++;
       const at = Date.now();
       try {
-        const result = await call(name, { ...(ctx.tabId !== null ? { tabId: ctx.tabId } : {}), ...args });
+        // Not every tool takes a tabId: the download tools answer from the
+        // browser's download manager and reject the argument, which used to fail
+        // the whole probe under a status of no_status.
+        const result = await call(name, {
+          ...(ctx.tabId !== null && injectTab ? { tabId: ctx.tabId } : {}),
+          ...args
+        });
         return { ok: true, result, ms: Date.now() - at };
       } catch (error) {
         ctx.note(`${name} failed: ${error.message}`);
@@ -264,12 +270,27 @@ const TASKS = [
         expression: "fetch('/surface/ping').then(() => document.getElementById('confirm').click()); 'scheduled'"
       });
       if (!scheduled.ok) return { note: `trigger failed: ${scheduled.error}` };
-      let answered = await ctx.write('browser_dialog', { action: 'wait', accept: true, timeoutMs: 12000 });
+      const answered = await ctx.write('browser_dialog', { action: 'wait', accept: true, timeoutMs: 12000 });
+      if (answered.result?.code === 'TAB_OCCLUDED'
+          || answered.result?.reason === 'dialog_suppressed_in_background_tab') {
+        // Chrome suppresses JavaScript dialogs in a hidden tab: confirm()
+        // returned without showing anything, so there is no dialog to answer and
+        // no write to record. Score the refusal's honesty, not a write that the
+        // platform makes impossible without the foreground.
+        await sleep(400);
+        const alive = await ctx.attempt('browser_eval', { mode: 'read', expression: '1+1' });
+        const pageWritable = alive.ok && alive.result?.value === 2;
+        return {
+          skipped: pageWritable,
+          recovered: false,
+          note: `background=${answered.result.reason} pageResponsive=${pageWritable}`
+        };
+      }
       let recovered = false;
       if (answered.result?.status !== 'success') {
         recovered = true;
         await ctx.attempt('browser_dialog', { action: 'status' });
-        answered = await ctx.write('browser_dialog', { action: 'handle', accept: true });
+        await ctx.write('browser_dialog', { action: 'handle', accept: true });
       }
       let seen = false;
       for (let i = 0; i < 10; i++) {
@@ -355,20 +376,33 @@ async function probeDownload(site, ctx) {
   // manual check that already has a human gesture.
   await ctx.open(`/surface/report?surface=${++probeSeq}`);
   const name = `bridge-bench-report-${Date.now()}.pdf`;
-  const before = await ctx.attempt('browser_downloads', { query: 'bridge-bench-report', limit: 20 });
+  const before = await ctx.attempt('browser_downloads', { query: 'bridge-bench-report', limit: 20 }, { injectTab: false });
   const known = new Set((before.result?.downloads ?? []).map(row => row.id));
   const printed = await ctx.attempt('browser_pdf_save', { filename: name });
+  // The downloadId is the anchor: Chrome does not keep the requested name for a
+  // data-URL download (measured: it lands as "download (n).pdf"), so selecting a
+  // row by filename only ever works by accident.
   let item = Number.isInteger(printed.result?.downloadId)
-    ? { id: printed.result.downloadId, filename: printed.result.filename ?? null }
+    ? { id: printed.result.downloadId, filename: null }
     : null;
   for (let i = 0; i < 40 && !item; i++) {
     await sleep(300);
-    const list = await ctx.attempt('browser_downloads', { query: 'bridge-bench-report', limit: 20 });
+    const list = await ctx.attempt('browser_downloads', { query: 'bridge-bench-report', limit: 20 }, { injectTab: false });
     item = (list.result?.downloads ?? []).find(row => !known.has(row.id) && /\.pdf$/i.test(String(row.filename ?? ''))) ?? null;
   }
-  if (!item) return { id: 'download', status: 'not_found', ok: false, detail: `no download row (print=${statusOf(printed)})` };
-  const waited = await ctx.attempt('browser_download_wait', { downloadId: item.id, timeoutMs: 12000 });
-  const download = waited.result?.download ?? item;
+  if (!item) {
+    return {
+      id: 'download', status: 'not_found', ok: false,
+      detail: `no download row (print=${statusOf(printed)}${printed.error ? ` printError=${printed.error}` : ''})`
+    };
+  }
+  const waited = await ctx.attempt('browser_download_wait', { downloadId: item.id, timeoutMs: 12000 }, { injectTab: false });
+  let download = waited.result?.download ?? null;
+  if (!download?.filename) {
+    const byId = await ctx.attempt('browser_downloads', { downloadId: item.id }, { injectTab: false });
+    download = (byId.result?.downloads ?? [])[0] ?? download;
+  }
+  download = download ?? item;
   let magic = null;
   let deleted = false;
   let deleteError = null;
@@ -381,13 +415,13 @@ async function probeDownload(site, ctx) {
   } catch (error) {
     deleteError = error.message;
   }
-  const complete = waited.result?.status === 'success' && download.state === 'complete';
+  const complete = download.state === 'complete';
   return {
     id: 'download',
-    status: waited.result?.status ?? 'no_status',
+    status: waited.result?.status ?? download.state ?? 'no_status',
     ok: complete && magic === '%PDF-' && deleted,
     deleted,
-    detail: `print=${statusOf(printed)} state=${download.state} magic=${magic ?? 'none'} fileExists=${download.exists ?? waited.result?.fileExists} deleted=${deleted}${deleteError ? ` deleteError=${deleteError}` : ''}`
+    detail: `print=${statusOf(printed)} wait=${statusOf(waited)} state=${download.state} magic=${magic ?? 'none'} fileExists=${download.exists ?? waited.result?.fileExists} deleted=${deleted}${deleteError ? ` deleteError=${deleteError}` : ''}${waited.error ? ` waitError=${waited.error}` : ''}`
   };
 }
 
@@ -445,6 +479,8 @@ async function runOne(task) {
     task: task.id,
     intent: task.intent,
     oracleOk: ok,
+    skipped: outcome.skipped === true,
+    skipReason: outcome.skipped ? outcome.note : null,
     firstWrite: ctx.writes[0] ? { tool: ctx.writes[0].tool, status: ctx.writes[0].status, verified: ctx.writes[0].verified } : null,
     recovered: Boolean(outcome.recovered),
     falseSuccess: !ok && claimed.length > 0,
@@ -459,7 +495,7 @@ async function runOne(task) {
     note: [outcome.note, ...ctx.notes].filter(Boolean).join('; ')
   };
   rows.push(row);
-  step(`${task.id}: oracle=${row.oracleOk} first=${row.firstWrite?.tool ?? 'none'}/${row.firstWrite?.status ?? '-'} recovered=${row.recovered} falseSuccess=${row.falseSuccess} steps=${row.steps} foreground=${row.foregroundChanged}${row.note ? ` (${row.note})` : ''}`);
+  step(`${task.id}: oracle=${row.skipped ? 'skipped' : row.oracleOk} first=${row.firstWrite?.tool ?? 'none'}/${row.firstWrite?.status ?? '-'} recovered=${row.recovered} falseSuccess=${row.falseSuccess} steps=${row.steps} foreground=${row.foregroundChanged}${row.note ? ` (${row.note})` : ''}`);
   if (!row.oracleOk) step(`    observed ${row.observed.slice(0, 240)}`);
   return row;
 }
@@ -514,8 +550,12 @@ const recoveredRows = writeRows.filter(row => row.recovered);
 const invariants = [
   {
     name: 'every surface produced the write the server recorded',
-    check: () => writeRows.length === TASKS.length && writeRows.every(row => row.oracleOk === true),
-    detail: () => writeRows.map(row => `${row.task}=${row.oracleOk}`).join(' ')
+    // A skipped surface is only acceptable as a structured background refusal:
+    // no verified claim, and the reason is recorded. It is never counted as a
+    // success.
+    check: () => writeRows.length === TASKS.length && writeRows.every(row =>
+      row.oracleOk === true || (row.skipped === true && row.claimedVerifiedWrites === 0)),
+    detail: () => writeRows.map(row => `${row.task}=${row.oracleOk}${row.skipped ? '(skipped)' : ''}`).join(' ')
   },
   {
     name: 'no write claimed a verified success the server did not see',
@@ -536,8 +576,8 @@ const invariants = [
   },
   {
     name: 'a guarded recovery did not duplicate the overlay or dialog write',
-    check: () => overlay?.oracleOk === true && dialog?.oracleOk === true,
-    detail: () => `overlay=${overlay?.oracleOk} dialog=${dialog?.oracleOk} recovered=${recoveredRows.map(row => row.task).join(',') || 'none'}`
+    check: () => overlay?.oracleOk === true && (dialog?.oracleOk === true || dialog?.skipped === true),
+    detail: () => `overlay=${overlay?.oracleOk} dialog=${dialog?.oracleOk}${dialog?.skipped ? '(skipped)' : ''} recovered=${recoveredRows.map(row => row.task).join(',') || 'none'}`
   },
   {
     name: 'OCR never claimed text it did not read',
@@ -560,7 +600,7 @@ console.log('task            | oracle | first write              | recovered | f
 console.log('----------------|--------|--------------------------|-----------|---------------|-------|----');
 for (const row of writeRows) {
   const first = row.firstWrite ? `${row.firstWrite.tool}/${row.firstWrite.status}` : 'none';
-  console.log(`${row.task.padEnd(15)} | ${String(row.oracleOk).padEnd(6)} | ${first.padEnd(24)} | ${String(row.recovered).padEnd(9)} | ${String(row.falseSuccess).padEnd(13)} | ${String(row.steps).padStart(5)} | ${row.foregroundChanged}`);
+  console.log(`${row.task.padEnd(15)} | ${(row.skipped ? 'skipped' : String(row.oracleOk)).padEnd(6)} | ${first.padEnd(24)} | ${String(row.recovered).padEnd(9)} | ${String(row.falseSuccess).padEnd(13)} | ${String(row.steps).padStart(5)} | ${row.foregroundChanged}`);
 }
 for (const probe of probes) {
   console.log(`probe ${probe.id.padEnd(10)} | ok=${probe.ok} status=${probe.status} ${probe.detail ?? ''}`);
@@ -579,6 +619,7 @@ try {
     totals: {
       tasks: writeRows.length,
       oracleOk: writeRows.filter(row => row.oracleOk).length,
+      skipped: writeRows.filter(row => row.skipped).length,
       steps: writeRows.reduce((sum, row) => sum + row.steps, 0),
       recovered: recoveredRows.length,
       falseSuccess: totalFalseSuccess,

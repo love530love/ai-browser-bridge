@@ -68,6 +68,22 @@ test('a dialog answer reports that it is dispatched but not verified', async () 
   assert.match(result.note, /debugging banner/);
 });
 
+test('waiting in a hidden tab is refused by name instead of waiting out the budget', async () => {
+  const { advanced, env, opened } = await load();
+  env.chrome.tabs = { get: async () => ({ id: 5, windowId: 3, active: false }) };
+  env.chrome.windows = { get: async () => ({ id: 3, state: 'normal', focused: false }) };
+  const at = Date.now();
+  const result = await advanced.run('browser_dialog', { action: 'wait', timeoutMs: 5000 }, ctx());
+  assert.equal(result.status, 'not_dispatched');
+  assert.equal(result.code, 'TAB_OCCLUDED');
+  assert.equal(result.reason, 'dialog_suppressed_in_background_tab');
+  assert.equal(result.dialogSeen, false);
+  assert.equal(result.background.tabActive, false);
+  assert.deepEqual(opened, [], 'a refusal must not put a debugging banner on the tab');
+  assert.ok(!env.sent.some(item => item.method === 'Page.handleJavaScriptDialog'));
+  assert.ok(Date.now() - at < 1000, 'the refusal must not wait out timeoutMs');
+});
+
 test('waiting for a dialog that never opens says so instead of claiming success', async () => {
   const { advanced } = await load();
   const result = await advanced.run('browser_dialog', { action: 'wait', timeoutMs: 200 }, ctx());

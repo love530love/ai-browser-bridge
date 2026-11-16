@@ -6,7 +6,7 @@
 
 ## 2026-11-15 当前转向与已落地增量
 
-当前源码版本以 `package.json` 与 `git HEAD` 为准（2026-11-16 工作树为 0.45.0，尚未部署；运行服务与扩展仍为 0.43.0）。以下条目是**当前方向**；更早的 0.5.x 章节保留为历史记录，其中“当前版本/候选验收”等表述已过时。
+当前源码版本以 `package.json` 与 `git HEAD` 为准（2026-11-16 工作树为 **0.46.0**，已部署：服务 pid 66844 / buildId `e8c61b9f…`，两个宿主扩展均为 0.46.0）。以下条目是**当前方向**；更早的 0.5.x 章节保留为历史记录，其中“当前版本/候选验收”等表述已过时。
 
 - **Agent 优先战略**：见 [AGENT-FIRST-STRATEGY-2026.md](AGENT-FIRST-STRATEGY-2026.md)。目标是最强、最稳的浏览器操控基座：能力开放、弱 Agent 可走确定性最小路径、模型完全可选、证据可审计。
 - **多宿主目标认定**：`browser_hosts` 新增 `recommendedHostId` / `defaultHostId` / `selectionRequired` / `selectionReason`；无 `hostId` 命令跟随推荐宿主，系统 Chrome 优先于 `generic`，`agent_embedded` 排最后；显式 `hostId` 永不迁移。见 [MULTI-HOST-TARGETING.md](MULTI-HOST-TARGETING.md)。
@@ -15,16 +15,17 @@
 - **旁路门禁**：CDP 只读探针、UIA、视觉、Playwright 门禁的进入条件与失败语义统一记录在 [FALLBACK-CHANNELS.md](FALLBACK-CHANNELS.md)。
 - **开源能力雷达**：OCR、页面元素识别、正文提取的许可证与复刻优先级见 [OPEN-SOURCE-CAPABILITY-RADAR.md](OPEN-SOURCE-CAPABILITY-RADAR.md)；默认不捆绑模型权重。
 
-### 2026-11-16 已落地增量（P1–P3，工作树，未部署）
+### 2026-11-16 已落地增量（P1–P4，已部署 0.46.0）
 
 - **P1 感知兜底**：`browser_ocr`（Windows.Media.Ocr 本地后端，无权重/无网络，行框/CSS/0..1000 坐标，无 ref、文本不入账本）；`browser_capabilities.perception` 与本地账本 `ocr_runs` 同步。
 - **P2 深度感知**：`browser_script_inventory`（Sources 文件列表）、`browser_source_map`（索引映射/原始位置/sourceIndex 预览）、`browser_event_listeners`（监听器接线证据）、`browser_dom_snapshot`（含 open shadow root 的有界结构树）、`browser_framework_tree`（React/Vue/Angular/Svelte 组件树）；`browser_network_summary includeTiming:true` 增加 Resource Timing 瀑布。全部只读、不返回 ref。
 - **P3 弱 Agent 引导**：`browser_agent_advice`（service-local、只读、永不入队）把队列/车道/租约/维护/宿主元数据转成单个 `decision` + `estimatedWaitMs` + `blockers` + `nextStep`；`browser_local_judge mode:"triage"` 只接收元数据；`src/local-model.js` 可选 loopback OpenAI 兼容小模型，最多 2 并发、严格 JSON、失败降级，模型只能增加谨慎。详见 [AGENT-FIRST-STRATEGY-2026.md](AGENT-FIRST-STRATEGY-2026.md) §6–§7。
-- 验收：全量 `npm test` **1031/1031**（exit 0）；P3 定向 39/39；P2 定向 15/15。未部署、未重载扩展、未做真实页面高并发基准。
+- **P4 跨页面基准与发布**：`test/bench/surfaces.js` + `surfaces-run.js` 覆盖 shadow DOM、iframe、无 role 卡片、虚拟列表、遮挡浮层、原生对话框、HTML5 拖拽、canvas、source map、打印下载十个表面；以服务端写记录为唯一判据，输出首击成功率、恢复次数、`false_success`、前台变化、步骤与耗时，8 条不变量、退出码 0/1/2。统一失败错误码（`src/error-codes.js`：`HOST_FLAPPED` / `TAB_OCCLUDED` / `CSP_BLOCKED` / `DEBUGGER_STUCK` / `TARGET_GONE` / `TIMEOUT_UNKNOWN`）与扩展超时看门狗同版落地；`browser_dialog wait` 在隐藏标签上以 `TAB_OCCLUDED` 立即拒绝（实测 6ms）。真机跑分 **8/8 不变量、EXIT=0、52.1s**，`false_success=0`，前台变化 0；6/7 表面命中服务端写，对话框按平台行为结构化跳过。
+- 验收：全量 `npm test` **1074/1074**（exit 0，0.46.0）；真机基准与部署证据见 [CHANGELOG.md](../CHANGELOG.md) 0.46.0 段。
 
 ### 下一阶段优先级（2026-11-16 起）
 
-1. P4 跨页面基准与真实高并发压测：用失败样本回归 P2/P3 建议质量，验证 `estimatedWaitMs` 误差与模型降级路径。
+1. 真实网站语料与高并发压测：把本地十表面基准扩展到真实站点，验证 `estimatedWaitMs` 误差、模型降级路径与长时后台稳定性。
 2. `browser_visual_elements`：移植非文本 CV 元素检测，补 Canvas/图片页定位。
 3. OCR 多 provider 插拔（`rapidocr|tesseract|external`），默认不下载权重。
 4. `browser_read mode:"main"`：移植 Readability 正文提取，保留证据边界。

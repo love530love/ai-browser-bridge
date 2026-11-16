@@ -1,6 +1,6 @@
-# 已知限制与硬边界（0.40.0）
+# 已知限制与硬边界（0.40.0 基线，§1 更新至 0.46.0）
 
-- 适用版本：**0.40.0**（`main`，HEAD `3f69ec1`）。本文只描述**当前源码能复核到的事实**，不描述路线图。
+- 适用版本：**0.46.0**（`main`，HEAD 以 `git log -1` 为准）。本文主体写于 0.40.0；§1 的可见性与错误码结论已于 0.46.0 按真机证据更新。
 - 来源：汇总 `docs/FIELD-REPORT-20261114-csdn-autopublish-blockers.md` 第 5.8 节的诉求，与 `README.md` / `CHANGELOG.md` / `src/capability-guide.js` 中分散的边界说明。
 - 用法：遇到异常先查 [排障矩阵](TROUBLESHOOTING-MATRIX.md)；本文回答「哪些事本来就不该指望桥去做、或者需要额外前提」。
 
@@ -23,7 +23,7 @@
 
 因此「给 `browser_open` 加 `focusWindow:true` 且默认自动聚焦」**不是修复建议**：它会与上述约定冲突。若确实需要用户看到窗口，请显式调用 `browser_windows_control` 并自行承担确认。
 
-**若现场观察到「前台正常、后台全超时」**：先按排障矩阵 §1 #1 查 `tab_paused_by_debugger`，再查宿主连通性，不要直接归因遮挡。当前代码里已有 `window_not_focused` / `document_hidden` / `document_unfocused` 三个 advisory（`extension/worker.js:922-924`）与 `evidenceQuality: 'stale-frame-possible'` 提示，但没有统一的 `TAB_OCCLUDED` 错误码。
+**若现场观察到「前台正常、后台全超时」**：先按排障矩阵 §1 #1 查 `tab_paused_by_debugger`，再查宿主连通性，不要直接归因遮挡。`window_not_focused` / `document_hidden` / `document_unfocused` 三个 advisory 与 `evidenceQuality: 'stale-frame-possible'` 仍然存在；0.46.0 起，结构化失败会附统一错误码（`src/error-codes.js`，可见性族为 `TAB_OCCLUDED`），扩展看门狗在命令超预算时先用 tab/窗口证据自报，服务侧超时从此只表示「扩展没回话」。**后台标签的 JavaScript 对话框由 Chrome 直接压掉**：实测 `confirm()` 立即返回、渲染进程不冻结、页面评估照常，所以 `browser_dialog action:"wait"` 会在隐藏文档上立即返回 `reason:"dialog_suppressed_in_background_tab"` + `code:"TAB_OCCLUDED"`（实测 6ms），而不是空等超时；要真正显示并回答对话框，必须由人类把该标签切到前台一次，桥不会自行激活标签。
 
 ---
 

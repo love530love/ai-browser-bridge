@@ -4,6 +4,33 @@
 
 ## 目标
 
+## 2026-11-16 接手增量（0.46.0，已部署）：统一失败错误码 / 页面 DOM 脚本兜底 / P4 跨页面基准
+
+触发：P3 之后要求用真实页面表面验收「后台也能驱动、失败可分支、绝不假成功」。基准第一次跑就抓到三个真问题：Chrome 156 的 `Debugger.enable` replay 漏报主世界页面脚本；后台标签里 `confirm()` 被 Chrome 静默压掉，调用方只能干等到超时；下载探针把 `tabId` 传给不接受它的下载工具。
+
+### 交付内容
+
+- **统一失败错误码（P1 第一项）**：新增 `src/error-codes.js`。六个族 `HOST_FLAPPED` / `TAB_OCCLUDED` / `CSP_BLOCKED` / `DEBUGGER_STUCK` / `TARGET_GONE` / `TIMEOUT_UNKNOWN` 按证据顺序分类（CSP → 调试器 → 目标消失 → 宿主断连 → 可见性 → 超时），`codeForReason` 只从已观察到的 reason 文本归类、不改写原文；`applyErrorCode` 在服务 `finish()` 统一附加且**不覆盖**生产方自报的 code；`ERROR_CODE_GUIDE` 给每族 `retryPolicy`（`read_only` / `never`）与下一步。扩展侧新增超时看门狗（`executeWithBudget` / `classifyCommandTimeout`）：命令超预算时先用 tab/窗口级证据自报（不注入页面），服务侧超时从此只表示「扩展没回话」。`test/error-codes.test.js` 覆盖分类优先级与不覆盖语义。
+- **页面 DOM 脚本兜底**：`extension/deep-perception.js` 的 `browser_script_inventory` / `browser_source_map` 在 CDP 清单之外合并 `document.scripts`（主世界注入一次，有界），新增 `pageScriptCount` / `cdpScriptCount` / `script.source:"page_dom"`。按 URL 选中页面脚本时用扩展 fetch 取文本，以 `sourceMapUrlFromScriptText` 取最后一个 `sourceMappingURL`（`//#` 与 `//@` 都支持）再解析 map；截断的 inline map 报 `partial` 而不是按前缀解析。
+- **P4 跨页面基准（`test/bench/surfaces.js` + `surfaces-run.js`）**：本地 fixture 十个表面（shadow DOM、iframe 表单、无 role 卡片、虚拟列表、遮挡浮层、原生 `confirm()`、HTML5 拖拽、canvas 文字、source map、打印下载），**服务端写记录是唯一判据**。输出首击成功率、恢复次数、`false_success`（验证成功但服务端无写）、每任务与全局前台变化、步骤数与耗时；8 条不变量、退出码 `0=全过 / 1=不变量破 / 2=环境阻塞`（扩展版本与源码不一致直接拒绝跑）。结构化后台拒绝（`skipped` 且 `claimedVerifiedWrites === 0`）是唯一可接受的跳过形态。
+- **后台对话框结构化拒绝**：`browser_dialog action:"wait"` 在文档隐藏（标签非激活或窗口最小化）时不再等满 `timeoutMs`，直接返回 `status:"not_dispatched"`、`reason:"dialog_suppressed_in_background_tab"`、`code:"TAB_OCCLUDED"`，附 tab/window 证据与「需要人类把标签切到前台一次」的下一步；该路径不打开调试会话（不挂横幅）。真机实测拒绝耗时 **6 ms**（原为 12203 ms 空等）。
+- **下载探针按 `downloadId` 记分**：data URL 下载不保留请求文件名（实测落成 `download (n).pdf`），基准改以 `browser_pdf_save` 返回的 `downloadId` 为锚点，`browser_download_wait` 读真实路径，校验 `%PDF-` 魔数并只删除本次创建的文件；下载工具不再被塞 `tabId`。
+
+### 验收状态（接手必复核）
+
+- 全量 `npm test` → **1074/1074**（exit 0，0 fail，约 132s，0.46.0）。
+- **已部署（2026-11-16 22:07–22:24 本地）**：`restart-service-when-idle --apply` intent `1a87f5b1…` → 服务 0.46.0（pid 16096）；收尾修复后再次 intent `f71db9ea…` → pid **66844**，buildId **`e8c61b9f…`** 与磁盘一致。两个宿主均 `chrome.runtime.reload` 到扩展 0.46.0（`foregroundTaken:false`）：`h-0b47a521c4384e90beb4`（系统 Chrome）与 `h-b76b872f85d347a49e00`（ChatGPT 内嵌，`hostKindObserved:"agent_embedded"`）。
+- **真机基准 `node test/bench/surfaces-run.js` → 8/8 不变量、EXIT=0、52.1s**：7 个表面里 6 个命中服务端写；`native-dialog` 以 `TAB_OCCLUDED` 结构化跳过（页面仍可读、`pageResponsive:true`，不记为成功）；`false_success=0`；前台变化 **0**（全局 `active false→false`、`windowFocused false→false`、`visibility hidden→hidden`）；拖拽自动路径降级后仅一次合成恢复，服务端写仍为 1；OCR 读到 3 行并含 `7319`；source map 经 `page_fetch` 解析到 `src/app.ts`；下载 `state=complete`、`%PDF-`、本次文件已删除。
+- 部署后复验：`upgrade-check` 全 `ok:true`；`doctor-lite.bat` 退出 0（4 通过 / 0 失败 / 2 未知）；`doctor.bat` 退出 0 且 `version-match` 通过；`heartbeat --no-remediate` → `verdict:"clean"`、`provenClean:true`、`findings:[]`；`restart-service-when-idle` 只读预检 → `status:"not_needed"`。
+- 未推送远端、未打 tag/Release。
+
+### 已知边界
+
+- 隐藏标签里的 JavaScript 对话框由 Chrome 直接压掉（`confirm()` 立刻返回默认值，渲染进程不冻结），后台不可能让它「显示出来」；要真正回答对话框必须由人类把标签切到前台一次，桥不会自行激活标签。基准只验收拒绝的诚实性。
+- 下载文件名来自 Chrome 的 data URL 命名规则，不能作为判据；判据是 `downloadId`、`state`、`%PDF-` 与删除动作。
+- 基准 fixture 是固定的本地十表面语料，不是任意网站的通用通过率；`surfaces-run.json` 是本地运行产物（已 gitignore），不随仓库分发。
+- 统一错误码之外，P1 其余五项（`operationId` + `browser_operation_status`、hosts 翻转统计、`browser_debugger action:"recover"`、`hostId:tabKey` / `browser_tabs_hung`、`doctor` 强 CSP 探针）仍未实现。
+
 ## 2026-11-16 接手增量（0.45.0，已部署）：部署陈旧可见 / 空闲门控重启 / 自启纳管
 
 触发：另一台 Windows 11 笔记本（love-PC，0.37.4 → 0.42.3）的安装部署与热更新反馈，已固化为用户级技能 `ai-browser-bridge-upgrade`。反馈中的 P1-1 / P1-2 / P2-3 / P2-4 / P2-5 / P2-6 全部落地，未削弱 `-Heartbeat` 既有安全门控。
