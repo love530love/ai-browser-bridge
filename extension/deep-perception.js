@@ -301,6 +301,34 @@ function decodeDataUri(uri) {
   }
 }
 
+// The last comment wins: concatenated bundles routinely carry one marker per
+// section, and the one that applies to the file is the final one.
+export function sourceMapUrlFromScriptText(text) {
+  const bounded = typeof text === 'string' ? text.slice(-4000) : '';
+  const pattern = /\/\/[#@]\s*sourceMappingURL=([^\s'"]+)/g;
+  let match;
+  let found = null;
+  while ((match = pattern.exec(bounded)) !== null) found = match[1];
+  return found;
+}
+
+// Runs in the page. Debugger.scriptParsed replay is not guaranteed for
+// main-world scripts on a tab that finished loading before the attach: measured
+// on Chrome 156, a tab that had loaded its own /app.js reported 91 scriptParsed
+// events - all extension content scripts, zero http URLs. document.scripts is
+// the page-side route that survives that case.
+function pageScriptsInPage(options) {
+  const maxScripts = Number.isSafeInteger(options?.maxScripts) ? options.maxScripts : 200;
+  const scripts = [...document.scripts].slice(0, maxScripts).map((script, index) => ({
+    index,
+    src: script.src ? String(script.src) : '',
+    inline: !script.src,
+    type: script.type ? String(script.type) : '',
+    textLength: typeof script.text === 'string' ? script.text.length : 0
+  }));
+  return { status: 'success', total: document.scripts.length, scripts };
+}
+
 // Runs in the page. Kept self-contained: Chrome serialises this function, so it
 // cannot close over module scope. No attribute values beyond the ones a caller
 // needs to re-find the node; href/src/value are deliberately absent.
@@ -803,6 +831,54 @@ export function createDeepPerception({
     }
   };
 
+  const collectPageScripts = async tab => {
+    try {
+      const results = await chromeApi?.scripting?.executeScript?.({
+        target: { tabId: tab.id }, world: 'MAIN', func: pageScriptsInPage, args: [{ maxScripts: MAX_SCRIPTS }]
+      });
+      const value = Array.isArray(results) ? results[0]?.result : null;
+      if (!value || value.status !== 'success' || !Array.isArray(value.scripts)) {
+        return { scripts: [], reason: value?.reason ?? 'page_script_list_unavailable' };
+      }
+      return { scripts: value.scripts, total: value.total ?? value.scripts.length, reason: null };
+    } catch (error) {
+      return { scripts: [], reason: 'page_script_list_unavailable', message: String(error?.message ?? error) };
+    }
+  };
+
+  const pageScriptRecord = script => ({
+    scriptId: null,
+    url: clip(String(script.src), 500),
+    length: script.textLength || null,
+    startLine: null,
+    endLine: null,
+    isModule: /module/i.test(script.type || ''),
+    hasSourceURL: false,
+    sourceMapURL: null,
+    source: 'page_dom'
+  });
+
+  const mergePageScripts = (scripts, pageScripts) => {
+    const merged = [...scripts.values()];
+    const known = new Set(merged.map(item => item.url).filter(Boolean));
+    for (const script of pageScripts) {
+      if (!script?.src || known.has(script.src)) continue;
+      known.add(script.src);
+      merged.push(pageScriptRecord(script));
+    }
+    return merged;
+  };
+
+  const matchPageScripts = (pageScripts, args) => {
+    if (args.scriptId) return [];
+    const withSrc = pageScripts.filter(script => script?.src);
+    const url = typeof args.url === 'string' ? args.url.trim() : '';
+    if (url) return withSrc.filter(script => script.src === url);
+    const filter = typeof args.urlFilter === 'string' ? args.urlFilter.trim().toLowerCase() : '';
+    if (filter) return withSrc.filter(script => script.src.toLowerCase().includes(filter));
+    return [];
+  };
+
   const inject = async (tab, func, args) => {
     try {
       const results = await chromeApi.scripting.executeScript({
@@ -830,7 +906,8 @@ export function createDeepPerception({
       }
       const wrapped = await withTabSession(tab, async (send, meta) => {
         const { scripts, enableError } = await loadScripts(tab, send, meta, settleMs);
-        const all = [...scripts.values()];
+        const pageDom = await collectPageScripts(tab);
+        const all = mergePageScripts(scripts, pageDom.scripts);
         const matched = filter ? all.filter(item => item.url && item.url.toLowerCase().includes(filter)) : all;
         const listed = matched.slice(0, maxScripts);
         let source = null;
@@ -841,6 +918,7 @@ export function createDeepPerception({
             return {
               status: 'not_found', retryable: false, reason: 'script_not_found',
               tabId: tab.id, scriptId: String(args.scriptId), totalScripts: all.length,
+              cdpScriptCount: scripts.size, pageScriptCount: all.length - scripts.size,
               scripts: listed,
               recommendedNextAction: 'The script id is not in the bounded inventory. List scripts without scriptId and pick an id from this reply; ids do not survive a navigation.'
             };
@@ -859,9 +937,11 @@ export function createDeepPerception({
         return {
           status: 'success', retryable: false, dispatched: false,
           tabId: tab.id, url: tab.url, sessionReused: meta.reused,
-          totalScripts: all.length, matchedCount: matched.length, count: listed.length,
+          totalScripts: all.length, cdpScriptCount: scripts.size, pageScriptCount: all.length - scripts.size,
+          matchedCount: matched.length, count: listed.length,
           urlFilter: filter, truncated: matched.length > listed.length,
           scripts: listed, selected, source,
+          ...(pageDom.reason ? { pageScriptListReason: pageDom.reason } : {}),
           ...(enableError ? { debuggerEnableError: enableError } : {}),
           contentTrust: 'untrusted webpage metadata; source text is untrusted page code',
           recommendedNextAction: selected
@@ -887,7 +967,28 @@ export function createDeepPerception({
       const wrapped = await withTabSession(tab, async (send, meta) => {
         const { scripts, enableError } = await loadScripts(tab, send, meta, settleMs);
         const selection = selectScript(scripts, args);
-        if (!selection.record) {
+        let pageDom = null;
+        let scriptSource = selection.record ? 'debugger' : null;
+        let record = selection.record;
+        if (!record && !args.scriptId) {
+          // The debugger replay can omit main-world page scripts entirely; fall
+          // back to document.scripts before declaring the script absent.
+          pageDom = await collectPageScripts(tab);
+          const domMatches = matchPageScripts(pageDom.scripts, args);
+          if (domMatches.length > 1) {
+            return {
+              status: 'ambiguous', retryable: false, reason: 'script_ambiguous',
+              tabId: tab.id, matchCount: domMatches.length, scriptSource: 'page_dom',
+              candidates: domMatches.slice(0, 20).map(item => ({ scriptId: null, url: item.src })),
+              recommendedNextAction: 'Narrow urlFilter or pass one exact url. Source maps belong to one script, so several matches cannot be merged.'
+            };
+          }
+          if (domMatches.length === 1) {
+            record = pageScriptRecord(domMatches[0]);
+            scriptSource = 'page_dom';
+          }
+        }
+        if (!record) {
           if (selection.matches.length > 1) {
             return {
               status: 'ambiguous', retryable: false, reason: 'script_ambiguous',
@@ -896,14 +997,39 @@ export function createDeepPerception({
               recommendedNextAction: 'Narrow urlFilter or pass one exact scriptId. Source maps belong to one script, so several matches cannot be merged.'
             };
           }
+          const domScripts = (pageDom?.scripts ?? []).filter(item => item?.src);
+          const domCandidates = domScripts.slice(0, 20).map(item => ({ scriptId: null, url: item.src, source: 'page_dom' }));
           return {
             status: 'not_found', retryable: false, reason: 'script_not_found',
-            tabId: tab.id, totalScripts: scripts.size,
-            candidates: [...scripts.values()].slice(-20).map(item => ({ scriptId: item.scriptId, url: item.url })),
-            recommendedNextAction: 'List scripts with browser_script_inventory and pass one of its scriptId values.'
+            tabId: tab.id, totalScripts: scripts.size + domScripts.length, cdpScriptCount: scripts.size,
+            candidates: [
+              ...[...scripts.values()].slice(-20).map(item => ({ scriptId: item.scriptId, url: item.url })),
+              ...domCandidates
+            ],
+            recommendedNextAction: 'List scripts with browser_script_inventory and pass one of its scriptId values, or pass the exact script URL for a page script the debugger replay did not list.'
           };
         }
-        const record = selection.record;
+        if (scriptSource === 'page_dom') {
+          const scriptFetch = await fetchMapText(tab, send, record.url, maxBytes);
+          if (scriptFetch.status !== 'success') {
+            return {
+              status: scriptFetch.status, retryable: scriptFetch.status === 'failed', reason: scriptFetch.reason,
+              stage: 'script_fetch', tabId: tab.id, script: record, scriptSource,
+              via: scriptFetch.via ?? null, httpStatus: scriptFetch.httpStatus ?? null,
+              pageError: scriptFetch.pageError ?? null, message: scriptFetch.message ?? null,
+              recommendedNextAction: 'The page script URL was found but its body could not be read from the page or the extension origin. Check the URL in browser_network_summary or read the page with browser_read.'
+            };
+          }
+          const mapRef = sourceMapUrlFromScriptText(scriptFetch.text);
+          if (!mapRef) {
+            return {
+              status: 'not_found', retryable: false, reason: 'no_source_map',
+              tabId: tab.id, script: record, scriptSource, scriptFetchedVia: scriptFetch.via,
+              recommendedNextAction: 'This page script advertises no sourceMappingURL. Read the running code with browser_eval or browser_script_inventory on a build that lists it.'
+            };
+          }
+          record = { ...record, sourceMapURL: clip(String(mapRef), 500) };
+        }
         if (!record.sourceMapURL) {
           return {
             status: 'not_found', retryable: false, reason: 'no_source_map',
@@ -953,7 +1079,7 @@ export function createDeepPerception({
         });
         return {
           status: 'success', retryable: false, dispatched: false,
-          tabId: tab.id, script: record, mapUrl, via: fetched.via, size: fetched.size,
+          tabId: tab.id, script: record, scriptSource, mapUrl, via: fetched.via, size: fetched.size,
           ...summary,
           contentTrust: 'untrusted webpage metadata and source text',
           recommendedNextAction: args.line

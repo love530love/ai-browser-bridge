@@ -11,6 +11,7 @@ import { VERSION } from './version.js';
 import { TOOLS, validateCall } from './tools.js';
 import { createTasks } from './tasks.js';
 import { errorCategory } from './diagnostics.js';
+import { ERROR_CODES, applyErrorCode } from './error-codes.js';
 import { createLeaseStore, LEASE_TOOLS, WRITE_TOOLS } from './leases.js';
 import {
   HostRegistry, CommandLedger, negotiateHandshake, pickDispatchable,
@@ -723,6 +724,10 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   function finish(job, error, result) {
     clearTimeout(job.timer);
     if (job.startedAt) recordDuration(job.name, Date.now() - job.startedAt);
+    // One code per failure, from the shared table. A producing side that
+    // already classified the outcome keeps its own code; this only fills the
+    // gap for legacy results and transport errors.
+    result = applyErrorCode(result, { error });
     if (inFlight.get(job.hostId) === job) inFlight.delete(job.hostId);
     const hostReads = readsInFlight.get(job.hostId);
     if (hostReads?.get(job.id) === job) {
@@ -884,18 +889,25 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     current = job;
     lastAgent = job.args?.agent ?? null;
     host.commandsDispatched += 1;
+    // The extension races the same budget and answers first with a classified
+    // timeout when it can. This timer therefore only fires when the extension
+    // itself is silent (worker gone, socket stalled), and the result says so.
+    const budgetMs = jobTimeoutMs(job.name, job.args);
     job.timer = setTimeout(() => {
       if (readOnly) {
-        finish(job, null, { status: 'waiting', retryable: true, reason: 'read_timeout', tool: job.name, hostId: job.hostId, suggestedDelayMs: 1000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 5000, idle: true }, recommendedNextAction: 'Keep the task alive. Retry the read with mode:"cheap" or smaller budgets; do not treat this as bridge failure.' });
+        finish(job, null, { status: 'waiting', retryable: true, reason: 'read_timeout', code: ERROR_CODES.TIMEOUT_UNKNOWN,
+          stage: 'service_read_timeout_after_extension_silence',
+          evidence: { budgetMs, extensionAnswered: false, hostId: job.hostId },
+          tool: job.name, hostId: job.hostId, suggestedDelayMs: 1000, nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 5000, idle: true }, recommendedNextAction: 'Keep the task alive. The extension did not answer before the budget, so no outcome was observed. Retry the read with mode:"cheap" or smaller budgets; do not treat this as bridge failure.' });
         pump();
         return;
       }
       // An unobserved write is uncertain and non-retryable. Only this host is
       // affected; every peer keeps executing.
-      drop(`${job.name} timed out after ${jobTimeoutMs(job.name, job.args)}ms; outcome may be unknown. Inspect page before retrying.`, { keepQueued: true, hostId: job.hostId });
+      drop(`${job.name} timed out after ${budgetMs}ms with no extension answer; outcome may be unknown. Inspect page before retrying.`, { keepQueued: true, hostId: job.hostId });
       try { host.ws.close(4000, 'Task timeout'); } catch { /* already closed */ }
-    }, jobTimeoutMs(job.name, job.args));
-    host.ws.send(JSON.stringify({ type: 'command', id: job.id, name: job.name, args: dispatchArgs(job), hostId: job.hostId }));
+    }, budgetMs);
+    host.ws.send(JSON.stringify({ type: 'command', id: job.id, name: job.name, args: dispatchArgs(job), hostId: job.hostId, budgetMs, readOnly }));
   }
 
   function pump() {

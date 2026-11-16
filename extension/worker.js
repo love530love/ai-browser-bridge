@@ -175,6 +175,142 @@ async function warmFrames(tab, send, budgetMs = 1500) {
   }
   return { frames, warmed: frames > 0, warmupMs: Date.now() - started, budgetMs };
 }
+// A command that never answers used to surface as a service-side socket
+// timeout: a bare "timed out" with no evidence and no recovery path. This
+// watchdog answers inside the extension's own budget with a code from the
+// shared vocabulary plus the tab/window state that was actually observed.
+//
+// The probe never injects the page. A stalled renderer is exactly the case
+// where injection would hang as well, so the evidence has to come from the
+// browser-level APIs: chrome.tabs.get and chrome.windows.get. That means
+// document.visibilityState is unavailable here; tabActive and windowState are
+// the honest substitutes and are reported as such.
+const PAINT_DEPENDENT_TOOLS = new Set(['browser_screenshot']);
+const TIMEOUT_PROBE_MS = 750;
+
+async function probeTabForTimeout(tabId) {
+  if (!Number.isInteger(tabId) || tabId < 1) return { available: false, reason: 'tab_id_unavailable' };
+  let tab;
+  try { tab = await chrome.tabs.get(tabId); }
+  catch (error) { return { available: false, reason: 'tab_missing', detail: String(error?.message ?? error).slice(0, 200) }; }
+  let windowFocused = null, windowState = null, windowError = null;
+  try {
+    const win = await chrome.windows.get(tab.windowId);
+    windowFocused = win?.focused === true;
+    windowState = typeof win?.state === 'string' ? win.state : null;
+  } catch (error) { windowError = String(error?.message ?? error).slice(0, 200); }
+  return {
+    available: true,
+    tabActive: tab.active === true,
+    tabStatus: tab.status ?? null,
+    discarded: tab.discarded === true,
+    pendingUrl: tab.pendingUrl ?? null,
+    windowId: tab.windowId ?? null,
+    windowFocused, windowState, windowError
+  };
+}
+
+// Pure so the classification can be asserted without Chrome. `hidden` follows
+// Chrome's own visibility rule: an inactive tab or a minimized window produces
+// a hidden document; a merely unfocused window does not.
+function classifyCommandTimeout({ name, readOnly, probe, debuggerPaused, budgetMs, elapsedMs }) {
+  const hidden = Boolean(probe?.available) && (probe.tabActive === false || probe.windowState === 'minimized');
+  const occlusion = probe?.available ? {
+    tabActive: probe.tabActive === true,
+    windowFocused: probe.windowFocused,
+    windowState: probe.windowState,
+    hidden,
+    // Observation, not causation. A background tab normally still answers
+    // DOM/CDP reads, so the code says what was seen, not why the call hung.
+    cause: 'unconfirmed'
+  } : null;
+  let code, reason;
+  if (probe && probe.available === false && probe.reason === 'tab_missing') {
+    code = 'TARGET_GONE'; reason = 'target_gone';
+  } else if (debuggerPaused) {
+    code = 'DEBUGGER_STUCK'; reason = 'tab_paused_by_debugger';
+  } else if (hidden && PAINT_DEPENDENT_TOOLS.has(name)) {
+    code = 'TAB_OCCLUDED'; reason = 'tab_occluded';
+  } else {
+    code = 'TIMEOUT_UNKNOWN'; reason = 'command_timeout';
+  }
+  const evidence = {
+    stage: 'extension_command_timeout',
+    budgetMs,
+    elapsedMs,
+    tab: probe?.available ? {
+      tabActive: probe.tabActive, tabStatus: probe.tabStatus, discarded: probe.discarded,
+      pendingUrl: probe.pendingUrl, windowId: probe.windowId,
+      windowFocused: probe.windowFocused, windowState: probe.windowState,
+      ...(probe.windowError ? { windowError: probe.windowError } : {})
+    } : null,
+    probe: probe?.available === false ? probe : null,
+    debuggerPaused: debuggerPaused ? {
+      reason: debuggerPaused.reason ?? null,
+      autoResumeInMs: debuggerPaused.autoResumeInMs ?? null
+    } : null,
+    occlusion
+  };
+  const base = { code, reason, tool: name, evidence, dispatched: null };
+  if (readOnly === true) {
+    return { ...base, status: 'waiting', retryable: true,
+      suggestedDelayMs: 1000,
+      nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 5000, idle: true },
+      recommendedNextAction: code === 'TAB_OCCLUDED'
+        ? 'This capture path needs painted frames and the document was hidden. Retry once; DOM and CDP reads normally work in a background tab. Do not activate the window or tab to make automation succeed - if frames still cannot be produced, ask the human to bring the tab forward.'
+        : 'The extension answered with its own timeout and no outcome. Keep the task alive, poll once, then retry the read with smaller budgets. Never treat this waiting result as bridge failure.' };
+  }
+  return { ...base, status: 'uncertain', retryable: false, requiresObservation: true,
+    recommendedNextAction: 'The command outlived its budget inside the extension and no result was observed. Do not replay it; re-observe the page and verify whether it took effect before any new write.' };
+}
+
+async function describeCommandTimeout({ name, args, readOnly, budgetMs, startedAt }) {
+  const tabId = Number.isInteger(args?.tabId) ? args.tabId : null;
+  const probePromise = probeTabForTimeout(tabId);
+  probePromise.catch(() => {});
+  const probe = await Promise.race([
+    probePromise,
+    sleep(TIMEOUT_PROBE_MS).then(() => ({ available: false, reason: 'probe_timeout' }))
+  ]);
+  let debuggerPaused = null;
+  try {
+    const session = debuggerSessions.list().find(item => item.tabId === tabId);
+    debuggerPaused = session?.paused ?? null;
+  } catch { /* debugger state stays unknown, never inferred */ }
+  return classifyCommandTimeout({ name, readOnly, probe, debuggerPaused, budgetMs, elapsedMs: Date.now() - startedAt });
+}
+
+// The service keeps its own timer as a last resort. This races the same budget
+// with a small margin so a classification always leaves the extension before
+// the service closes the socket. The losing execute() promise is still running:
+// its late result is ignored by the service because the job is already
+// finished, and it must not become an unhandled rejection here.
+async function executeWithBudget({ name, args, readOnly, budgetMs, socket: commandSocket, epoch }) {
+  const startedAt = Date.now();
+  const running = execute(name, args, { socket: commandSocket, epoch });
+  running.catch(() => {});
+  if (!Number.isFinite(budgetMs) || budgetMs <= 0) return await running;
+  const marginMs = Math.min(1500, Math.max(400, Math.round(budgetMs * 0.2)));
+  const deadlineMs = Math.max(500, budgetMs - marginMs);
+  let timer = null;
+  const deadline = new Promise(resolve => {
+    timer = setTimeout(() => {
+      describeCommandTimeout({ name, args, readOnly, budgetMs, startedAt })
+        .then(resolve)
+        .catch(() => resolve({
+          status: readOnly === true ? 'waiting' : 'uncertain',
+          retryable: readOnly === true,
+          code: 'TIMEOUT_UNKNOWN', reason: 'command_timeout', tool: name, dispatched: null,
+          recommendedNextAction: 'The extension watchdog fired and its state probe also failed. Treat this as an unobserved outcome; never replay a write.'
+        }));
+    }, deadlineMs);
+  });
+  try {
+    return await Promise.race([running, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 function reportExtensionError(source, error, category = 'EXTENSION_ERROR') {
   void errorJournal.record(source, category).then(() => errorJournal.flush()).catch(() => {});
 }
@@ -1930,7 +2066,12 @@ async function connect({ automatic = false } = {}) {
         lastAction = `${new Date().toLocaleTimeString()} · ${message.name}`;
         notifyStatus();
         try {
-          const result = await execute(message.name, message.args, { socket: ws, epoch: connectionEpoch });
+          const result = await executeWithBudget({
+            name: message.name, args: message.args,
+            readOnly: message.readOnly === true,
+            budgetMs: Number.isFinite(message.budgetMs) ? message.budgetMs : null,
+            socket: ws, epoch: connectionEpoch
+          });
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'result', id: message.id, result, hostId: currentHostId }));
         } catch (e) {
           if (e.code === 'DEBUGGER_BUSY_BEFORE_DISPATCH') {

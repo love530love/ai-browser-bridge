@@ -356,16 +356,26 @@ test('timeout stops queue and audits the write result as uncertain instead of re
 test('read-only timeout returns waiting and keeps the bridge connected', async t => {
   const { b, wsUrl } = await setup(t, { timeoutMs: 60 });
   const ws = await extension(wsUrl);
+  const commands = [];
   ws.on('message', raw => {
     const msg = JSON.parse(raw);
     if (msg.type !== 'command') return;
+    commands.push(msg);
     if (msg.name === 'browser_read') return;
     if (msg.name === 'browser_tabs') ws.send(JSON.stringify({ type: 'result', id: msg.id, result: [{ id: 1, title: 'still alive' }] }));
   });
   const first = b.call('browser_read', { tabId: 1 });
   const second = b.call('browser_tabs', {});
   assert.deepEqual(await second, [{ id: 1, title: 'still alive' }]);
-  assert.equal((await first).reason, 'read_timeout');
+  const timedOut = await first;
+  assert.equal(timedOut.reason, 'read_timeout');
+  // A service-side timeout is still structured: the code names the family and
+  // the stage says the extension never answered before its own budget.
+  assert.equal(timedOut.code, 'TIMEOUT_UNKNOWN');
+  assert.equal(timedOut.stage, 'service_read_timeout_after_extension_silence');
+  const readCommand = commands.find(msg => msg.name === 'browser_read');
+  assert.equal(readCommand.readOnly, true);
+  assert.ok(Number.isFinite(readCommand.budgetMs) && readCommand.budgetMs > 0);
   assert.equal(b.status().connected, true);
   assert.equal(b.status().queued, 0);
 });

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   createDeepPerception,
   mapGeneratedPosition,
+  sourceMapUrlFromScriptText,
   summarizeListener,
   summarizeSourceMap
 } from '../extension/deep-perception.js';
@@ -363,6 +364,70 @@ test('DOM snapshot and framework tree wrap the injected main-world result', asyn
   const denied = await module.run('browser_framework_tree', { tabId: 7, framework: 'angular' }, { tab });
   assert.equal(denied.status, 'not_found');
   assert.equal(denied.reason, 'framework_not_detected');
+});
+
+test('the last sourceMappingURL marker wins', () => {
+  assert.equal(sourceMapUrlFromScriptText('code();\n//# sourceMappingURL=first.map\n//# sourceMappingURL=second.map\n'), 'second.map');
+  assert.equal(sourceMapUrlFromScriptText('//@ sourceMappingURL=legacy.map'), 'legacy.map');
+  assert.equal(sourceMapUrlFromScriptText('const x = 1;'), null);
+});
+
+function pageScriptFallback({ scriptUrl = 'https://example.test/assets/app.js', mapUrl = '/assets/app.js.map' } = {}) {
+  const fake = makeAttach({ events: false });
+  const fetched = [];
+  const module = createDeepPerception({
+    sessions,
+    attach: fake.attach,
+    chromeApi: {
+      debugger: { onEvent: fake.bus.onEvent },
+      scripting: {
+        executeScript: async ({ func }) => {
+          if (func?.name === 'pageScriptsInPage') {
+            return [{ result: { status: 'success', total: 1, scripts: [{ index: 0, src: scriptUrl, inline: false, type: '', textLength: 64 }] } }];
+          }
+          return [{ result: null }];
+        }
+      }
+    },
+    fetchImpl: async url => {
+      fetched.push(url);
+      if (url === scriptUrl) {
+        return { ok: true, status: 200, text: async () => `export const bench = 7319;\n//# sourceMappingURL=${mapUrl}\n` };
+      }
+      if (url.endsWith('.map')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify(sourceMap) };
+      }
+      return { ok: false, status: 404, text: async () => '' };
+    }
+  });
+  return { module, fetched };
+}
+
+test('a page script the debugger replay omitted is still listed from document.scripts', async () => {
+  const { module } = pageScriptFallback();
+  const listed = await module.run('browser_script_inventory', { tabId: 7, settleMs: 0, urlFilter: 'app.js' }, { tab });
+  assert.equal(listed.status, 'success');
+  assert.equal(listed.totalScripts, 1);
+  assert.equal(listed.cdpScriptCount, 0);
+  assert.equal(listed.pageScriptCount, 1);
+  assert.equal(listed.matchedCount, 1);
+  assert.equal(listed.scripts[0].scriptId, null);
+  assert.equal(listed.scripts[0].source, 'page_dom');
+  assert.equal(listed.scripts[0].url, 'https://example.test/assets/app.js');
+});
+
+test('a page script the debugger replay omitted still resolves its source map', async () => {
+  const { module, fetched } = pageScriptFallback();
+  const result = await module.run('browser_source_map', {
+    tabId: 7, settleMs: 0, url: 'https://example.test/assets/app.js'
+  }, { tab });
+  assert.equal(result.status, 'success');
+  assert.equal(result.scriptSource, 'page_dom');
+  assert.equal(result.script.scriptId, null);
+  assert.equal(result.script.sourceMapURL, '/assets/app.js.map');
+  assert.equal(result.via, 'extension_fetch');
+  assert.ok(result.sources.includes('src/app.ts'));
+  assert.deepEqual(fetched, ['https://example.test/assets/app.js', 'https://example.test/assets/app.js.map']);
 });
 
 test('injection into a restricted page is blocked, not reported as an empty snapshot', async () => {

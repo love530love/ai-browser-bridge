@@ -1,4 +1,6 @@
 // Pure guidance: error text is untrusted evidence, never permission to write.
+import { ERROR_CODE_GUIDE, codeForReason } from './error-codes.js';
+
 export function failureHelp(args, { readOnly = false } = {}) {
   const message = String(args.error || '').toLowerCase();
   const action = String(args.attemptedAction || '');
@@ -20,6 +22,10 @@ export function failureHelp(args, { readOnly = false } = {}) {
   } else if (/disconnect|connection|not connected/.test(message)) {
     category = 'connection'; nextMode = 'wait-and-plan';
     steps.push('Wait for the existing service and extension to recover. Do not open settings tabs or launch another browser as a retry.');
+  } else if (/tab_occluded|page_not_foreground|document_hidden|clipboard_needs_visible_document/.test(message)) {
+    category = 'occlusion'; nextMode = 'wait-and-plan';
+    steps.push('The document was hidden when this path ran. Background DOM/CDP reads normally still work, so retry a read once before treating visibility as the limit.');
+    steps.push('Do not activate windows or tabs to make automation succeed. If a capture path truly needs painted frames, ask the human to bring the tab forward instead of taking focus automatically.');
   } else if (/timed out|timeout|busy|maintenance|main thread|execution context/.test(message)) {
     category = 'timeout-uncertain'; nextMode = 'wait-and-plan';
     steps.push('Use browser_wait_until_ready. A failed transport or timeout does not prove a write was not executed.');
@@ -31,8 +37,9 @@ export function failureHelp(args, { readOnly = false } = {}) {
     steps.push('Observe current selection and use browser_pick with exact visible text; avoid guessed keys and coordinates.');
   }
   if (transaction) steps.push('Match the active dialog against the requested product, quantity, billing mode and price before committing. After dispatch, verify an account-specific order or instance record and its status. Stock or balance changes alone are not proof. If the outcome is unknown, reconcile records before any retry; do not create a replacement order.');
-  const retryAllowed = readOnly && ['connection', 'timeout-uncertain', 'stale-reference', 'element-unavailable'].includes(category);
-  return { category, nextMode, retryAllowed, automaticWriteReplayAllowed: false,
+  const retryAllowed = readOnly && ['connection', 'timeout-uncertain', 'stale-reference', 'element-unavailable', 'occlusion'].includes(category);
+  const code = codeForReason(String(args.error || '')) ?? null;
+  return { ...(code ? { code, codeGuide: ERROR_CODE_GUIDE[code] } : {}), category, nextMode, retryAllowed, automaticWriteReplayAllowed: false,
     humanConfirmationRequired: highRisk, observationAllowed: true,
     outcomeVerificationRequired: !readOnly, suggestedSteps: steps,
     ...(transaction ? { transactionOutcome: 'unknown', requiredEvidence: ['active-dialog-product-and-quantity', 'billing-mode-and-price', 'account-specific-order-or-instance-status'], insufficientEvidence: ['click-dispatched', 'stock-count-change', 'balance-unchanged'], transactionReplayAllowed: false } : {}),
