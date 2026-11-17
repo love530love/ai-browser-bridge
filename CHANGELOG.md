@@ -1,3 +1,11 @@
+## 未发布 — Qoder 插件与全局连接器（工具，不影响服务 buildId）
+
+- **Qoder 插件源**（`qoder-plugin/ai-browser-bridge/`）：`.qoder-plugin/plugin.json` + `.mcp.json`（`${QODER_NODE_RUNTIME}` + `${QODER_PLUGIN_ROOT}`）+ 启动器 `bin/launch-bridge.mjs`。插件只带 Skill 契约与 MCP 客户端入口，不复制服务代码，不含 `.local` 配置、token、cookie 或日志。
+- **仓库路径解析**：启动器按 `AIB_ROOT` → `%USERPROFILE%\.ai-browser-bridge-root` → 常见克隆位置查找同时含 `src/mcp.js` 且 `package.json` 名为 `ai-browser-bridge` 的目录；找不到时报错并给出三种设置方式。
+- **打包与漂移校验**（`scripts/sync-qoder-plugin.mjs`）：`--check` 校验插件版本与 `skills/ai-browser-bridge/SKILL.md` 副本一致，`--zip` 先校验再生成 `qoder-plugin/dist/ai-browser-bridge-<version>.zip`（归档根含 `.qoder-plugin/plugin.json`）。
+- **本机全局连接器**：Qoder 用户级 `~/.qoder/mcp.json` 增加 `ai_browser_bridge` stdio 条目（2026-11-17，原文件已备份）。stdio 握手实测 `ai-browser-bridge 0.46.0`、133 工具；重启 Qoder 后所有会话可用。插件与用户级条目二选一，避免重复工具前缀。
+- 未改动 `src/**` 与 `package.json`，运行中服务 buildId 保持 `e8c61b9f…`，无需重启。
+
 ## 0.46.0 — 2026-11-16（**统一失败错误码 / 页面 DOM 脚本兜底 / P4 跨页面基准**）
 
 触发：P3 之后要求用真实页面表面验收「后台也能驱动、失败可分支、绝不假成功」。基准第一次跑就抓到三个真问题：Chrome 156 的 `Debugger.enable` replay 漏报主世界页面脚本（91 个脚本、0 个 http URL，而页面自己的 `app.js` 明明加载了）；后台标签里 `confirm()` 被 Chrome 静默压掉，调用方只能干等到超时；下载探针把 `tabId` 传给不接受它的下载工具，失败被记成 `no_status`。

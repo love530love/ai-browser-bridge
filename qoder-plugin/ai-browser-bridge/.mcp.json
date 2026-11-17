@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ai-browser-bridge": {
+      "command": "${QODER_NODE_RUNTIME}",
+      "args": ["${QODER_PLUGIN_ROOT}/bin/launch-bridge.mjs"],
+      "timeout": 120000
+    }
+  }
+}

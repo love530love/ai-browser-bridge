@@ -349,7 +349,20 @@ Chrome 面板应显示「已连接」、角标 `ON`。若 30 秒内未恢复，�
 }
 ```
 
-MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 68 个工具，`browser_screenshot` 返回 MCP 图片内容。
+MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 133 个工具（0.46.0），`browser_screenshot` 返回 MCP 图片内容。
+
+### Qoder 插件与全局连接器
+
+`qoder-plugin/ai-browser-bridge/` 是可安装的 Qoder 插件源：打包浏览器操作 Skill 与 MCP 声明（`${QODER_NODE_RUNTIME}` + `${QODER_PLUGIN_ROOT}/bin/launch-bridge.mjs`），不复制服务代码，也不含 `.local` 配置或密钥。生成 ZIP：
+
+```powershell
+node scripts/sync-qoder-plugin.mjs --check   # 校验 Skill 副本与插件版本未漂移
+node scripts/sync-qoder-plugin.mjs --zip     # 生成 qoder-plugin/dist/ai-browser-bridge-<version>.zip
+```
+
+插件启动器按 `AIB_ROOT` → `%USERPROFILE%\.ai-browser-bridge-root` → 常见克隆位置的顺序解析仓库；都找不到时 MCP 启动失败并给出设置方法。另一台机器只需 `npm ci`、`node src/cli.js setup`、启动服务并加载扩展。
+
+若只想在 Qoder 全局会话可用，也可直接把上面的 stdio 条目写入用户级 `~/.qoder/mcp.json` 并重启 Qoder（2026-11-17 本机已添加，stdio 握手实测 `ai-browser-bridge 0.46.0`、133 工具）。插件与用户级条目**二选一**，两者同时启用会出现两套重复工具前缀。
 
 ### CLI 客户端
 

@@ -47,3 +47,4 @@ native-host/com.aibridge.host.json
 # regenerable by `aep workspace-init`, so it is project config rather than local state.
 # Git cannot re-include a file under a wholly ignored directory, hence `/coordination/*`.
 !/coordination/PROJECT-POLICY.md
+qoder-plugin/dist/
