@@ -362,7 +362,7 @@ node scripts/sync-qoder-plugin.mjs --zip     # 生成 qoder-plugin/dist/ai-brows
 
 插件启动器按 `AIB_ROOT` → `%USERPROFILE%\.ai-browser-bridge-root` → 常见克隆位置的顺序解析仓库；都找不到时 MCP 启动失败并给出设置方法。另一台机器只需 `npm ci`、`node src/cli.js setup`、启动服务并加载扩展。
 
-若只想在 Qoder 全局会话可用，也可直接把上面的 stdio 条目写入用户级 `~/.qoder/mcp.json` 并重启 Qoder（2026-11-17 本机已添加，stdio 握手实测 `ai-browser-bridge 0.46.0`、133 工具）。插件与用户级条目**二选一**，两者同时启用会出现两套重复工具前缀。
+若只想在 Qoder 全局会话可用，也可直接把上面的 stdio 条目写入用户级 `~/.qoder/mcp.json` 并重启 Qoder。插件与用户级条目**二选一**，两者同时启用会出现两套重复工具前缀。桥升版后需重新执行 `node scripts/sync-qoder-plugin.mjs --zip` 并在插件视图更新（插件版本跟随 `package.json`，`--check` 会拦下未同步的版本）。
 
 ### CLI 客户端
 
