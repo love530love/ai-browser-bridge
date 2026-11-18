@@ -15,7 +15,8 @@
 // second click a different action.
 export const RECEIPT_TOOLS = new Set([
   'browser_click', 'browser_click_verified', 'browser_action', 'browser_fill', 'browser_fill_verified',
-  'browser_key', 'browser_select', 'browser_choose', 'browser_pick', 'browser_hover', 'browser_drag',
+  'browser_key', 'browser_select', 'browser_select_verified', 'browser_choose', 'browser_choose_verified',
+  'browser_pick', 'browser_hover', 'browser_drag',
   'browser_scroll', 'browser_scroll_element', 'browser_upload', 'browser_upload_verified',
   'browser_dismiss_overlay', 'browser_navigate'
 ]);
@@ -26,8 +27,8 @@ export const RECEIPT_TOOLS = new Set([
 // is how a field gets filled after a re-render.
 export const DEDUPE_TOOLS = new Set([
   'browser_click', 'browser_click_verified', 'browser_action', 'browser_fill_verified',
-  'browser_key', 'browser_select', 'browser_choose', 'browser_pick',
-  'browser_upload', 'browser_upload_verified'
+  'browser_key', 'browser_select', 'browser_select_verified', 'browser_choose', 'browser_choose_verified',
+  'browser_pick', 'browser_upload', 'browser_upload_verified'
 ]);
 
 // Long enough to catch a retry loop, short enough that a deliberate second

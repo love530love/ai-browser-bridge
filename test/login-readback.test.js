@@ -102,7 +102,10 @@ test('P1: a payload inside the budget is returned unchanged', () => {
 test('P2: a form error is its own field, not a text diff', () => {
   assert.match(page, /const NOTICE_SELECTOR = /);
   assert.match(page, /const collectNotices = \(limit = 5, deadline = Infinity\) =>/);
-  assert.match(page, /notices, text: collected\.text/);
+  assert.match(page, /notices: noticeScan\.live/);
+  // A notice with no visible layout is evidence, not a live alert: it must not
+  // be able to satisfy a textAppears expectation.
+  assert.match(page, /staleNotices: noticeScan\.stale/);
   // A container holding form controls is not a notice.
   assert.match(page, /if \(el\.querySelector\('input,textarea,select,button\[type=submit\]'\)\) continue;/);
 });

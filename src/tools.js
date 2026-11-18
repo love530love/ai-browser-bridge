@@ -11,18 +11,56 @@ import {
 const tabId = { type: 'integer', minimum: 1 };
 const text = (maxLength = 20000) => ({ type: 'string', minLength: 1, maxLength });
 const ref = text(100);
-const clickExpectation = {
+// An expectation is a condition, and a real submit has several legitimate
+// outcomes: it may navigate, paint an inline validation error, or only change
+// the DOM. `anyOf` lets the caller name those alternatives once; `anyChange`
+// accepts "something observable happened" against a baseline the tool captures
+// itself; `stableForMs` refuses transient evidence such as a leftover toast.
+const expectationBranch = {
   type: 'object', minProperties: 1, additionalProperties: false,
   properties: { textAppears: text(1000), urlContains: text(1000), elementLabelAppears: text(1000) }
 };
-const fillExpectation = {
-  type: 'object', minProperties: 1, additionalProperties: false,
-  properties: { valueMatches: { type: 'string', maxLength: 20000 }, textAppears: text(1000) }
+const expectationModifiers = {
+  anyOf: {
+    type: 'array', minItems: 1, maxItems: 6, items: expectationBranch,
+    description: 'Succeeds when at least one branch is true. Prefer this over a single phrase that already exists on the page (a stale login toast can make "成功" true before the click).'
+  },
+  anyChange: {
+    type: 'boolean',
+    description: 'Succeeds when the URL, visible text, DOM node count or same-origin resource count differs from the pre-dispatch baseline the tool captured. Never satisfied before dispatch, so it never causes not_dispatched.'
+  },
+  stableForMs: {
+    type: 'integer', minimum: 0, maximum: 5000,
+    description: 'Modifier, not a condition: require the matched condition to stay true continuously for this window (max 5000) so a transient toast cannot satisfy it. Pair it with a real condition.'
+  }
 };
-const uploadExpectation = {
+const expectationObject = (properties, branch = expectationBranch) => ({
   type: 'object', minProperties: 1, additionalProperties: false,
-  properties: { fileNameAppears: text(255), textAppears: text(1000) }
-};
+  properties: {
+    ...properties,
+    ...expectationModifiers,
+    // A branch may carry its own stableForMs, because "the toast must hold" is a
+    // property of that alternative; the page applies the longest branch window.
+    anyOf: { ...expectationModifiers.anyOf, items: { ...branch, properties: { ...branch.properties, stableForMs: expectationModifiers.stableForMs } } }
+  }
+});
+const clickExpectation = expectationObject({
+  textAppears: text(1000), urlContains: text(1000), elementLabelAppears: text(1000)
+});
+const fillExpectation = expectationObject(
+  { valueMatches: { type: 'string', maxLength: 20000 }, textAppears: text(1000) },
+  {
+    type: 'object', minProperties: 1, additionalProperties: false,
+    properties: { valueMatches: { type: 'string', maxLength: 20000 }, textAppears: text(1000), elementLabelAppears: text(1000) }
+  }
+);
+const uploadExpectation = expectationObject(
+  { fileNameAppears: text(255), textAppears: text(1000) },
+  {
+    type: 'object', minProperties: 1, additionalProperties: false,
+    properties: { fileNameAppears: text(255), textAppears: text(1000), elementLabelAppears: text(1000) }
+  }
+);
 // CNIPA P0-1/P0-2: an antd Upload keeps its file input at display:none, so no
 // ref can be obtained for it. Address it exactly instead of guessing: selector
 // must resolve to one input[type=file], inputIndex is a 0-based DOM order.
@@ -184,6 +222,13 @@ export const TOOLS = [
     maxChars: { type: 'integer', minimum: 200, maximum: 8000 },
     agent
   }, ['tabId', 'expression'], false),
+  tool('browser_eval_verified', 'Evaluate one JavaScript expression in the page once, then verify a bounded expected outcome - the audited form of browser_eval for controls no ref can reach (a hidden native input such as Element Plus .el-radio__original, or a canvas hotspot). Dispatch happens at most once. If `expect` already holds before the call, returns not_dispatched with matchedIn naming the element that satisfied it, which is exactly how a stale toast is exposed instead of being mistaken for this action\'s result. After dispatch the outcome is observed through the same matcher as the other verified tools: expect supports textAppears, urlContains, elementLabelAppears, anyOf (alternatives), anyChange (any observable change from the pre-dispatch baseline) and stableForMs (the condition must hold continuously), and the reply carries outcome (navigated|dom_changed|condition_met|validation_error|no_change) or validationErrors on a failure, plus mechanism:"js_eval". Never retries; an unobserved outcome is uncertain. Prefer browser_click_verified or browser_fill_verified when a usable ref exists - this path is for the elements those tools refuse or cannot address, and it runs with full page privileges like browser_eval.', {
+    tabId,
+    expression: { type: 'string', minLength: 1, maxLength: 200000 },
+    expect: clickExpectation,
+    timeoutMs: timeoutMs(15000),
+    agent
+  }, ['tabId', 'expression', 'expect'], false),
   tool('browser_shadow_tree', 'Read-only inventory of component controls with snapshot refs usable by browser_click/browser_fill. It walks open Shadow DOM and custom elements, AND elements that are clickable without being controls: a div whose computed cursor is pointer and that has no href, role or tabindex. That second kind is what a React onClick on a card or tile leaves behind - nothing in the markup to find, which is why such a group is invisible to browser_read, browser_find_element and browser_pick, and why the only alternatives were a hand-solved coordinate or an injected click. Each entry carries kind:"control" or kind:"clickable"; a clickable entry is a container, so confirm by screenshot that it is the card you mean before clicking. Use for chat assistants, floating widgets, ad/tool panels, web components and modal card groups. Never executes actions.', { tabId, maxRoots: { type: 'integer', minimum: 1, maximum: 100 }, maxControls: { type: 'integer', minimum: 1, maximum: 400 }, includeClickable: { type: 'boolean' }, budgetMs: { type: 'integer', minimum: 200, maximum: 5000 }, agent }, ['tabId'], true),
   tool('browser_frames', 'List accessible frames in a tab, including frameId, URL, origin, name, and same-document status. Use before reading or operating iframe-hosted forms.', { tabId, agent }, ['tabId'], true),
   tool('browser_find_text', 'Find layout-visible, non-private light-DOM text by exact substring. Defaults to the main frame; set frame="all" to request allFrames injection. Matches include frameId; hidden, inert, computed opacity-zero, or non-rendered text is excluded. Results are bounded, include per-frame errors returned by Chrome, and mark known frame failures as partial/truncated; omitted-frame coverage is not inferred. Use this before full-page reads on large SPA pages. Finding the words is not the same as finding the element: pass includeMatchElement:true to also get `matchElements`, the deepest visible element that contains each matched text, with a usable ref, rect and covered flag. Do that instead of reading `nearbyElements`, which is a sample of controls that merely mention the text and, on a real page, returned the pagination and a region button instead of the card that held it.', {
@@ -372,9 +417,9 @@ export const TOOLS = [
     tabId, ref, ...uploadTarget, mimeType: text(255), filePath: text(32767),
     sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, agent
   }, ['tabId', 'filePath', 'sha256']),
-  tool('browser_click_verified', 'Click a current element ref once, then verify a bounded expected outcome. If that condition is already true before the click, returns not_dispatched. After dispatch, an unobserved outcome is uncertain and non-retryable; re-observe and independently verify before any new action. Never retries. If the tab is leased, pass the matching agent.', { tabId, ref, expect: clickExpectation, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'expect']),
-  tool('browser_fill_verified', 'Fill a current text ref, then verify valueMatches and optional textAppears. Returns success/uncertain/failed; never presses Enter. Pass secret:true to fill a password field: the value is compared internally, a caller-supplied expect.valueMatches is ignored so that a second copy of the secret does not travel through the expectation object, and the reply never echoes the value. If the tab is leased, pass the matching agent.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, secret: { type: 'boolean' }, expect: fillExpectation, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'text', 'expect']),
-  tool('browser_upload_verified', 'Attach one allowlisted local file to a file input (ref, selector or inputIndex, including display:none inputs), then verify the selected filename and optional page text. Never clicks submit.', {
+  tool('browser_click_verified', 'Click a current element ref once, then verify a bounded expected outcome. expect supports textAppears, urlContains, elementLabelAppears, anyOf (one of several legitimate outcomes), anyChange (any URL/text/DOM/network change since before the click) and stableForMs (hold the condition continuously, so a transient toast cannot satisfy it). If that condition is already true before the click, returns not_dispatched with matchedIn, which names the element that matched and flags it as transient when it came from a toast. After dispatch, an unobserved outcome is uncertain and non-retryable; re-observe and independently verify before any new action. Success carries outcome (navigated|dom_changed|condition_met) and failures carry validationErrors when inline form errors are visible. Never retries. If the tab is leased, pass the matching agent.', { tabId, ref, expect: clickExpectation, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'expect']),
+  tool('browser_fill_verified', 'Fill a current text ref, then verify valueMatches and optional textAppears (also anyOf/anyChange/stableForMs). Returns success/uncertain/failed; never presses Enter. Pass secret:true to fill a password field: the value is compared internally, a caller-supplied expect.valueMatches is ignored so that a second copy of the secret does not travel through the expectation object, and the reply never echoes the value. If the tab is leased, pass the matching agent.', { tabId, ref, text: { type: 'string', maxLength: 20000 }, secret: { type: 'boolean' }, expect: fillExpectation, timeoutMs: timeoutMs(10000), agent }, ['tabId', 'ref', 'text', 'expect']),
+  tool('browser_upload_verified', 'Attach one allowlisted local file to a file input (ref, selector or inputIndex, including display:none inputs), then verify the selected filename and optional page text (expect also accepts anyOf/anyChange/stableForMs). Never clicks submit.', {
     tabId, ref, ...uploadTarget, mimeType: text(255), filePath: text(32767),
     sha256: { type: 'string', pattern: '^[A-Fa-f0-9]{64}$', minLength: 64, maxLength: 64 }, expect: uploadExpectation, timeoutMs: timeoutMs(10000), agent
   }, ['tabId', 'filePath', 'sha256', 'expect']),
@@ -480,12 +525,19 @@ export const TOOLS = [
     agent
   }, ['name']),
   tool('browser_screenshot', 'Capture an allowed tab. Borrows an already-open browser_debugger session when there is one, otherwise uses a temporary attachment; a tab owned by another debugger fails. While the tab is paused by a debugger session this returns status=waiting instead of hanging. A hidden tab produces no animation frames, so capture briefly starts a screencast to force one and stops it again; sideEffects and warmup report that. Pixels may contain sensitive page content and embedded frames.', { tabId, agent }, ['tabId'], true),
+  tool('browser_capture_element', 'Capture one element ref as an enlarged image without injecting an overlay: scale 1-8 (default 4) and padding 0-24 (default 8) are applied to the element\'s own box, so a small captcha, seal or verification code stays readable instead of being lost in a full-tab screenshot. Works on a hidden/background tab through the same screencast warmup as browser_screenshot, and refuses an element with no layout box. Read-only: it never clicks, focuses a window or activates the tab. Pixels may contain sensitive page content.', {
+    tabId, ref,
+    scale: { type: 'integer', minimum: 1, maximum: 8 },
+    format: { type: 'string', enum: ['png', 'jpeg'] },
+    padding: { type: 'integer', minimum: 0, maximum: 24 },
+    agent
+  }, ['tabId', 'ref'], true),
   tool('browser_key', 'Send a browser-level key or chord, e.g. Enter, Tab, Ctrl+A, Shift+Enter. Optional ref focuses a current element first. The reply includes focusedElement - the element that held focus afterwards, with valueLength but never a secret value - so a paste or a keystroke can be judged instead of assumed: dispatched:true alone never said whether the text landed. If the tab is leased, pass the matching agent.', { tabId, key: text(80), ref, agent }, ['tabId', 'key']),
   tool('browser_hover', 'Move the mouse to a current element reference. If the tab is leased, pass the matching agent.', { tabId, ref, agent }, ['tabId', 'ref']),
   tool('browser_select', 'Select an option by exact value in a native HTML select element. If the tab is leased, pass the matching agent.', { tabId, ref, value: { type: 'string', maxLength: 1000 }, agent }, ['tabId', 'ref', 'value']),
-  tool('browser_select_verified', 'Select an option by exact value in a native HTML select element, then verify the selected value matches. Returns success/uncertain/failed; never assumes selection succeeded. If the tab is leased, pass the matching agent.', { tabId, ref, value: { type: 'string', maxLength: 1000 }, expect: { type: 'object', minProperties: 1, additionalProperties: false, properties: { valueMatches: { type: 'string', maxLength: 20000 }, textAppears: text(1000) } }, timeoutMs: timeoutMs(5000), agent }, ['tabId', 'ref', 'value', 'expect']),
+  tool('browser_select_verified', 'Select an option by exact value in a native HTML select element, then verify the selected value matches. Returns success/uncertain/failed; never assumes selection succeeded. expect also accepts anyOf/anyChange/stableForMs. If the tab is leased, pass the matching agent.', { tabId, ref, value: { type: 'string', maxLength: 1000 }, expect: fillExpectation, timeoutMs: timeoutMs(5000), agent }, ['tabId', 'ref', 'value', 'expect']),
   tool('browser_choose', 'Choose a custom combobox/listbox option by exact visible text. Uses a current combobox ref, waits for a matching visible option via DOM events, clicks it once, and returns the observed input value. Never guesses with coordinates or ArrowDown. If the tab is leased, pass the matching agent.', { tabId, ref, text: text(1000), timeoutMs: timeoutMs(5000), agent }, ['tabId', 'ref', 'text']),
-  tool('browser_choose_verified', 'Choose a custom combobox/listbox option by exact visible text, then verify the observed input value or page text. Returns success/uncertain/failed; never assumes choice succeeded. If the tab is leased, pass the matching agent.', { tabId, ref, text: text(1000), expect: { type: 'object', minProperties: 1, additionalProperties: false, properties: { valueMatches: { type: 'string', maxLength: 20000 }, textAppears: text(1000) } }, timeoutMs: timeoutMs(5000), agent }, ['tabId', 'ref', 'text', 'expect']),
+  tool('browser_choose_verified', 'Choose a custom combobox/listbox option by exact visible text, then verify the observed input value or page text. Returns success/uncertain/failed; never assumes choice succeeded. expect also accepts anyOf/anyChange/stableForMs. If the tab is leased, pass the matching agent.', { tabId, ref, text: text(1000), expect: fillExpectation, timeoutMs: timeoutMs(5000), agent }, ['tabId', 'ref', 'text', 'expect']),
   tool('browser_pick', 'Find a native select, ARIA combobox, Element Plus/Ant/react-style picker by label/query and choose exact visible text. Handles portal popups and validates the selected text/value by observation. If no picker exists but the exact text is on a visible clickable card/tile, it returns a structured not_found result with current reusable refs, match quality, clickability evidence, geometry and a schema-checked browser_click nextStep only when exactly one exact cursor:pointer card is proven. Matching semantic buttons are reported for inspection but not promoted to a card-click step. It never clicks that card automatically. If it opened a picker before failing, dispatched:true and the next step is to re-read before acting.', {
     tabId, label: text(1000), query: { type: 'string', maxLength: 1000 }, chooseText: text(1000), timeoutMs: timeoutMs(10000), agent
   }, ['tabId', 'chooseText']),
@@ -518,7 +570,7 @@ export const TOOLS = [
     expectedUrl: text(8000), coordinateToken: text(100), x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 },
     endX: { type: 'number', minimum: 0, maximum: 1000 }, endY: { type: 'number', minimum: 0, maximum: 1000 },
     text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }, requireForeground: { type: 'boolean' },
-    expect: { type: 'object', minProperties: 1, additionalProperties: false, properties: { textAppears: text(1000), urlContains: text(1000), elementLabelAppears: text(1000) } },
+    expect: clickExpectation,
     timeoutMs: timeoutMs(10000), agent
   }, ['tabId', 'action', 'expectedUrl', 'expect']),
 
@@ -1073,17 +1125,66 @@ export function validateCall(name, args) {
     const required = { Tap: ['x', 'y', 'coordinateToken'], 'Double Tap': ['x', 'y', 'coordinateToken'], 'Long Press': ['x', 'y', 'coordinateToken'], Hover: ['x', 'y', 'coordinateToken'], Swipe: ['x', 'y', 'endX', 'endY', 'coordinateToken'], Type: ['text'], Key: ['key'], Wait: ['durationMs'] }[action] || [];
     for (const field of required) if (!Object.hasOwn(args, field)) throw new Error(`Missing action argument: ${field} for action "${action}". ${argSummary(name, s)}`);
   }
-  if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_select_verified', 'browser_choose_verified', 'browser_action_verified'].includes(name)) {
+  if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_select_verified', 'browser_choose_verified', 'browser_action_verified', 'browser_eval_verified'].includes(name)) {
     const expectation = args.expect;
     const expectationSchema = s.properties.expect;
+    const branchSchema = expectationSchema.properties.anyOf?.items;
     if (!expectation || typeof expectation !== 'object' || Array.isArray(expectation) || Object.keys(expectation).length < (expectationSchema.minProperties ?? 0)) {
       throw new Error('expect must be a non-empty object with supported string conditions');
     }
+    let conditions = 0;
     for (const [key, value] of Object.entries(expectation)) {
       const field = Object.hasOwn(expectationSchema.properties, key) ? expectationSchema.properties[key] : null;
-      if (!field || typeof value !== 'string' || value.length > field.maxLength || value.length < (field.minLength ?? 0) || (key !== 'valueMatches' && !value.trim())) {
+      if (!field) throw new Error(`Invalid expect condition: ${key}`);
+      if (key === 'anyOf') {
+        if (!Array.isArray(value) || value.length < (field.minItems ?? 1) || value.length > (field.maxItems ?? 6)) {
+          throw new Error('Invalid expect condition: anyOf must be a non-empty array of condition objects');
+        }
+        for (const branch of value) {
+          if (!branch || typeof branch !== 'object' || Array.isArray(branch) || !Object.keys(branch).length) {
+            throw new Error('Invalid expect condition: anyOf entries must be non-empty objects');
+          }
+          let branchConditions = 0;
+          for (const [branchKey, branchValue] of Object.entries(branch)) {
+            const branchField = branchSchema && Object.hasOwn(branchSchema.properties, branchKey) ? branchSchema.properties[branchKey] : null;
+            if (!branchField) throw new Error(`Invalid expect condition: anyOf ${branchKey}`);
+            if (branchKey === 'stableForMs') {
+              if (!Number.isInteger(branchValue) || branchValue < 0 || branchValue > 5000) {
+                throw new Error('Invalid expect condition: anyOf stableForMs must be an integer from 0 to 5000');
+              }
+              continue;
+            }
+            if (typeof branchValue !== 'string' || branchValue.length > branchField.maxLength ||
+                branchValue.length < (branchField.minLength ?? 0) || (branchKey !== 'valueMatches' && !branchValue.trim())) {
+              throw new Error(`Invalid expect condition: anyOf ${branchKey}`);
+            }
+            branchConditions += 1;
+          }
+          if (branchConditions === 0) {
+            throw new Error('Invalid expect condition: anyOf entries need at least one observable condition (textAppears, urlContains, elementLabelAppears or valueMatches); stableForMs alone cannot be observed');
+          }
+        }
+        conditions += 1;
+        continue;
+      }
+      if (key === 'anyChange') {
+        if (typeof value !== 'boolean') throw new Error('Invalid expect condition: anyChange must be a boolean');
+        conditions += 1;
+        continue;
+      }
+      if (key === 'stableForMs') {
+        if (!Number.isInteger(value) || value < (field.minimum ?? 0) || value > (field.maximum ?? 5000)) {
+          throw new Error('Invalid expect condition: stableForMs must be an integer from 0 to 5000');
+        }
+        continue;
+      }
+      if (typeof value !== 'string' || value.length > field.maxLength || value.length < (field.minLength ?? 0) || (key !== 'valueMatches' && !value.trim())) {
         throw new Error(`Invalid expect condition: ${key}`);
       }
+      conditions += 1;
+    }
+    if (conditions === 0) {
+      throw new Error('expect needs at least one observable condition (textAppears, urlContains, elementLabelAppears, anyOf or anyChange); stableForMs alone cannot be observed');
     }
   }
   if (name === 'browser_native_action') {

@@ -26,3 +26,16 @@
 4. 在无真实费用的测试页验证从发现错误配置、重新定位到结果读取的完整流程，再进行授权现场验收。
 
 这些项目仍待实现，不能作为现有能力宣传。客户端契约不能强制任意模型遵守，也不能保证第三方网站永不变化。
+
+## 结果分叉与证据强度（2026-11-18，0.47.0）
+
+赛事报名实测暴露的不是「点击没生效」，而是「验证条件问错了问题」：提交可能导航、行内报错、或只发请求，单一短语 `textAppears:"成功"` 还会被登录 toast 提前满足。0.47.0 的边界如下：
+
+- `expect.anyOf` 表达「任一合法结果」，最多 6 个分支；`anyChange` 只证明「有变化」，不证明变化是本次动作造成的；`stableForMs` 只证明条件持续，不证明服务端已落库。提交类仍优先 `urlContains` + 落地页持久元素，toast 只作辅助。
+- `outcome` 是派发后的判定：`navigated` / `dom_changed` / `condition_met` / `validation_error` / `no_change`。`validationErrors` 只在行内错误真实可见时出现；`no_change` 不等于「没发生」，只等于「页面可观察层没有变化」。
+- `not_dispatched` + `matchedIn.isTransient:true` 表示命中的是残留提示，动作没有发出；应换条件，不得原样重试。
+- `browser_eval_verified` 有完整页面权限，与 `browser_eval` 同层；账本记录的是「这次 eval 被派发且观察到了什么」，不是「eval 的内容安全」。
+- `commandId` 只对「完全相同的参数」承诺幂等；改参复用返回 `command_id_params_mismatch`，旧结果不会被回放。账本在服务内存，重启后失效。
+- `browser_capture_element` 是观察工具，不改变页面；元素必须在当前视口可绘制，滚出视口的先滚动再截。
+
+仍未实现：`browser_ocr` 的 ref 范围识别、`browser_submit_verified` 之类的专用提交工具、幂等账本持久化，以及服务端落库事实的直接查询。通用 UI 条件验证仍不能替代订单/报名后端的最终事实。

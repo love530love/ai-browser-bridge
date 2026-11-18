@@ -740,6 +740,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     current = allInFlightJobs()[0] ?? null;
     if (job.commandId) commandLedger.record(job.commandId, {
       hostId: job.hostId, tool: job.name,
+      paramsHash: job.paramsHash ?? null, paramDigests: job.paramDigests ?? null,
       outcome: error ? 'error' : result?.status ?? 'unknown',
       dispatched: result?.dispatched ?? null
     });
@@ -1336,6 +1337,33 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       .then(result => recordDesktopAudit(name, args, result, startedAt))
       .finally(() => { desktopOperation = null; });
   }
+  // A commandId is a promise about one exact command, and a resend is only the
+  // same command when the arguments are the same. Replaying a recorded
+  // `not_dispatched` after the caller changed the expectation turns the old
+  // answer into a false answer for the new one, so the ledger fingerprints the
+  // arguments (never stores their text) and a mismatch is refused with a fresh
+  // id instead of being replayed.
+  function stableStringify(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'undefined';
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+  function paramDigests(args = {}) {
+    const digests = {};
+    for (const key of Object.keys(args).sort()) {
+      if (key === 'commandId') continue;
+      digests[key] = createHash('sha256').update(stableStringify(args[key])).digest('hex').slice(0, 16);
+    }
+    return digests;
+  }
+  function paramsHashFor(args, digests) {
+    const canonical = Object.keys(digests).sort().map(key => `${key}:${digests[key]}`).join('|');
+    return createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+  }
+  function changedArgNames(previousDigests, currentDigests) {
+    const keys = new Set([...Object.keys(previousDigests || {}), ...Object.keys(currentDigests || {})]);
+    return [...keys].sort().filter(key => previousDigests?.[key] !== currentDigests?.[key]);
+  }
   // Single place where a job enters the queue. Extracted so a capability that
   // needs to talk to the extension outside the normal call path (the self-reload)
   // goes through the same priority ordering and timeout handling.
@@ -1344,13 +1372,31 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     // the recorded outcome is the only honest answer: dispatching again could
     // perform an unprovable second write.
     const commandId = typeof routeArgs?.commandId === 'string' ? routeArgs.commandId : null;
+    const digests = commandId ? paramDigests(routeArgs) : null;
+    const paramsHash = digests ? paramsHashFor(routeArgs, digests) : null;
     const previous = commandLedger.check(commandId);
-    if (previous) return Promise.resolve({
-      status: 'duplicate_suppressed', replayed: true, commandId,
-      hostId: previous.hostId, tool: previous.tool, previousOutcome: previous.outcome,
-      dispatched: false,
-      recommendedNextAction: 'This commandId is already in the ledger. Nothing was dispatched again; re-observe the page before deciding whether to act.'
-    });
+    if (previous) {
+      if (previous.paramsHash && previous.paramsHash !== paramsHash) {
+        const suggestedCommandId = randomUUID();
+        const changedArgs = changedArgNames(previous.paramDigests, digests);
+        return Promise.resolve({
+          status: 'denied', retryable: false, dispatched: false,
+          reason: 'command_id_params_mismatch',
+          commandId,
+          suggestedCommandId,
+          previous: { tool: previous.tool, outcome: previous.outcome },
+          changedArgs,
+          message: `commandId "${commandId}" was already used by a ${previous.tool} call whose arguments differ${changedArgs.length ? ` (${changedArgs.join(', ')})` : ''}. It was not replayed, because the recorded outcome answers the old arguments, not these. Nothing was dispatched.`,
+          recommendedNextAction: `If this is a genuinely new command, repeat the same call with commandId:"${suggestedCommandId}" (or omit commandId to dispatch without idempotency). Re-observing the page first is still the safer step.`
+        });
+      }
+      return Promise.resolve({
+        status: 'duplicate_suppressed', replayed: true, commandId,
+        hostId: previous.hostId, tool: previous.tool, previousOutcome: previous.outcome,
+        dispatched: false,
+        recommendedNextAction: 'This commandId is already in the ledger. Nothing was dispatched again; re-observe the page before deciding whether to act.'
+      });
+    }
     return new Promise((resolve, reject) => {
       const priority = priorityFor(tool, name);
       const readOnly = !!tool.annotations?.readOnlyHint;
@@ -1359,7 +1405,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       const job = {
         id: randomUUID(), name, tool, args: prepared, readOnly,
         hostId: explicitHost ? routeArgs.hostId : (defaultTargetHostId() ?? hosts.primaryHostId ?? 'primary'),
-        explicitHost, commandId,
+        explicitHost, commandId, paramsHash, paramDigests: digests,
         // The offset is an agent-level bias. It may push a job below zero so an
         // operator can give one agent a genuine fast lane; aging still lifts
         // everything else, so no class of work is starved indefinitely.

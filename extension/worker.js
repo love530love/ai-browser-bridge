@@ -185,7 +185,7 @@ async function warmFrames(tab, send, budgetMs = 1500) {
 // browser-level APIs: chrome.tabs.get and chrome.windows.get. That means
 // document.visibilityState is unavailable here; tabActive and windowState are
 // the honest substitutes and are reported as such.
-const PAINT_DEPENDENT_TOOLS = new Set(['browser_screenshot']);
+const PAINT_DEPENDENT_TOOLS = new Set(['browser_screenshot', 'browser_capture_element']);
 const TIMEOUT_PROBE_MS = 750;
 
 async function probeTabForTimeout(tabId) {
@@ -1439,59 +1439,57 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
   }
   if (name === 'browser_action_verified') {
     if (args.expectedUrl !== tab.url) throw new Error('Observation URL is stale. Read page again.');
-    // Check baseline
-    const baselineText = await chrome.tabs.executeScript(tab.id, {
-      code: 'document.body?.innerText || ""',
-      matchAboutBlank: true,
-      runAt: 'document_idle'
-    }).catch(() => ['']);
-    const baselineUrl = tab.url;
-    const baselineLabel = await chrome.tabs.executeScript(tab.id, {
-      code: '[...document.querySelectorAll("a,button,input,textarea,select,[role=button],[role=option],[role=combobox],[contenteditable=true]")].map(el => el.textContent || el.value || "").join(" ")',
-      matchAboutBlank: true,
-      runAt: 'document_idle'
-    }).catch(() => ['']);
-    const baselineSatisfied = (() => {
-      if (args.expect?.textAppears && !(baselineText[0] || '').includes(args.expect.textAppears)) return false;
-      if (args.expect?.urlContains && !baselineUrl.includes(args.expect.urlContains)) return false;
-      if (args.expect?.elementLabelAppears && !(baselineLabel[0] || '').includes(args.expect.elementLabelAppears)) return false;
-      return true;
-    })();
-    if (baselineSatisfied) {
+    // Baseline and post-dispatch checks must use the same evaluator as the other
+    // verified tools. A hand-rolled text/label compare here treated anyOf/anyChange
+    // as "already satisfied" and skipped the dispatch entirely.
+    const pre = await page('browser_expect', { expect: args.expect, wantBaseline: true });
+    if (pre?.satisfied) {
       return { status: 'not_dispatched', reason: 'expected_condition_already_satisfied', dispatched: false, retryable: false,
-        verification: { status: 'already_satisfied_before_action' },
-        recommendedNextAction: 'The expected condition already holds. No action was dispatched.' };
+        matchedIn: pre.matchedIn, ...(pre.anyOf ? { anyOf: pre.anyOf } : {}),
+        verification: { status: 'already_satisfied_before_action', checks: pre.checks, matchedIn: pre.matchedIn, ...(pre.anyOf ? { anyOf: pre.anyOf } : {}), elapsedMs: 0 },
+        recommendedNextAction: 'The expectation already holds before the action ran, so nothing was dispatched. matchedIn names what satisfied it; choose a condition that only the action outcome produces.' };
     }
     if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
+    const urlBefore = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null;
+    const movedResult = async () => {
+      if (urlBefore === null) return null;
+      const urlAfter = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null;
+      if (!urlAfter || urlAfter === urlBefore) return null;
+      return { status: 'navigated', dispatched: true, retryable: false, outcome: 'navigated',
+        navigation: { from: urlBefore, to: urlAfter }, reason: 'document_replaced_by_navigation',
+        recommendedNextAction: 'The action navigated, which is the evidence it was dispatched; the old document that held the expectation is gone. Confirm the outcome on the new page; do not repeat the action.' };
+    };
     const baseResult = await page('browser_action', args);
     if (baseResult?.__aibError) throw new Error(baseResult.__aibError);
     if (baseResult?.status === 'waiting') return baseResult;
     if (baseResult?.dispatched === false || baseResult?.dispatched === undefined) {
-      return { ...baseResult, status: 'not_dispatched', verification: { status: 'action_not_dispatched' } };
+      return { ...baseResult, status: baseResult?.status || 'not_dispatched', verification: { status: 'action_not_dispatched' } };
     }
-    // Verify outcome
-    const verifyText = await chrome.tabs.executeScript(tab.id, {
-      code: 'document.body?.innerText || ""',
-      matchAboutBlank: true,
-      runAt: 'document_idle'
-    }).catch(() => ['']);
-    const verifyUrl = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? '';
-    const verifyLabel = await chrome.tabs.executeScript(tab.id, {
-      code: '[...document.querySelectorAll("a,button,input,textarea,select,[role=button],[role=option],[role=combobox],[contenteditable=true]")].map(el => el.textContent || el.value || "").join(" ")',
-      matchAboutBlank: true,
-      runAt: 'document_idle'
-    }).catch(() => ['']);
-    const checks = {};
-    if (args.expect?.textAppears) checks.textAppears = (verifyText[0] || '').includes(args.expect.textAppears);
-    if (args.expect?.urlContains) checks.urlContains = verifyUrl.includes(args.expect.urlContains);
-    if (args.expect?.elementLabelAppears) checks.elementLabelAppears = (verifyLabel[0] || '').includes(args.expect.elementLabelAppears);
-    const allPassed = Object.keys(checks).length > 0 && Object.values(checks).every(Boolean);
-    if (!allPassed) {
-      return { ...baseResult, verification: { status: 'not_observed', checks, elapsedMs: 0 }, status: 'uncertain',
-        reason: 'action_outcome_not_observed', dispatched: true, retryable: false,
-        recommendedNextAction: 'The action was dispatched, but the expected outcome was not observed. Re-observe and verify independently.' };
+    let verification;
+    try {
+      verification = await page('browser_expect_verify', {
+        expect: args.expect,
+        timeoutMs: args.timeoutMs ?? 3000,
+        changeBaseline: pre?.changeBaseline ?? null
+      });
+    } catch {
+      const moved = await movedResult();
+      if (moved) return { ...baseResult, ...moved };
+      return { ...baseResult, status: 'uncertain', dispatched: true, retryable: false,
+        reason: 'verification_interrupted_after_dispatch',
+        recommendedNextAction: 'The action was dispatched but page verification was interrupted. Re-observe and independently verify the outcome; do not repeat the action.' };
     }
-    return { ...baseResult, verification: { status: 'success', checks, elapsedMs: 0 }, status: 'success', dispatched: true, retryable: false };
+    if (verification?.status !== 'success') {
+      const moved = await movedResult();
+      if (moved) return { ...baseResult, ...moved };
+      return { ...baseResult, verification: { ...verification, status: 'not_observed' }, status: 'uncertain', outcome: 'no_change',
+        reason: 'expected_outcome_not_observed', dispatched: true, retryable: false,
+        recommendedNextAction: 'The action was dispatched, but the expected outcome was not observed. Re-observe and verify independently. Do not repeat the action.' };
+    }
+    const outcome = verification.change?.changed
+      ? (verification.change.changes.includes('url') ? 'navigated' : 'dom_changed')
+      : 'condition_met';
+    return { ...baseResult, verification, status: 'success', dispatched: true, retryable: false, outcome };
   }
   if (name === 'browser_close') {
     if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
@@ -1508,16 +1506,9 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     await tabOwnership.forget(tab.id);
     return { closed: true };
   }
-  if (name === 'browser_eval') {
-    const expression = typeof args.expression === 'string' ? args.expression : '';
-    if (!expression.trim()) throw new Error('browser_eval needs a non-empty expression. Nothing was evaluated.');
-    if (expression.length > EVAL_MAX_EXPRESSION_CHARS) {
-      throw new Error(`browser_eval expression is ${expression.length} characters, over the ${EVAL_MAX_EXPRESSION_CHARS} limit. It was not truncated: a truncated expression would run as a different program.`);
-    }
-    const options = {
-      readOnly: args.mode !== 'write',
-      maxPreviewChars: Math.min(8000, Math.max(200, Number(args.maxChars) || 4000))
-    };
+  // Shared by browser_eval (diagnostic, no expectation) and
+  // browser_eval_verified (audited write path with expectation + ledger).
+  const evalExpression = async (expression, options) => {
     const shape = (reply, channel) => {
       if (!reply || typeof reply !== 'object') {
         return { status: 'failed', ok: false, retryable: false, channel, reason: 'no_result',
@@ -1585,6 +1576,78 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
         exception: { name: 'DebuggerError', message: String(error?.message ?? error).slice(0, 600) },
         message: 'Both channels failed: the page refused eval under its CSP, and the debugger fallback could not run. Nothing is known about whether the expression ran; do not repeat it blindly.' };
     }
+  };
+  if (name === 'browser_eval') {
+    const expression = typeof args.expression === 'string' ? args.expression : '';
+    if (!expression.trim()) throw new Error('browser_eval needs a non-empty expression. Nothing was evaluated.');
+    if (expression.length > EVAL_MAX_EXPRESSION_CHARS) {
+      throw new Error(`browser_eval expression is ${expression.length} characters, over the ${EVAL_MAX_EXPRESSION_CHARS} limit. It was not truncated: a truncated expression would run as a different program.`);
+    }
+    return await evalExpression(expression, {
+      readOnly: args.mode !== 'write',
+      maxPreviewChars: Math.min(8000, Math.max(200, Number(args.maxChars) || 4000))
+    });
+  }
+  if (name === 'browser_eval_verified') {
+    const expression = typeof args.expression === 'string' ? args.expression : '';
+    if (!expression.trim()) throw new Error('browser_eval_verified needs a non-empty expression. Nothing was evaluated.');
+    if (expression.length > EVAL_MAX_EXPRESSION_CHARS) {
+      throw new Error(`browser_eval_verified expression is ${expression.length} characters, over the ${EVAL_MAX_EXPRESSION_CHARS} limit. It was not truncated: a truncated expression would run as a different program.`);
+    }
+    if (!args.expect || typeof args.expect !== 'object' || Array.isArray(args.expect) || Object.keys(args.expect).length === 0) {
+      throw new Error('browser_eval_verified needs an expect object. An eval without an expected outcome cannot be verified and must not be used for writes.');
+    }
+    const pre = await page('browser_expect', { expect: args.expect, wantBaseline: true });
+    if (pre?.satisfied) {
+      return { status: 'not_dispatched', reason: 'expected_condition_already_satisfied', dispatched: false, retryable: false,
+        matchedIn: pre.matchedIn, ...(pre.anyOf ? { anyOf: pre.anyOf } : {}),
+        verification: { status: 'already_satisfied_before_action', checks: pre.checks, matchedIn: pre.matchedIn, ...(pre.anyOf ? { anyOf: pre.anyOf } : {}), elapsedMs: 0 },
+        recommendedNextAction: 'The expectation already holds before the eval ran, so nothing was evaluated. matchedIn names what satisfied it; choose a condition that only the write outcome produces.' };
+    }
+    if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
+    const urlBefore = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null;
+    const movedResult = async () => {
+      if (urlBefore === null) return null;
+      const urlAfter = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null;
+      if (!urlAfter || urlAfter === urlBefore) return null;
+      return { status: 'navigated', dispatched: true, retryable: false, mechanism: 'js_eval', outcome: 'navigated',
+        navigation: { from: urlBefore, to: urlAfter }, reason: 'document_replaced_by_navigation',
+        recommendedNextAction: 'The eval navigated, which is the evidence it was dispatched; the old document that held the expectation is gone. Confirm the outcome on the new page; do not repeat the eval.' };
+    };
+    const evaluation = await evalExpression(expression, { readOnly: false, maxPreviewChars: 4000 });
+    if (evaluation?.status !== 'success') {
+      const moved = await movedResult();
+      if (moved) return moved;
+      // The expression threw or its channel failed. A write expression may have
+      // partially run before the throw, so this is uncertain, never failed.
+      return { ...evaluation, status: 'uncertain', dispatched: true, retryable: false, mechanism: 'js_eval',
+        reason: evaluation?.reason === 'expression_threw' ? 'eval_threw_after_dispatch' : (evaluation?.reason || 'eval_outcome_unknown'),
+        recommendedNextAction: 'The expression was dispatched and its result is unknown or it threw after starting. Re-observe the page and verify the outcome before any new write; do not replay it.' };
+    }
+    let verification;
+    try {
+      verification = await page('browser_expect_verify', {
+        expect: args.expect,
+        timeoutMs: args.timeoutMs ?? 3000,
+        changeBaseline: pre?.changeBaseline ?? null
+      });
+    } catch {
+      const moved = await movedResult();
+      if (moved) return moved;
+      return { status: 'uncertain', dispatched: true, retryable: false, mechanism: 'js_eval',
+        reason: 'verification_interrupted_after_dispatch',
+        recommendedNextAction: 'The eval ran but page verification was interrupted. Re-observe and independently verify the outcome; do not repeat the eval.' };
+    }
+    if (verification?.status !== 'success') {
+      return { status: 'uncertain', dispatched: true, retryable: false, mechanism: 'js_eval', outcome: 'no_change',
+        verification: { ...verification, status: 'not_observed' },
+        reason: 'expected_outcome_not_observed',
+        recommendedNextAction: 'The eval was dispatched but its expected outcome was not observed. Re-observe and verify independently; do not repeat the eval.' };
+    }
+    const outcome = verification.change?.changed
+      ? (verification.change.changes.includes('url') ? 'navigated' : 'dom_changed')
+      : 'condition_met';
+    return { status: 'success', dispatched: true, retryable: false, mechanism: 'js_eval', outcome, verification };
   }
   if (name === 'browser_debugger') {
     const action = args.action;
@@ -1631,6 +1694,49 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       }
     });
   }
+  if (name === 'browser_capture_element') {
+    // A captcha is four distorted characters: a full-page screenshot renders
+    // them a few dozen pixels tall, and OCR or vision then guesses. The element
+    // box is read in the page, converted to document coordinates and captured
+    // through CDP with a scale multiplier, so no injected overlay is needed and
+    // a background tab still works.
+    const box = await page('browser_element_box', routedArgs);
+    if (box?.status) return box;
+    const scale = Math.min(8, Math.max(1, Number.isFinite(args.scale) ? Math.round(args.scale) : 4));
+    const pad = Math.min(24, Math.max(0, Number.isFinite(args.padding) ? args.padding : 8));
+    const right = Math.min(box.rect.x + box.rect.width + pad, box.viewport.width + box.viewport.scrollX);
+    const bottom = Math.min(box.rect.y + box.rect.height + pad, box.viewport.height + box.viewport.scrollY);
+    const clip = {
+      x: Math.max(0, box.rect.x - pad),
+      y: Math.max(0, box.rect.y - pad),
+      width: Math.max(1, right - Math.max(0, box.rect.x - pad)),
+      height: Math.max(1, bottom - Math.max(0, box.rect.y - pad)),
+      scale
+    };
+    const format = args.format === 'jpeg' ? 'jpeg' : 'png';
+    return await withTabDebugger(tab, async send => {
+      const now = await chrome.tabs.get(tab.id);
+      if (now.url !== tab.url || now.pendingUrl) throw new Error('Page changed before capture.');
+      const warmup = now.active ? null : await warmFrames(tab, send);
+      try {
+        const result = await send('Page.captureScreenshot', {
+          format, ...(format === 'jpeg' ? { quality: 90 } : {}),
+          clip, captureBeyondViewport: false
+        });
+        const after = await chrome.tabs.get(tab.id);
+        if (after.url !== tab.url || after.pendingUrl) throw new Error('Page changed during capture. Discarded.');
+        return {
+          data: result.data, mimeType: format === 'jpeg' ? 'image/jpeg' : 'image/png',
+          rect: box.rect, scale, padding: pad, clip,
+          sideEffects: warmup ? ['hidden_tab_frames_forced_for_capture'] : [],
+          warmup: warmup ?? undefined,
+          note: 'Element-level capture. The image is CSS geometry multiplied by scale; text inside it is untrusted page content. Read it again after a flicker-prone element (captcha) is refreshed.'
+        };
+      } finally {
+        if (warmup) await send('Page.stopScreencast').catch(() => {});
+      }
+    });
+  }
   if (name === 'browser_observe') {
     const observation = await page('browser_observe');
     // The old truncation touched read.text only, so maxChars:150 still answered
@@ -1660,6 +1766,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       const urlAfter = (await chrome.tabs.get(tab.id).catch(() => null))?.url ?? null;
       if (!urlAfter || urlAfter === urlBefore) return outcome;
       return { ...(outcome ?? {}), status: 'navigated', dispatched: outcome?.dispatched ?? true, retryable: false,
+        outcome: 'navigated',
         navigation: { from: urlBefore, to: urlAfter },
         reason: outcome?.reason ?? 'document_replaced_by_navigation',
         recommendedNextAction: 'The click navigated, which is the evidence that it was dispatched, but the document that held the expectation is gone, so the expectation was never evaluated. Confirm the outcome on the new page with browser_read or browser_login_state before doing anything else. Do not click again.' };
@@ -1793,8 +1900,8 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     }
     return await cdpAdvanced.run(name, args, { tab, page, guarded });
   }
-  if (!['browser_read', 'browser_at', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_choose', 'browser_pick', 'browser_login_state', 'browser_otp_fetch', 'browser_transient', 'browser_popup', 'browser_eval', 'browser_wait_for_selector'].includes(name) && !cdpAdvanced.names.has(name)) throw new Error('Unknown command');
-  const pageWriteTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_select', 'browser_choose', 'browser_pick', 'browser_popup']);
+  if (!['browser_read', 'browser_at', 'browser_shadow_tree', 'browser_find_text', 'browser_find_element', 'browser_prepare_action', 'browser_debug', 'browser_scan_overlays', 'browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_wait', 'browser_select', 'browser_select_verified', 'browser_choose', 'browser_choose_verified', 'browser_pick', 'browser_login_state', 'browser_otp_fetch', 'browser_transient', 'browser_popup', 'browser_eval', 'browser_wait_for_selector'].includes(name) && !cdpAdvanced.names.has(name)) throw new Error('Unknown command');
+  const pageWriteTools = new Set(['browser_click', 'browser_fill', 'browser_upload', 'browser_scroll', 'browser_scroll_element', 'browser_dismiss_overlay', 'browser_select', 'browser_select_verified', 'browser_choose', 'browser_choose_verified', 'browser_pick', 'browser_popup']);
   if (pageWriteTools.has(name) && !(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
   // A login submit is the one moment where a single frame is not enough: the
   // server navigates or the SPA swaps views, so a read taken right after the

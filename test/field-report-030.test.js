@@ -45,7 +45,7 @@ test('the tool index puts eval next to reading, where a stuck caller looks', () 
   // A goal phrased as "I cannot reach it" must land on eval.
   const guide = capabilityGuide({ goal: '这个卡片点不中，扫不到' });
   assert.equal(guide.primary.intent, 'script-or-escape-hatch');
-  assert.deepEqual(guide.primary.tools, ['browser_eval']);
+  assert.deepEqual(guide.primary.tools, ['browser_eval', 'browser_eval_verified']);
   assert.equal(guide.focusRequired, false);
 });
 

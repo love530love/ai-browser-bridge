@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.46.0**（已部署：服务 buildId `e8c61b9f…`，两个宿主扩展均为 0.46.0；部署状态以 doctor 为准），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.47.0**（运行中的服务与两个宿主扩展均为 0.47.0，buildId `2a0feab7…`；2026-11-18 09:11 空闲重启并双宿主自载重载，doctor/heartbeat 全绿），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.47.0 来自 2026-11-18 的赛事报名实测：让「验证」问出调用方真正想问的问题。`expect` 现在支持 `anyOf`（一次写出导航 / 行内报错 / 仅改 DOM 等多个合法结果，最多 6 个分支）、`anyChange`（与派发前基准相比 URL/文本/DOM/网络任一变化；派发前永不成立，因此不会造成假 `not_dispatched`）与 `stableForMs`（条件必须连续成立，瞬态 toast 不能冒充成功）；成功返回 `outcome`（`navigated|dom_changed|condition_met`），失败在行内错误可见时返回 `validationErrors` 和 `validation_error`；`not_dispatched` 会带 `matchedIn`（selector、可见性、是否瞬态 toast），命中残留提示时换条件而不是重试。`commandId` 现在与整次参数绑定：只存每个参数的 SHA-256 摘要，改参复用旧 id 返回 `command_id_params_mismatch` + `suggestedCommandId`，既不派发也不回放旧结果。新增 `browser_eval_verified`，把 `.el-radio__original` 这类 ref 触不到的隐藏原生 input、以及同源 `javascript:void(0)` SPA 导航的 JS 点击纳入审计账本（`mechanism:"js_eval"`、单次派发、`expect` 验证）；新增只读的 `browser_capture_element(ref, scale)`，按元素裁切放大截图（1–8 倍、不注入 overlay），验证码不再需要临时 DOM。`browser_read` 的 `notices` 按 computed style 与 `aria-hidden` 过滤，已消失的 toast 移入 `staleNotices`，也不再能满足 `textAppears`。全量测试 1083/1083。
 
 0.46.0 让失败第一次有了统一、可分支的词表。服务与扩展现在都会给结构化失败附上六个族之一——`HOST_FLAPPED` / `TAB_OCCLUDED` / `CSP_BLOCKED` / `DEBUGGER_STUCK` / `TARGET_GONE` / `TIMEOUT_UNKNOWN`，每族带 `retryPolicy`（只读可重试 / 永不重试）与下一步；原有 reason 文本保持不变。扩展侧超时看门狗先用 tab/窗口证据自报，服务侧超时从此只表示「扩展没回话」。深度感知补上了 Chrome 156 的真机坑：`Debugger.enable` replay 会漏掉主世界页面脚本，`browser_script_inventory` / `browser_source_map` 现在合并 `document.scripts` 并用扩展 fetch 取脚本与 map。新增 `test/bench/surfaces.js` + `surfaces-run.js` 跨页面基准：shadow DOM、iframe、无 role 卡片、虚拟列表、遮挡浮层、原生对话框、HTML5 拖拽、canvas、source map、打印下载十个表面，以服务端写记录为唯一判据，输出首击成功率、恢复次数、`false_success`、前台变化、步骤与耗时；8 条不变量、退出码 0/1/2。真机跑分为 **8/8、EXIT=0、52.1s**：6 个表面命中服务端写，`false_success=0`，全局前台变化 0。后台标签里的 JavaScript 对话框由 Chrome 直接压掉（`confirm()` 立即返回），`browser_dialog wait` 现在 6ms 内返回 `TAB_OCCLUDED` 结构化拒绝而不是空等 12 秒；要真正回答对话框须由人类把标签切到前台一次。
 
@@ -349,7 +351,7 @@ Chrome 面板应显示「已连接」、角标 `ON`。若 30 秒内未恢复，�
 }
 ```
 
-MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 133 个工具（0.46.0），`browser_screenshot` 返回 MCP 图片内容。
+MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 135 个工具（0.47.0），`browser_screenshot` 返回 MCP 图片内容。
 
 ### Qoder 插件与全局连接器
 

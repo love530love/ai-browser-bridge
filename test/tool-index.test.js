@@ -26,7 +26,9 @@ test('the whole index stays small enough to read before a task', () => {
   assert.equal(result.status, 'success');
   assert.equal(result.groups.length, TOOL_GROUPS.length);
   const bytes = Buffer.byteLength(result.index, 'utf8');
-  assert.ok(bytes < 3500, `the index must stay a fraction of the 68.6 KB catalogue, got ${bytes} bytes`);
+  // 0.47.0 added browser_eval_verified and browser_capture_element; the ceiling
+  // moves by the two names, not by a new order of magnitude.
+  assert.ok(bytes < 3800, `the index must stay a fraction of the 68.6 KB catalogue, got ${bytes} bytes`);
   for (const group of TOOL_GROUPS) assert.ok(result.index.includes(group.id), `${group.id} must be in the text index`);
 });
 

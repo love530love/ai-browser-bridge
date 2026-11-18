@@ -66,6 +66,19 @@ export function isFailure(result) {
 // than coverage here, because two plausible steps for one failure is the same
 // problem as none.
 const RULES = [
+  // The same id with different arguments is not a resend, and the recorded
+  // answer does not apply to the new call. Nothing was dispatched, so a fresh id
+  // is the correct retry - and only after checking which arguments changed.
+  {
+    id: 'command_id_params_mismatch',
+    match: r => r.reason === 'command_id_params_mismatch' && typeof r.suggestedCommandId === 'string',
+    step: (r, a) => ({
+      kind: 'retry_with_changes',
+      tool: a.__tool,
+      arguments: { ...stripInternal(a), commandId: r.suggestedCommandId },
+      why: `This commandId already identified a different command${Array.isArray(r.changedArgs) && r.changedArgs.length ? ` (changed: ${r.changedArgs.join(', ')})` : ''}. The recorded outcome was NOT replayed and nothing was dispatched. This step repeats the call with a fresh commandId; confirm the new arguments are the ones you mean, and if an earlier dispatch may have landed, read the page before sending it.`
+    })
+  },
   // Already done. The only correct move is to stop, and saying so explicitly is
   // what stops a caller from treating a suppression as a failure to retry.
   {

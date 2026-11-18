@@ -1,3 +1,33 @@
+## 0.47.0 — 2026-11-18（**提交结果的多分支期望 / commandId 参数绑定 / eval 审计写 / 元素级放大截图**）
+
+触发：2026-11-18 赛事报名实测报告（`docs/FIELD-REPORT-20261118-competition-registration.md`，Bridge 0.46.0 + Chrome 156，华为云/昇腾/数字武当杯全部报名成功）。四次报名暴露了「验证契约问的问题和调用方想问的不是同一个」：提交可能导航、行内报错、或只发请求，而 `expect` 只能描述一种；复用 `commandId` 改参数会重放旧的 `not_dispatched`；登录 toast 让 `textAppears:"成功"` 在点击前就为真，提交根本没发出；Element Plus 单选与 `javascript:void(0)` 导航只能靠无账本的 `browser_eval` 点击。
+
+### 交付
+
+- **P0 多分支期望（`anyOf` / `anyChange` / `stableForMs`）**：expect 新增 `anyOf`（1–6 个分支，分支内可带自己的 `stableForMs`）、`anyChange`（URL/可见文本/DOM 节点数/同源资源数与派发前基准相比有任一变化；派发前永远不成立，因此不会造成假 `not_dispatched`）与 `stableForMs`（条件需连续成立，上限 5000ms，瞬态 toast 无法满足）。click/fill/select/choose/upload/action/eval 七个 `_verified` 工具共用同一匹配器；结果新增 `outcome`（`navigated|dom_changed|condition_met|validation_error|no_change`）与 `validationErrors`（仅在行内错误真实可见时给出）。只有 `stableForMs` 没有可观察条件的 expect 会在 `validateCall` 阶段被拒绝。
+- **P0 `not_dispatched` 命中位置**：期望在派发前已成立时，返回 `matchedIn`（selector、可见性、`isTransient`），并标注命中来自 toast/notice 容器；调用方据此换条件，而不是重试。
+- **P0 commandId 参数绑定**：服务端对除 `commandId` 外的每个参数计算 SHA-256 摘要（只存摘要，不存参数原文或秘密），复用同一 `commandId` 且参数不同时返回 `status:"denied"`、`reason:"command_id_params_mismatch"`、`suggestedCommandId`、`changedArgs`，不派发、不回放旧结果；参数完全相同时仍是 `duplicate_suppressed`。`next-step.js` 新增同名规则，直接给出带新 id 的 `retry_with_changes` 步骤。账本仍为内存态（服务重启即清空）。
+- **P1 `browser_eval_verified`**：受审计的 eval 写通道——`expression` + `expect`（同一套 anyOf/anyChange/stableForMs）+ 可选 `commandId`，最多派发一次；派发前已满足返回 `not_dispatched` 与 `matchedIn`，派发后未观察到为 `uncertain` 且不重试，成功时记录 `mechanism:"js_eval"` 与 `outcome`。用于 ref 无法触达的控件：隐藏的原生 input（如 Element Plus `.el-radio__original`）、canvas 热区。普通 `browser_eval` 仍是读探针，两者性质在描述中写明。
+- **P1 同源 SPA 导航放行**：点击锚点检查不再把同源文档内的惰性 `href="javascript:void(0)"` 当作跨源跳转拒绝，结果标注 `inlineNavigation:true`；真实跨源链接仍拒绝。
+- **P2 `browser_capture_element`**：按 ref 截取元素并放大（`scale` 1–8，默认 4；`padding` 0–24；png/jpeg）。以 CDP 裁切文档坐标实现，不向页面注入 overlay；隐藏标签先做 screencast 预热帧再截图。只读工具，验证码读取不再需要 `#__capzoom` 这类临时 DOM。
+- **P2 notices 可见性过滤**：`collectNotices` 按 computed style（display/visibility/opacity/inert/几何）与 `aria-hidden` 把告警分为 `notices`（live）与 `staleNotices`；已消失的 toast 不再冒充可见告警，文本匹配器使用同一可见性门，隐藏 toast 不能令 `textAppears` 成立。
+- **P2 文档**：`docs/COMPONENT-OPERATIONS.md` 新增 Element Plus 配方（radio 必须点 `.el-radio__original`；checkbox 点 label 可勾选；date 用 `browser_fill_verified` 写入 `YYYY-MM-DD` 后组件接受但右侧摘要不实时更新，摘要不能作为证据）；`docs/ACTION-RELIABILITY.md` 补充结果分叉的判定边界；操作 Skill 同步新契约。
+- **修复：`browser_select_verified` / `browser_choose_verified` 分发缺口**：两者 0.46.0 已有页面实现，但不在扩展命令白名单内，调用会得到 `Unknown command`（契约里却一直列为可用的受审计写）。本版把两者纳入分发与写工具门控，派发前基准、`matchedIn`/`anyOf`、`outcome`、receipt 与重复抑制与其它 `_verified` 工具一致；`browser_action_verified` 也从旧的 `executeScript` 文本基线改走统一期望引擎。
+
+### 验收
+
+- 全量 `npm test` → **1083/1083**（exit 0，0 fail；0.47.0）。新增 `test/field-report-1118.test.js` 8 项（expect 组合语法与拒绝规则、matchedIn/outcome 源码锚点、`browser_action_verified` 走统一期望引擎且不再用 executeScript 文本基线、select/choose `_verified` 可分发且共享基准与 outcome、commandId mismatch 下一步、eval_verified 与 void-link 放行、元素截图无注入、notices live/stale）与 `test/multi-host.test.js` 1 项（真实 WebSocket 宿主下：改参复用 commandId → mismatch + 新 id 可用；完全同参 → duplicate_suppressed；两次都没有第二次派发）。
+- 插件版本同步：`node scripts/sync-qoder-plugin.mjs --check` → `PLUGIN_CHECK_OK version=0.47.0 skillFiles=1`。
+- 工具数 133 → 135（`browser_eval_verified`、`browser_capture_element`）；工具索引 3520 字节，围栏从 3500 调到 3800。
+- **已部署（2026-11-18 09:11 +0800）**：`restart-service-when-idle --apply` 空闲重启（新服务 pid 73692，buildId `2a0feab7…`），两个宿主（Chrome 156 generic、Chrome 157 agent-embedded）各自 `chrome.runtime.reload` 自载；随后 doctor 六项全绿（service/build/deployment/extension 均 0.47.0），heartbeat 无 findings、`degraded:false`，两次重载均未抢焦点、未开标签页。
+
+### 边界
+
+- `anyOf` 是「任一分支成立」，不表达分支顺序或互斥；`stableForMs` 只证明条件持续，不证明服务端已落库——提交类仍应优先 `urlContains` + 落地页元素。
+- `browser_eval_verified` 与 `browser_eval` 一样在页面主世界执行，拥有完整页面权限；它把 eval 纳入账本与验证，但不是沙箱。
+- `browser_capture_element` 只覆盖当前视口内可见/可绘制的元素；滚出视口的元素仍先滚动再截。`browser_ocr` 的 ref 范围识别（报告中的可选项）未实现。
+- commandId 账本存于服务内存，服务重启后旧 id 不再具有抑制力；持久化幂等不在本版范围。
+
 ## 未发布 — Qoder 插件与全局连接器（工具，不影响服务 buildId）
 
 - **Qoder 插件源**（`qoder-plugin/ai-browser-bridge/`）：`.qoder-plugin/plugin.json` + `.mcp.json`（`${QODER_NODE_RUNTIME}` + `${QODER_PLUGIN_ROOT}`）+ 启动器 `bin/launch-bridge.mjs`。插件只带 Skill 契约与 MCP 客户端入口，不复制服务代码，不含 `.local` 配置、token、cookie 或日志。

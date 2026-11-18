@@ -113,7 +113,7 @@ test('the intent index is answered locally and stays small', async t => {
   await bridge.listen(); t.after(() => bridge.close());
   const result = await bridge.call('browser_tool_index', {});
   assert.equal(result.status, 'success');
-  assert.ok(Buffer.byteLength(result.index, 'utf8') < 3500);
+  assert.ok(Buffer.byteLength(result.index, 'utf8') < 3800);
   const one = await bridge.call('browser_tool_index', { group: 'network' });
   assert.deepEqual(one.groups, ['network']);
 });

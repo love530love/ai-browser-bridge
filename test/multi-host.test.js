@@ -489,6 +489,44 @@ test('a repeated commandId is never dispatched a second time', async t => {
   a.ws.close();
 });
 
+test('a reused commandId with changed arguments is refused, not replayed', async t => {
+  // Measured in the 2026-11-18 field report: the caller changed expect from
+  // "成功" to "报名成功" but kept the commandId, and got the old not_dispatched
+  // back. The ledger now fingerprints the arguments, so the answer that arrives
+  // belongs to the question that was asked.
+  const { b, wsUrl } = await setup(t);
+  const a = await connectHost(wsUrl, { hostId: 'h-a' });
+  const commands = collectCommands(a.ws);
+  a.ws.on('message', raw => {
+    const msg = JSON.parse(raw);
+    if (msg.type === 'command') reply(a.ws, msg, { status: 'success', value: 1 });
+  });
+  const first = await b.call('browser_read', { tabId: 1, commandId: 'cmd-args', maxChars: 4000 });
+  assert.equal(first.value, 1);
+
+  const changed = await b.call('browser_read', { tabId: 1, commandId: 'cmd-args', maxChars: 8000 });
+  assert.equal(changed.status, 'denied');
+  assert.equal(changed.reason, 'command_id_params_mismatch');
+  assert.equal(changed.dispatched, false);
+  assert.equal(changed.commandId, 'cmd-args');
+  assert.deepEqual(changed.changedArgs, ['maxChars']);
+  assert.match(changed.suggestedCommandId, /^[0-9a-f-]{36}$/);
+  assert.notEqual(changed.suggestedCommandId, 'cmd-args');
+  assert.match(changed.nextStep?.why ?? changed.recommendedNextAction, /not replayed|different command/i);
+  assert.equal(commands.length, 1, 'a mismatch must not dispatch');
+
+  // The exact same arguments still replay the recorded outcome.
+  const same = await b.call('browser_read', { tabId: 1, commandId: 'cmd-args', maxChars: 4000 });
+  assert.equal(same.status, 'duplicate_suppressed');
+  assert.equal(commands.length, 1);
+
+  // And the suggested id is usable for the new arguments.
+  const retried = await b.call('browser_read', { tabId: 1, commandId: changed.suggestedCommandId, maxChars: 8000 });
+  assert.equal(retried.value, 1);
+  assert.equal(commands.length, 2);
+  a.ws.close();
+});
+
 test('the same hostId reconnecting supersedes its stale socket with 4004', async t => {
   const { b, wsUrl } = await setup(t);
   const a = await connectHost(wsUrl, { hostId: 'h-a' });

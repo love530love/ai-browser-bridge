@@ -355,24 +355,45 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   // inside (a whole <form> matches [class*=error] on some frameworks and would
   // be reported as a 3000-character "notice"), deduped by text, capped.
   const NOTICE_SELECTOR = '[role=alert],[role=status],[aria-live=polite],[aria-live=assertive],dialog[open],[class*=error i],[class*=alert i],[class*=toast i],[class*=notice i],[class*=invalid i],[class*=warn i],[class*=message i],[id*=error i],[id*=alert i],[id*=toast i]';
+  // A notice that is still in the DOM is not necessarily on screen. Element Plus
+  // keeps an el-notification node with an enter-from/leave-to class and zero
+  // opacity when its transition is throttled or finished, and the old scan
+  // reported that as a live notice on every later read - which then satisfied a
+  // textAppears expectation before the caller's click was ever dispatched.
+  // Visibility is now measured fresh (computed style + layout box) and
+  // aria-hidden subtrees are excluded; entries that fail are returned separately
+  // as staleNotices so the evidence is not silently dropped.
   const collectNotices = (limit = 5, deadline = Infinity) => {
-    const found = [];
+    const live = [];
+    const stale = [];
     const seen = new Set();
     let scanned = 0;
     let list;
-    try { list = document.querySelectorAll(NOTICE_SELECTOR); } catch { return found; }
+    try { list = document.querySelectorAll(NOTICE_SELECTOR); } catch { return { live, stale }; }
     for (const el of list) {
-      if (found.length >= limit || performance.now() >= deadline || ++scanned > 400) break;
+      if (live.length >= limit || performance.now() >= deadline || ++scanned > 400) break;
       try {
-        if (!visible(el) || sensitive(el)) continue;
+        if (sensitive(el)) continue;
         if (el.querySelector('input,textarea,select,button[type=submit]')) continue;
         const text = clean(el.textContent || el.getAttribute('aria-label') || '');
         if (text.length < 2 || text.length > 300 || seen.has(text)) continue;
         seen.add(text);
-        found.push({ text, role: el.getAttribute('role') || null, tag: el.tagName.toLowerCase(), selector: shortSelector(el), live: el.getAttribute('aria-live') || null });
+        const entry = { text, role: el.getAttribute('role') || null, tag: el.tagName.toLowerCase(), selector: shortSelector(el), live: el.getAttribute('aria-live') || null };
+        if (visible(el, true) && !ariaHidden(el)) {
+          live.push({ ...entry, visible: true });
+          continue;
+        }
+        if (stale.length >= 3) continue;
+        const style = getComputedStyle(el);
+        const hiddenReason = style.display === 'none' ? 'display_none'
+          : style.visibility === 'hidden' ? 'visibility_hidden'
+            : Number(style.opacity) === 0 ? 'opacity_zero'
+              : ariaHidden(el) ? 'aria_hidden'
+                : 'no_layout_box';
+        stale.push({ ...entry, visible: false, hiddenReason });
       } catch { /* one unreadable node must not cost the whole read */ }
     }
-    return found;
+    return { live, stale };
   };
   // A virtualised list does not render a row until it is near the viewport, so a
   // search for that row fails with "not found" while the row exists. That is a
@@ -1391,22 +1412,171 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { candidates: items.sort((a, b) => b.score - a.score).slice(0, maxResults), partial: diagnostics.textScanPartial || diagnostics.controlScanPartial, diagnostics };
   };
   const pageText = () => document.body?.innerText || '';
-  const expectationState = (expect = {}, context = {}) => {
+  // Evidence for a matched condition, not just a boolean. A submit expectation
+  // was satisfied by a stale login toast, and the caller had no way to tell that
+  // from real form text: the old matcher scanned body.innerText, which still
+  // contains text that has no layout box (opacity 0, aria-hidden, a Vue
+  // transition frozen in its enter-from frame). A match now carries where it
+  // was found, whether that element is visible right now, and whether it lives
+  // in a transient notice container.
+  const NOTICE_ANCESTOR = '[role=alert],[role=status],[aria-live],[class*=toast i],[class*=snackbar i],[class*=notification i],[class*=notify i],[class*=alert i],[class*=notice i],[class*=message i]';
+  const ariaHidden = el => !!el.closest?.('[aria-hidden="true"]');
+  const findTextMatch = needle => {
+    if (typeof needle !== 'string' || !needle) return { match: null, partial: false };
+    if (!pageText().includes(needle)) return { match: null, partial: false };
+    const root = document.body || document.documentElement;
+    if (!root) return { match: null, partial: false };
+    const deadline = performance.now() + 150;
+    let scanned = 0;
+    let partial = false;
+    let best = null;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (++scanned > 4000 || performance.now() > deadline) { partial = true; break; }
+      if (sensitive(node)) continue;
+      const text = node.textContent || '';
+      if (!text.includes(needle)) continue;
+      if (!visible(node, true) || ariaHidden(node)) continue;
+      // The deepest visible carrier is the most specific evidence; a body-level
+      // match would only repeat the stale innerText that produced the collision.
+      if (!best || text.length < best.length) best = { el: node, length: text.length };
+    }
+    if (!best) return { match: null, partial };
+    const notice = best.el.closest(NOTICE_ANCESTOR);
+    const kind = notice ? (transientKind(notice) || 'notice') : '';
+    return {
+      partial,
+      match: {
+        selector: shortSelector(best.el),
+        tag: best.el.tagName.toLowerCase(),
+        text: squash(best.el.textContent).slice(0, 160),
+        visible: true,
+        isTransient: !!kind,
+        ...(kind ? { transient: { kind, component: transientComponent(notice) } } : {})
+      }
+    };
+  };
+  const changeSnapshot = () => ({
+    url: location.href,
+    text: pageText(),
+    domNodes: typeof document.getElementsByTagName === 'function' ? document.getElementsByTagName('*').length : null,
+    resources: typeof performance !== 'undefined' && typeof performance.getEntriesByType === 'function'
+      ? performance.getEntriesByType('resource').length : null
+  });
+  const classifyChange = (baseline, current) => {
+    if (!baseline || !current) return { changed: false, changes: [] };
+    const changes = [];
+    if (baseline.url !== current.url) changes.push('url');
+    if (baseline.text !== current.text) changes.push('text');
+    if (baseline.domNodes !== null && current.domNodes !== null && baseline.domNodes !== current.domNodes) changes.push('dom');
+    if (baseline.resources !== null && current.resources !== null && baseline.resources !== current.resources) changes.push('network');
+    return { changed: changes.length > 0, changes };
+  };
+  // Inline form errors are the other half of a submit's outcome: a click that
+  // changed nothing and painted a red sentence is not "no change", it is a
+  // rejected submission. Visible-only and bounded, like every other read here.
+  const validationState = (limit = 5) => {
+    const messages = [];
+    const selector = '[aria-invalid=true],.el-form-item.is-error .el-form-item__error,.el-form-item__error,.ant-form-item-has-error .ant-form-item-explain-error,.ant-form-item-explain-error,[class*=field-error i],[class*=error-message i]';
+    let nodes;
+    try { nodes = document.querySelectorAll(selector); } catch { return messages; }
+    for (const el of nodes) {
+      if (messages.length >= limit) break;
+      try {
+        if (!visible(el, true) || ariaHidden(el)) continue;
+        const text = squash(el.textContent || el.getAttribute('aria-label') || '');
+        if (text) messages.push({ selector: shortSelector(el), text: text.slice(0, 200) });
+      } catch { /* one unreadable node must not cost the verdict */ }
+    }
+    return messages;
+  };
+  const evaluateSimpleExpectation = (expect = {}, context = {}) => {
     const checks = {};
-    if (typeof expect.textAppears === 'string') checks.textAppears = pageText().includes(expect.textAppears);
+    const matchedIn = {};
+    let textScanPartial = false;
+    if (typeof expect.textAppears === 'string') {
+      const found = findTextMatch(expect.textAppears);
+      checks.textAppears = !!found.match;
+      if (found.match) matchedIn.textAppears = found.match;
+      textScanPartial = found.partial;
+    }
     if (typeof expect.urlContains === 'string') checks.urlContains = location.href.includes(expect.urlContains);
     if (typeof expect.elementLabelAppears === 'string') {
       const needle = expect.elementLabelAppears.replace(/\s+/g, ' ').trim();
-      checks.elementLabelAppears = [...document.querySelectorAll('a,button,input,textarea,select,[role=button],[role=option],[role=combobox],[contenteditable=true]')]
-        .some(el => visible(el) && label(el).replace(/\s+/g, ' ').trim().includes(needle));
+      const node = [...document.querySelectorAll('a,button,input,textarea,select,[role=button],[role=option],[role=combobox],[contenteditable=true]')]
+        .find(el => visible(el, true) && !ariaHidden(el) && label(el).replace(/\s+/g, ' ').trim().includes(needle));
+      checks.elementLabelAppears = !!node;
+      if (node) matchedIn.elementLabelAppears = { selector: shortSelector(node), tag: node.tagName.toLowerCase(), text: squash(label(node)).slice(0, 160), visible: true, isTransient: false };
     }
     if (typeof expect.valueMatches === 'string') checks.valueMatches = (typeof context.getValue === 'function' ? context.getValue() : context.value) === expect.valueMatches;
     if (typeof expect.fileNameAppears === 'string') checks.fileNameAppears = pageText().includes(expect.fileNameAppears) || context.fileName === expect.fileNameAppears;
-    return { checks, satisfied: Object.keys(checks).length > 0 && Object.values(checks).every(Boolean) };
+    const specified = Object.keys(checks).length > 0;
+    return { checks, matchedIn, specified, satisfied: specified && Object.values(checks).every(Boolean), diagnostics: { textScanPartial } };
+  };
+  const expectationState = (expect = {}, context = {}) => {
+    let state;
+    if (Array.isArray(expect.anyOf) && expect.anyOf.length) {
+      // A submit has more than one legitimate outcome: a navigation, a durable
+      // inline confirmation, or a row that now says "pending review". The caller
+      // names those alternatives once, and any one of them counts.
+      const branches = expect.anyOf.map(branch => evaluateSimpleExpectation(branch, context));
+      const index = branches.findIndex(branch => branch.specified && branch.satisfied);
+      state = {
+        checks: { anyOf: index >= 0 },
+        matchedIn: index >= 0 ? branches[index].matchedIn : {},
+        anyOf: { matchedBranch: index >= 0 ? index : null, branches: branches.map((b, i) => ({ index: i, checks: b.checks })) },
+        specified: true,
+        satisfied: index >= 0,
+        diagnostics: { textScanPartial: branches.some(b => b.diagnostics.textScanPartial) }
+      };
+    } else {
+      state = evaluateSimpleExpectation(expect, context);
+    }
+    if (expect.anyChange === true) {
+      // anyChange has no meaning before a dispatch: there is no reference point
+      // to compare against. Called without a baseline (the pre-dispatch check),
+      // it can never be already satisfied, which is the correct answer.
+      const change = context.changeBaseline
+        ? classifyChange(context.changeBaseline, changeSnapshot())
+        : { changed: false, changes: [], reason: 'no_baseline_before_dispatch' };
+      state.checks.anyChange = change.changed;
+      state.change = change;
+      state.specified = true;
+      state.satisfied = state.satisfied && change.changed;
+    }
+    return state;
   };
   const verify = async (expect = {}, timeoutMs = 3000, context = {}) => {
     const started = Date.now();
+    // A branch may name its own stability window ("the toast must hold 300ms");
+    // whichever alternative is matched then has to hold for the longest window.
+    const branchStable = Array.isArray(expect?.anyOf)
+      ? expect.anyOf.reduce((max, branch) => Math.max(max, Number.isFinite(branch?.stableForMs) ? branch.stableForMs : 0), 0)
+      : 0;
+    const stableForMs = Math.min(5000, Math.max(0, Number.isFinite(expect?.stableForMs) ? expect.stableForMs : 0, branchStable));
     const run = () => expectationState(expect, context);
+    let satisfiedSince = null;
+    const settle = () => {
+      const state = run();
+      if (!state.satisfied) { satisfiedSince = null; return { state, done: false }; }
+      if (stableForMs === 0) { satisfiedSince = Date.now(); return { state, done: true }; }
+      if (satisfiedSince === null) satisfiedSince = Date.now();
+      return { state, done: Date.now() - satisfiedSince >= stableForMs };
+    };
+    const shape = (state, status) => ({
+      status,
+      checks: state.checks,
+      matchedIn: state.matchedIn || {},
+      ...(state.anyOf ? { anyOf: state.anyOf } : {}),
+      ...(state.change ? { change: state.change } : {}),
+      ...(state.diagnostics?.textScanPartial ? { textScanPartial: true } : {}),
+      ...(Object.values(state.matchedIn || {}).some(m => m?.isTransient)
+        ? { transient: true, transientNote: 'The matched evidence is inside a toast/notice container. It may disappear before the transaction settles; prefer urlContains or a stable element, or raise stableForMs.' }
+        : {}),
+      stability: { stableForMs, heldMs: satisfiedSince === null ? 0 : Math.max(0, Date.now() - satisfiedSince) },
+      elapsedMs: Date.now() - started
+    });
     let initial = run();
     // A controlled framework input can synchronously reflect the fill and roll
     // it back on its next scheduled render. Give that commit one short settle
@@ -1415,16 +1585,28 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       await new Promise(resolve => setTimeout(resolve, Math.min(50, timeoutMs)));
       initial = run();
     }
-    if (initial.satisfied) return { status: 'success', checks: initial.checks, elapsedMs: Date.now() - started };
+    if (initial.satisfied && stableForMs === 0) return shape(initial, 'success');
+    if (initial.satisfied) satisfiedSince = Date.now();
     return await new Promise(resolve => {
-      const finish = () => {
-        const result = run();
-        observer.disconnect();
+      let finished = false;
+      const finish = state => {
+        if (finished) return;
+        finished = true;
+        try { observer.disconnect(); } catch { /* the document may be gone */ }
         clearTimeout(timer);
-        resolve({ status: result.satisfied ? 'success' : 'failed', checks: result.checks, elapsedMs: Date.now() - started });
+        if (ticker) clearInterval(ticker);
+        resolve(shape(state, state.satisfied ? 'success' : 'failed'));
       };
-      const observer = new MutationObserver(() => { if (run().satisfied) finish(); });
-      const timer = setTimeout(finish, Math.max(0, timeoutMs - (Date.now() - started)));
+      const tick = () => {
+        const next = settle();
+        if (next.done) finish(next.state);
+        else if (Date.now() - started >= timeoutMs) finish(next.state);
+      };
+      const observer = new MutationObserver(tick);
+      // A stability window is time-based: one mutation can start it, but only a
+      // timer proves the condition survived it on a page that then went quiet.
+      const ticker = stableForMs > 0 ? setInterval(tick, Math.min(100, Math.max(40, Math.floor(stableForMs / 4)))) : null;
+      const timer = setTimeout(() => finish(run()), Math.max(0, timeoutMs - (Date.now() - started)));
       observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true });
     });
   };
@@ -2052,7 +2234,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     elements.push(...clickableElements);
     // Extract rendered text nodes, not input values, scripts, or hidden content.
     const collected = collectReadableText({ max, maxTextNodes, deadline });
-    const notices = collectNotices(5, deadline);
+    const noticeScan = collectNotices(5, deadline);
     timings.totalMs = Math.round(performance.now() - started);
     const partial = elementsBudgetHit || collected.textBudgetHit || overBudget();
     // A dialog that is on screen but yields no controls is not an empty dialog:
@@ -2069,7 +2251,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
         .map(node => ({ field: label(node) || node.name || node.id || node.tagName.toLowerCase(),
           value: typeof node.value === 'string' ? node.value.slice(0, 500) : null }))
       : [];
-    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, sameAsPrevious: reusable, refsReusable: reusable, refLifetime: 'Refs stay valid across reads while the element list is unchanged; a changed list mints a new snapshot.', notices, text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: `main-frame; light DOM; ${scopeUsed}`, scopeUsed, ...(overlay ? { overlay: { selector: overlay.selector, zIndex: overlay.zIndex, controls: overlayControls } } : {}), ...(overlaySettling ? { overlaySettling: { selector: overlay.selector, note: 'A visible dialog matched but yielded no controls. An entrance animation keeps its contents at opacity 0 for a moment, so this is not evidence that the dialog is empty. Wait 300-500ms (browser_wait with ms) and read again before concluding anything.' } } : {}), diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates, elementsReturned: elements.length, secretFieldsRedacted: elements.filter(e => e.secret).length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit, overlayControls }, ...(formValues.length ? { formValues, formValuesNote: 'Values are current DOM values from input/textarea/select, not server-confirmed data. Password, hidden and [data-ai-private] fields are excluded.' } : {}), contentTrust: 'untrusted webpage data' };
+    return { title: document.title, url: location.href, readyState: document.readyState, viewport: { width: innerWidth, height: innerHeight }, snapshot, sameAsPrevious: reusable, refsReusable: reusable, refLifetime: 'Refs stay valid across reads while the element list is unchanged; a changed list mints a new snapshot.', notices: noticeScan.live, ...(noticeScan.stale.length ? { staleNotices: noticeScan.stale, staleNoticesNote: 'These matched the notice selectors but have no visible layout now (a stale toast or a hidden banner). They are evidence, not live alerts: never let one satisfy a textAppears expectation.' } : {}), text: collected.text, truncated: collected.length >= max || collected.textBudgetHit, partial, elements, frameCount: document.querySelectorAll('iframe').length, scope: `main-frame; light DOM; ${scopeUsed}`, scopeUsed, ...(overlay ? { overlay: { selector: overlay.selector, zIndex: overlay.zIndex, controls: overlayControls } } : {}), ...(overlaySettling ? { overlaySettling: { selector: overlay.selector, note: 'A visible dialog matched but yielded no controls. An entrance animation keeps its contents at opacity 0 for a moment, so this is not evidence that the dialog is empty. Wait 300-500ms (browser_wait with ms) and read again before concluding anything.' } } : {}), diagnostics: { budgetMs: args.budgetMs ?? 6000, timings, ...mount, elementCandidates, elementsReturned: elements.length, secretFieldsRedacted: elements.filter(e => e.secret).length, maxElements, elementsBudgetHit, elementErrors, textNodesVisited: collected.textNodesVisited, maxTextNodes, textBudgetHit: collected.textBudgetHit, overlayControls }, ...(formValues.length ? { formValues, formValuesNote: 'Values are current DOM values from input/textarea/select, not server-confirmed data. Password, hidden and [data-ai-private] fields are excluded.' } : {}), contentTrust: 'untrusted webpage data' };
   }
   // Text search used to return the match and a list of "nearby elements" that
   // were nothing of the kind: on a real page the four entries were 客服, the
@@ -2805,6 +2987,16 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     return applyUpload(el, args, targetSource);
   }
+  // Ref-less expectation evaluation, used by browser_eval_verified: the eval
+  // itself runs in the page's MAIN world, but the expectation must be judged by
+  // the same code path as every ref-based write, or the two would drift.
+  if (name === 'browser_expect') {
+    const state = expectationState(args.expect || {}, { changeBaseline: args.changeBaseline || null });
+    return { ...state, ...(args.wantBaseline ? { changeBaseline: changeSnapshot() } : {}) };
+  }
+  if (name === 'browser_expect_verify') {
+    return await verify(args.expect || {}, args.timeoutMs ?? 3000, { changeBaseline: args.changeBaseline || null });
+  }
   const state = stateForRef(args.ref);
   const entry = state?.refs.get(args.ref);
   if (!entry || state.url !== location.href || !entry.el.isConnected || fingerprint(entry.el) !== entry.fingerprint) {
@@ -2862,8 +3054,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   }
   if (name === 'browser_upload') return applyUpload(el, args, 'ref');
   if (name === 'browser_upload_verified') {
+    const changeBaseline = changeSnapshot();
     const selected = await pageOperation('browser_upload', args, allowedOrigins, allSites);
-    const result = await verify(args.expect || {}, args.timeoutMs ?? 3000, { fileName: selected.fileName });
+    const result = await verify(args.expect || {}, args.timeoutMs ?? 3000, { fileName: selected.fileName, changeBaseline });
     return { selected, verification: result, status: result.status };
   }
   if (name === 'browser_select') {
@@ -2880,6 +3073,18 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const result = await chooseOption(el, exact, args.timeoutMs ?? 2500);
     return { ...result, note: 'Option clicked once; application acceptance still requires a fresh read.' };
   }
+  if (name === 'browser_element_box') {
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    const box = el.getBoundingClientRect();
+    if (!(box.width >= 1 && box.height >= 1)) throw new Error('Element has no layout box to capture');
+    return {
+      url: location.href,
+      rect: { x: box.left + window.scrollX, y: box.top + window.scrollY, width: box.width, height: box.height },
+      viewport: { width: innerWidth, height: innerHeight, scrollX: window.scrollX, scrollY: window.scrollY },
+      devicePixelRatio: window.devicePixelRatio || 1,
+      visibilityState: document.visibilityState
+    };
+  }
   if (name === 'browser_resolve') {
     el.scrollIntoView({ block: 'center', inline: 'nearest' });
     if (args.focus) el.focus();
@@ -2890,7 +3095,13 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { x, y, url: location.href };
   }
   if (name === 'browser_click') {
-    if (el instanceof HTMLAnchorElement) {
+    // Many SPAs render their app menu as href="javascript:void(0)" and route on
+    // the click handler. Refusing that anchor forced callers onto browser_eval,
+    // which had no ledger entry: a real state change with no audit trail. Only
+    // the inert forms (void(0) and a bare semicolon) are allowed here; any other
+    // javascript: URL still belongs on the audited eval path.
+    const inlineVoid = el instanceof HTMLAnchorElement && /^javascript:\s*(?:void\s*\(\s*0\s*\)|;)?\s*;?\s*$/i.test(el.getAttribute('href') || '');
+    if (el instanceof HTMLAnchorElement && !inlineVoid) {
       const target = new URL(el.href, location.href);
       if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password || (!allSites && !allowedOrigins.includes(target.origin))) throw new Error('Link target origin not allowed');
     }
@@ -2960,6 +3171,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const inDialog = !!el.closest('[aria-modal="true"],dialog,[role=dialog],[role=alertdialog],.ant-modal,.el-dialog');
     return {
       clicked: true, dispatched: true, effect, ...throttledInfo(),
+      ...(inlineVoid ? { inlineNavigation: true, noteInlineNavigation: 'The anchor href was inert javascript:void(0); the SPA route is driven by the click handler. Verify the route change with browser_read.' } : {}),
       diagnoseFlow: {
         domDelta: counts.domDelta, requests: counts.requests, fileInputs: counts.fileInputs,
         dialogs: counts.dialogs, recent,
@@ -2974,11 +3186,13 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     };
   }
   if (name === 'browser_click_verified') {
+    const changeBaseline = changeSnapshot();
     const baseline = expectationState(args.expect || {});
     if (baseline.satisfied) {
       return { status: 'not_dispatched', reason: 'expected_condition_already_satisfied', dispatched: false, retryable: false,
-        verification: { status: 'already_satisfied_before_action', checks: baseline.checks, elapsedMs: 0 },
-        recommendedNextAction: 'Re-observe the page and choose a condition that distinguishes this click from the existing state. No click was dispatched.' };
+        matchedIn: baseline.matchedIn, ...(baseline.anyOf ? { anyOf: baseline.anyOf } : {}),
+        verification: { status: 'already_satisfied_before_action', checks: baseline.checks, matchedIn: baseline.matchedIn, ...(baseline.anyOf ? { anyOf: baseline.anyOf } : {}), elapsedMs: 0 },
+        recommendedNextAction: 'The expected condition already holds before any click. matchedIn names the element that satisfied it: if it is a transient notice or unrelated text, pick a condition that only the click outcome produces (urlContains, elementLabelAppears, or anyOf). No click was dispatched.' };
     }
     const clicked = await pageOperation('browser_click', args, allowedOrigins, allSites);
     if (clicked?.__aibError) throw new Error(clicked.__aibError);
@@ -2989,17 +3203,24 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (clicked?.dispatched === false) return { ...clicked, status: 'not_dispatched' };
     let result;
     try {
-      result = await verify(args.expect || {}, args.timeoutMs ?? 3000);
+      result = await verify(args.expect || {}, args.timeoutMs ?? 3000, { changeBaseline });
     } catch {
       return { status: 'uncertain', reason: 'verification_interrupted_after_dispatch', dispatched: true, retryable: false,
         recommendedNextAction: 'The click was dispatched but page verification was interrupted. Re-observe and independently verify the outcome before any new action; do not click again automatically.' };
     }
+    const validationErrors = result.status === 'success' ? [] : validationState();
+    const outcome = result.status === 'success'
+      ? (result.change?.changed ? (result.change.changes.includes('url') ? 'navigated' : 'dom_changed') : 'condition_met')
+      : (validationErrors.length ? 'validation_error' : 'no_change');
     if (result.status !== 'success') {
-      return { clicked, verification: { ...result, status: 'not_observed' }, status: 'uncertain',
+      return { clicked, outcome, ...(validationErrors.length ? { validationErrors } : {}),
+        verification: { ...result, status: 'not_observed' }, status: 'uncertain',
         reason: 'expected_outcome_not_observed', dispatched: true, retryable: false,
-        recommendedNextAction: 'The click was dispatched, but its expected outcome was not observed before the deadline. Re-observe and independently verify whether it completed; do not click again automatically.' };
+        recommendedNextAction: validationErrors.length
+          ? 'The click was dispatched and the form now shows an inline validation error. That is a real answer from the page, not a missing observation: read the error, correct the field, and resubmit only after the form state is understood.'
+          : 'The click was dispatched, but its expected outcome was not observed before the deadline. Re-observe and independently verify whether it completed; do not click again automatically.' };
     }
-    return { clicked, verification: result, status: 'success', dispatched: true, retryable: false };
+    return { clicked, outcome, verification: result, status: 'success', dispatched: true, retryable: false };
   }
   if (name === 'browser_fill') {
     if (typeof args.text !== 'string' || args.text.length > 20000 || el.readOnly) throw new Error('Invalid text or readonly field');
@@ -3070,6 +3291,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     return { filled: true, characters: args.text.length, valueMatches: observed === args.text, ...persistence, dispatchedEvents: ['input', 'change'], applicationStateVerified: false, note: 'persisted is measured after the page had a chance to re-render, so persisted:false means the value did not survive a framework render. Application acceptance still requires observation. Clearing a search field does not necessarily exit search mode; inspect the clear control or use browser_key with Escape if supported by the site.' };
   }
   if (name === 'browser_fill_verified') {
+    const changeBaseline = changeSnapshot();
     const filled = await pageOperation('browser_fill', args, allowedOrigins, allSites);
     const current = el.isContentEditable ? el.textContent : el.value;
     // A secret fill compares against the text that was sent and nothing else. A
@@ -3081,7 +3303,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     // Other expectations are dropped with it: the only outcome that matters for a
     // credential write is whether the field holds what we wrote.
     const secretExpect = args.secret === true;
-    const result = await verify(secretExpect ? { valueMatches: args.text } : (args.expect || { valueMatches: args.text }), args.timeoutMs ?? 3000, { value: current, getValue: () => el.isConnected ? (el.isContentEditable ? el.textContent : el.value) : undefined });
+    const result = await verify(secretExpect ? { valueMatches: args.text } : (args.expect || { valueMatches: args.text }), args.timeoutMs ?? 3000, { value: current, getValue: () => el.isConnected ? (el.isContentEditable ? el.textContent : el.value) : undefined, changeBaseline });
     const secretNote = secretExpect ? { expectValueMatchesIgnored: 'secret fill compares against the text that was sent; a caller-supplied expectation is not used' } : {};
     if (result.status !== 'success') return { filled, verification: { ...result, status: 'not_observed' }, status: 'uncertain', ...secretNote,
       reason: 'filled_value_not_observed', dispatched: true, retryable: false,
@@ -3090,35 +3312,55 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   }
   if (name === 'browser_select_verified') {
     if (!(el instanceof HTMLSelectElement)) throw new Error('Element is not a native select');
-    const baseline = expectationState({ valueMatches: args.value }, { value: el.value, getValue: () => el.isConnected ? el.value : undefined });
+    const expect = args.expect || { valueMatches: args.value };
+    const valueContext = { value: el.value, getValue: () => el.isConnected ? el.value : undefined };
+    const baseline = expectationState(expect, valueContext);
     if (baseline.satisfied) {
-      return { status: 'not_dispatched', reason: 'expected_value_already_selected', dispatched: false, retryable: false,
-        verification: { status: 'already_selected_before_action' },
-        recommendedNextAction: 'The select already holds the expected value. No selection was dispatched.' };
+      return { status: 'not_dispatched', reason: 'expected_condition_already_satisfied', dispatched: false, retryable: false,
+        matchedIn: baseline.matchedIn, ...(baseline.anyOf ? { anyOf: baseline.anyOf } : {}),
+        verification: { status: 'already_satisfied_before_action', checks: baseline.checks, matchedIn: baseline.matchedIn, ...(baseline.anyOf ? { anyOf: baseline.anyOf } : {}), elapsedMs: 0 },
+        recommendedNextAction: 'The expectation already holds before the select changed, so nothing was selected. matchedIn names what satisfied it; choose a condition that only the selection produces.' };
     }
     const option = [...el.options].find(o => o.value === args.value && !o.disabled && !o.closest('optgroup[disabled]'));
     if (!option) throw new Error('Available option not found');
+    const changeBaseline = changeSnapshot();
     el.value = args.value; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
-    const result = await verify(args.expect || { valueMatches: args.value }, args.timeoutMs ?? 5000, { value: el.value, getValue: () => el.isConnected ? el.value : undefined });
+    const result = await verify(expect, args.timeoutMs ?? 5000, { ...valueContext, changeBaseline });
     if (result.status !== 'success') {
-      return { selected: true, verification: { ...result, status: 'not_observed' }, status: 'uncertain',
+      return { selected: true, verification: { ...result, status: 'not_observed' }, status: 'uncertain', outcome: 'no_change',
         reason: 'selected_value_not_observed', dispatched: true, retryable: false,
         recommendedNextAction: 'The select option was changed, but the expected value was not observed. Re-read the select element.' };
     }
-    return { selected: true, verification: result, status: 'success', dispatched: true, retryable: false };
+    const outcome = result.change?.changed
+      ? (result.change.changes.includes('url') ? 'navigated' : 'dom_changed')
+      : 'condition_met';
+    return { selected: true, verification: result, status: 'success', dispatched: true, retryable: false, outcome };
   }
   if (name === 'browser_choose_verified') {
     if (el.getAttribute('role') !== 'combobox' && !(el instanceof HTMLInputElement)) throw new Error('Element is not a combobox');
     const exact = args.text.replace(/\s+/g, ' ').trim();
     if (!exact) throw new Error('Exact option text is required');
+    const expect = args.expect || {};
+    const valueContext = { value: el.value, getValue: () => el.isConnected ? el.value : undefined };
+    const baseline = expectationState(expect, valueContext);
+    if (baseline.satisfied) {
+      return { status: 'not_dispatched', reason: 'expected_condition_already_satisfied', dispatched: false, retryable: false,
+        matchedIn: baseline.matchedIn, ...(baseline.anyOf ? { anyOf: baseline.anyOf } : {}),
+        verification: { status: 'already_satisfied_before_action', checks: baseline.checks, matchedIn: baseline.matchedIn, ...(baseline.anyOf ? { anyOf: baseline.anyOf } : {}), elapsedMs: 0 },
+        recommendedNextAction: 'The expectation already holds before the option was chosen, so nothing was clicked. matchedIn names what satisfied it; choose a condition that only the choice produces.' };
+    }
+    const changeBaseline = changeSnapshot();
     const result = await chooseOption(el, exact, args.timeoutMs ?? 5000);
-    const verifyResult = await verify(args.expect || {}, args.timeoutMs ?? 5000);
+    const verifyResult = await verify(expect, args.timeoutMs ?? 5000, { ...valueContext, changeBaseline });
     if (verifyResult.status !== 'success') {
-      return { ...result, verification: { ...verifyResult, status: 'not_observed' }, status: 'uncertain',
+      return { ...result, verification: { ...verifyResult, status: 'not_observed' }, status: 'uncertain', outcome: 'no_change',
         reason: 'choice_outcome_not_observed', dispatched: true, retryable: false,
         recommendedNextAction: 'The option was clicked, but the expected outcome was not observed. Re-read the combobox input value.' };
     }
-    return { ...result, verification: verifyResult, status: 'success', dispatched: true, retryable: false };
+    const outcome = verifyResult.change?.changed
+      ? (verifyResult.change.changes.includes('url') ? 'navigated' : 'dom_changed')
+      : 'condition_met';
+    return { ...result, verification: verifyResult, status: 'success', dispatched: true, retryable: false, outcome };
   }
   throw new Error('Unsupported page operation');
   } catch (error) {

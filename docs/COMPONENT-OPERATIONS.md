@@ -55,3 +55,34 @@ readback and transparent-overlay click rejection all passed. The test closed
 only its own tab. Report: `output/live-installed/report.json`. This confirms
 the new code is active despite retaining version 0.5.14; it does not verify
 automatic extension reload, closed roots, or the real Panda assistant.
+
+## Element Plus forms (2026-11-18 field report)
+
+Measured on a jeecg-boot + Element Plus registration form (Bridge 0.46.0,
+Chrome 156). The write succeeded, but two controls had no audited route and one
+display panel was mistaken for evidence.
+
+| Control | Reliable action | Evidence |
+|---|---|---|
+| `el-radio` | Click the hidden native input: `browser_eval_verified` with `document.querySelectorAll('.el-radio__original')[n].click()`, an `expect` (`anyChange:true` or a branch naming the revealed field) and a `commandId`. Clicking the visible label does not change the model. | eval reply `{"after":true,"v":"1"}`; the form submitted with that value. |
+| `el-checkbox` | Clicking the label works; `browser_click_verified` with `elementLabelAppears` or a DOM-change expectation is enough. | Rule checkbox stayed checked and the submit advanced. |
+| `el-date-editor` | `browser_fill_verified` with `YYYY-MM-DD` plus `input` + `change`; the component accepts it and posts it. | Reply `persisted:true`; final submission succeeded. |
+| Right-hand summary panel | **Not evidence.** It does not update live (name still showing the phone number, birth date still `--`) while the underlying inputs already hold the new values. | `browser_read` text disagreed with `includeFormValues`; the submit still carried the filled values. |
+
+Rules that follow from the table:
+
+- The component's rendered summary is a view cache, not the model. Verify with
+  `browser_read includeFormValues:true`, the submit result, or the API response.
+- A submit is a branching outcome. Use `expect` with `anyOf`
+  (`urlContains` the landing route, `elementLabelAppears:"待审核"`,
+  `textAppears` with `stableForMs`) rather than a bare phrase such as `"成功"`,
+  which a leftover login toast already satisfies. If the reply is
+  `not_dispatched`, read `matchedIn`: a `transient:true` match means the phrase
+  was painted by an old notice, and the expectation must change - not retried.
+- `javascript:void(0)` menu links are inert same-origin handlers; a
+  `browser_click` on them is reported with `inlineNavigation:true` instead of an
+  origin refusal. Real cross-origin links stay refused.
+- Never inject a zoom overlay to read a captcha. Use
+  `browser_capture_element(ref, scale:4)` (read-only, background-safe) and fill
+  the answer within the server's validity window; a rejected captcha is more
+  often expired than misread.

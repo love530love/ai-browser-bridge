@@ -42,7 +42,7 @@ test('the compact index lists the advisor and can be narrowed by a concurrency g
   const all = toolIndex({});
   assert.equal(all.status, 'success');
   assert.ok(all.index.includes('browser_agent_advice'));
-  assert.ok(Buffer.byteLength(all.index, 'utf8') < 3500);
+  assert.ok(Buffer.byteLength(all.index, 'utf8') < 3800);
 
   const debug = TOOL_GROUPS.find(group => group.id === 'debug');
   assert.ok(debug.tools.includes('browser_agent_advice'));

@@ -7,18 +7,18 @@
 // model, so it keeps working when every optional service is offline.
 
 const READ = ['browser_locate', 'browser_at', 'browser_read', 'browser_find_text', 'browser_find_element'];
-const WRITE = ['browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified'];
+const WRITE = ['browser_click', 'browser_click_verified', 'browser_fill', 'browser_fill_verified', 'browser_eval_verified'];
 const PICK = ['browser_select', 'browser_choose', 'browser_pick'];
 const COORDINATE = ['browser_prepare_coordinate', 'browser_action'];
 
 // Ordered: the first matching intent wins, so put the specific ones first.
 const INTENTS = [
   { id: 'ocr-or-image-text', match: /(?:\bocr\b|识别.{0,8}(?:文字|文本|字符)|图片.{0,8}(?:文字|文本)|截图.{0,8}(?:识别|读)|画布.{0,8}(?:文字|文本|标签)|canvas.{0,20}(?:text|label)|image[- ]only text|text (?:in|from) (?:this |the |an? )?image)/i,
-    tools: ['browser_ocr', 'browser_screenshot'], focusRequired: false,
+    tools: ['browser_ocr', 'browser_capture_element', 'browser_screenshot'], focusRequired: false,
     why: 'Windows.Media.Ocr runs locally with no network, API key or downloaded weights, and turns a fresh viewport screenshot into text with CSS-pixel rects and 0..1000 points. It is the route for labels painted into a canvas, image, video or other pixels the DOM cannot expose.',
     backgroundSafe: true,
-    prefer: 'Call browser_ocr instead of reading pixels by hand. Read status literally: success with coordinatesAvailable:true means each line has a point; partial means the text exists but the viewport was unavailable, so do not convert boxes by hand; unavailable names the availableLanguages and must not be retried unchanged. OCR has no ref, role or proof of clickability: confirm a line.point with browser_prepare_coordinate, prefer its clickRef when it matches the control, and perform writes through browser_action_verified with a bounded expect. Coverage is the current viewport only, so scrolled-off text is absent.',
-    fallback: ['browser_ocr', 'browser_screenshot', 'browser_prepare_coordinate', 'browser_eval'] },
+    prefer: 'Call browser_ocr instead of reading pixels by hand. Read status literally: success with coordinatesAvailable:true means each line has a point; partial means the text exists but the viewport was unavailable, so do not convert boxes by hand; unavailable names the availableLanguages and must not be retried unchanged. For a small element such as a captcha, call browser_capture_element with its ref and scale:4 first and read the enlarged image - a full-tab screenshot renders those pixels a few dozen tall. OCR has no ref, role or proof of clickability: confirm a line.point with browser_prepare_coordinate, prefer its clickRef when it matches the control, and perform writes through browser_action_verified with a bounded expect. Coverage is the current viewport only, so scrolled-off text is absent.',
+    fallback: ['browser_ocr', 'browser_capture_element', 'browser_screenshot', 'browser_prepare_coordinate', 'browser_eval_verified'] },
   { id: 'locate-target', match: /定位(?:元素|目标|按钮|输入框|控件|链接|不到|不了)|找不到.{0,8}(?:元素|目标|按钮|输入框|控件|链接)|(?:元素|目标|按钮|输入框|控件|链接).{0,8}找不到|ambiguous|which element|locate (?:the )?(?:element|target)|find the (?:element|target)/i,
     tools: READ, focusRequired: false,
     why: 'browser_locate runs several read-only perception routes and answers with one ranked candidate list plus the scope each route actually covered. The same node found twice is merged, and a ranking is a list of named facts rather than a model score.',
@@ -132,11 +132,11 @@ const INTENTS = [
     prefer: 'Call browser_framework_tree and read detected before trees: a requested framework that is absent returns not_found rather than an empty tree. Component names and prop keys are evidence about the app, not action refs; resolve the node with browser_find_element or browser_locate before acting. Angular is flat where only ownership is public, and Svelte production builds have no instance tree - the reply says so. Main frame only; a cross-origin iframe is a separate document.',
     fallback: ['browser_framework_tree', 'browser_dom_snapshot', 'browser_script_inventory', 'browser_read', 'browser_find_element'] },
   { id: 'script-or-escape-hatch', match: /执行(一段)?(脚本|js|javascript)|跑(一段)?脚本|求值|eval(uate)?\b|表达式|expression|执行表达式|扫不到|扫不着|点不中|点不到|读不到|看不见|拿不到 ?ref|工具看不见/i,
-    tools: ['browser_eval'], focusRequired: false,
+    tools: ['browser_eval', 'browser_eval_verified'], focusRequired: false,
     why: 'One expression in the page\'s own world, with full page privileges, exactly like typing in the DevTools console. Two channels are chosen automatically: the fast one injects without attaching a debugger, so there is no banner, no foreground and it works on a backgrounded tab; when the page\'s Content Security Policy forbids eval, it retries through the debugger channel, which is not subject to page CSP, and the reply names the channel that ran. This is the escape hatch, not the first choice: it is unsandboxed and its results are untrusted page data.',
     backgroundSafe: true,
-    prefer: 'Reach for this when a target cannot be scanned, ref-ed or hit: a card or tile group of divs with a React onClick, a canvas, a shadow root, a value the page computes. One expression is usually enough - [...document.querySelectorAll(".card")][1].click(), or document.querySelector(".price")?.innerText. mode:"read" (the default) shadows fetch, XMLHttpRequest, WebSocket, EventSource, navigator.sendBeacon, window.open, alert, confirm, prompt and print inside the evaluation scope and lists them in readOnlyEnforced; that is a guardrail, not a sandbox, so pass mode:"write" when the intent is to act. A DOM node comes back as a descriptor with a rect, and a password box comes back as valueLength with value null. An expression that throws returns status:"failed" with the exception and is never retried. Use browser_debugger action:"evaluate" instead only when you need a specific call frame inside a breakpoint.',
-    fallback: ['browser_eval', 'browser_shadow_tree', 'browser_read'] },
+    prefer: 'Reach for this when a target cannot be scanned, ref-ed or hit: a card or tile group of divs with a React onClick, a canvas, a shadow root, a value the page computes. One expression is usually enough - [...document.querySelectorAll(".card")][1].click(), or document.querySelector(".price")?.innerText. For a write, use browser_eval_verified instead of browser_eval: it evaluates once, refuses to dispatch when the expect already holds (returning matchedIn), and observes the outcome with the same anyOf/anyChange/stableForMs matcher as the other verified tools. mode:"read" (the default) shadows fetch, XMLHttpRequest, WebSocket, EventSource, navigator.sendBeacon, window.open, alert, confirm, prompt and print inside the evaluation scope and lists them in readOnlyEnforced; that is a guardrail, not a sandbox, so pass mode:"write" when the intent is to act. A DOM node comes back as a descriptor with a rect, and a password box comes back as valueLength with value null. An expression that throws returns status:"failed" with the exception and is never retried. Use browser_debugger action:"evaluate" instead only when you need a specific call frame inside a breakpoint.',
+    fallback: ['browser_eval_verified', 'browser_eval', 'browser_shadow_tree', 'browser_read'] },
   { id: 'debug-or-breakpoint', match: /断点|单步|调试|调用栈|栈帧|breakpoint|debugger|step over|call stack|暂停执行|paused|live ?edit|改脚本|热改/i,
     tools: ['browser_debugger'], focusRequired: false,
     why: 'A long-lived CDP debugger session per tab, so a breakpoint set in one call still exists in the next. Works on a backgrounded tab. The costs are real: Chrome shows a debugging banner on that tab while the session is open, and DevTools cannot attach to it meanwhile.',
@@ -175,10 +175,10 @@ const INTENTS = [
     backgroundSafe: true,
     prefer: 'Call browser_recipe_list first: a flow may already be stored. To record one, complete the flow once with the normal tools, then call browser_recipe_save in the same session while the refs are still live, writing changing values as "{{variableName}}" and marking password steps secret:true with a placeholder (a literal is refused, so a recipe can never become a plaintext credential store). To replay, call browser_recipe_run with confirmation:"run_recipe_once" and every variable: they are all checked before step 1, so a typo refuses instead of half-running the flow. Read the reply literally - matchedBy per step says which tier found the target, degradedMatches lists fuzzy matches, and a failure names the step that failed and states that completed steps were not rolled back. Navigation, upload and coordinate steps cannot be recorded, because their target cannot be re-resolved by identity.',
     fallback: ['browser_recipe_list', 'browser_login_state', 'browser_read'] },
-  { id: 'screenshot', match: /截图|screenshot|看看|像素/i,
-    tools: ['browser_screenshot'], focusRequired: false,
-    why: 'Page.captureScreenshot over a temporary debugger attachment; verified on a backgrounded tab.',
-    backgroundSafe: true, prefer: 'browser_screenshot.', fallback: ['browser_screenshot', 'browser_read'] },
+  { id: 'screenshot', match: /截图|screenshot|看看|像素|放大|captcha|验证码图片/i,
+    tools: ['browser_screenshot', 'browser_capture_element'], focusRequired: false,
+    why: 'Page.captureScreenshot over a temporary debugger attachment; verified on a backgrounded tab. browser_capture_element clips one ref and multiplies its scale, which is how a small code or seal stays readable without an injected overlay.',
+    backgroundSafe: true, prefer: 'browser_screenshot for the page, browser_capture_element({ref, scale:4}) for one small element.', fallback: ['browser_screenshot', 'browser_capture_element', 'browser_read'] },
   { id: 'download-from-page', match: /(?:下载|download)(?!记录|列表|历史|状态|项)(?:这个|该|此)?[\s的-]*(?:页面|网页|链接|文件|附件|报表|pdf|csv|excel|图片|视频|page|link|file|attachment)|(?:链接|页面|网页|文件|附件).{0,12}(?:下载|download)|download this (?:file|link|page|pdf|attachment)|save (?:this )?(?:file|attachment)/i,
     tools: ['browser_read', 'browser_find_element', 'browser_find_text', 'browser_click', 'browser_downloads', 'browser_download_wait'], focusRequired: false,
     why: 'A page download starts from an explicit visible page target. The bridge can inspect the link, click it once, then inspect Chrome download records. The click is not automatically correlated to a download ID, so never assume a nearby record is the result when multiple candidates exist.',
@@ -211,7 +211,7 @@ const INTENTS = [
     tools: WRITE, focusRequired: false,
     why: 'Dispatched through the page DOM, so the tab and window may be in the background.',
     backgroundSafe: true,
-    prefer: 'Prefer the verified variants: they refuse to report success without an observed outcome. For role-less clickable elements (React/Vue onClick on span/div without href/role/tabindex), try browser_find_text({query:"<text>", includeMatchElement:true}) first; if no ref, use browser_shadow_tree({includeClickable:true}); as last resort use browser_eval with a direct click expression.',
+    prefer: 'Prefer the verified variants: they refuse to report success without an observed outcome. expect can name alternatives with anyOf (navigate OR inline success OR validation error), accept any observable change with anyChange, and require the evidence to survive with stableForMs - do that instead of one phrase that a stale toast already satisfies. not_dispatched names matchedIn, so check whether the match is a transient notice before changing anything. For role-less clickable elements (React/Vue onClick on span/div without href/role/tabindex), try browser_find_text({query:"<text>", includeMatchElement:true}) first; if no ref, use browser_shadow_tree({includeClickable:true}); for a hidden native input (for example Element Plus .el-radio__original) use browser_eval_verified with an expect, which is the audited eval path and never dispatches twice.',
     fallback: [...WRITE, 'browser_find_element', 'browser_find_text', 'browser_shadow_tree', 'browser_eval'] },
   { id: 'read-or-locate', match: /读取|读页|内容|文本|查找|定位|read|content|text|find|locate/i,
     tools: READ, focusRequired: false,
