@@ -74,7 +74,8 @@
 - 本机插件已从 0.46.0 升级为 0.48.0（App 安装器返回 `version:"0.48.0"`、`enabled:true`），连接器 revision 已更新，`manage_app_mcp retry` 返回 `accepted:true`。
 - 独立 stdio 探针直连新 `src/mcp.js`：**140 个工具**，`browser_click_verified` / `browser_upload_verified` 的 expect 均含 `anyOf/anyChange/stableForMs`。当前会话仍显示 **133** 个工具，证明是客户端工具面缓存，而不是磁盘/服务端缺能力。
 - **重启后核验（18:02）**：应用侧插件连接器已 `ready`，`manage_app_mcp list_tools` 返回 **140** 个工具，含 0.48.0 新工具；但本会话是恢复的旧上下文，bridge 工具仍未注入（`mcp_get` 报 `not found`）。下一次复测应在**新会话**中进行，旧会话结果不具代表性。
-- 剩余动作：新会话中按本报告与升级方案复测 upload / navigate；完成该复测前，不把 P0-1/P0-2 的根因固定为单一缺陷。
+- **新会话实机核验（18:05–18:08）**：新开会话已实际注入并可调用 140 工具（`mcp_list total=140`，5 个新工具齐全）。`browser_health` → service/extension `0.48.0`；`browser_hosts` → 两宿主 `extensionVersion:"0.48.0"`（系统 Chrome 156.0.8078.49、ChatGPT 内嵌 157.0.8103.78），默认路由 `h-0b47a521c4384e90beb4`。只读面：`browser_css_styles` 对 GitHub `body` 成功返回 UA/regular 规则、`primer-css-base`/`primer-react` 层、计算样式与自定义属性（`dispatched:false`）；`browser_webauthn {action:"status"}` → `enabled:false`、`trackedOnly:true`；`browser_pwa {action:"inspect"}` → `installable:true`、`appId:"https://github.com/"`；`browser_tool_index` 已将 5 个新工具编入分组。门控：`browser_request_headers` / `browser_extension_install` 不带 `confirmation` 时在参数校验阶段即被拒绝，未派发。日志断点：后台临时标签 `example.com`（`browser_open` 创建、`active:false`）上 `browser_debugger open` → `set_logpoint` 解析到 `https://example.com/s.js:1:7` → `list_logpoints count=1` → `status.paused:null`，随后 `close` 会话并 `browser_close` 临时标签。遗留：`browser_health` 仍无 `mcpVersion` / `toolSurfaceHash` / `staleToolSurface`，P0-0 的服务端自证字段尚未实现。
+- 剩余动作：工具面激活已验证；待复测的是真实站点 upload / navigate（P0-1/P0-2）；完成该复测前，不把根因固定为单一缺陷。
 
 ---
 
