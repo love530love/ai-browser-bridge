@@ -73,7 +73,8 @@
 
 - 本机插件已从 0.46.0 升级为 0.48.0（App 安装器返回 `version:"0.48.0"`、`enabled:true`），连接器 revision 已更新，`manage_app_mcp retry` 返回 `accepted:true`。
 - 独立 stdio 探针直连新 `src/mcp.js`：**140 个工具**，`browser_click_verified` / `browser_upload_verified` 的 expect 均含 `anyOf/anyChange/stableForMs`。当前会话仍显示 **133** 个工具，证明是客户端工具面缓存，而不是磁盘/服务端缺能力。
-- 剩余动作：重启 Qoder 或新开会话后，再按本报告与升级方案复测 upload / navigate；完成该复测前，不把 P0-1/P0-2 的根因固定为单一缺陷。
+- **重启后核验（18:02）**：应用侧插件连接器已 `ready`，`manage_app_mcp list_tools` 返回 **140** 个工具，含 0.48.0 新工具；但本会话是恢复的旧上下文，bridge 工具仍未注入（`mcp_get` 报 `not found`）。下一次复测应在**新会话**中进行，旧会话结果不具代表性。
+- 剩余动作：新会话中按本报告与升级方案复测 upload / navigate；完成该复测前，不把 P0-1/P0-2 的根因固定为单一缺陷。
 
 ---
 
