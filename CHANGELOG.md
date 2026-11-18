@@ -67,6 +67,7 @@
 - **打包与漂移校验**（`scripts/sync-qoder-plugin.mjs`）：`--check` 校验插件版本与 `skills/ai-browser-bridge/SKILL.md` 副本一致，`--zip` 先校验再生成 `qoder-plugin/dist/ai-browser-bridge-<version>.zip`（归档根含 `.qoder-plugin/plugin.json`）。
 - **本机接入（2026-11-17）**：先在 Qoder 用户级 `~/.qoder/mcp.json` 添加 `ai_browser_bridge` stdio 条目并完成握手（`ai-browser-bridge 0.46.0`、133 工具）；随后按用户选择改用插件形态，经 App 安装器安装本仓库 ZIP（`pluginId:"ai-browser-bridge@local"`、`version:"0.46.0"`、`scope:"user"`、`enabled:true`，缓存目录 `plugins/cache/local/ai-browser-bridge/0.46.0`），并移除用户级条目、只保留 kernelgen，避免两套重复工具前缀。插件在当前会话不热加载，重启 Qoder 后生效。
 - 未改动 `src/**` 与 `package.json`，运行中服务 buildId 保持 `e8c61b9f…`，无需重启；服务/扩展版本不因插件安装而变化。
+- **本机升级（2026-11-18 17:5x +0800）**：`node scripts/sync-qoder-plugin.mjs --zip` 生成 `ai-browser-bridge-0.48.0.zip`；经 App 安装器升级为 `pluginId:"ai-browser-bridge@local"`、`version:"0.48.0"`、`scope:"user"`、`enabled:true`，缓存目录 `plugins/cache/local/ai-browser-bridge/0.48.0`（0.46.0 目录已被替换）。插件连接器 `6127009b…` 的 revision 由 `113585412689045` 变为 `199347475858259`，`manage_app_mcp retry` 返回 `accepted:true`。独立 stdio 探针直连一份新 `src/mcp.js`：**140 个工具**，`browser_click_verified.expect` 与 `browser_upload_verified.expect` 均含 `anyOf/anyChange/stableForMs`；但当前会话的 MCP 工具面仍是缓存的 **133** 个，`retry` 未生成新进程，安装结果本身也声明“不在当前会话加载”。结论：磁盘、插件与服务端已就绪，激活需重启 Qoder 或新开会话，不能靠 `retry` 在旧会话内热更新。
 
 ## 0.46.0 — 2026-11-16（**统一失败错误码 / 页面 DOM 脚本兜底 / P4 跨页面基准**）
 

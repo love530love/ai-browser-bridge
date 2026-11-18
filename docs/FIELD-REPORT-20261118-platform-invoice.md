@@ -69,6 +69,12 @@
 
 **复现**：`node src/cli.js` 启动一个 MCP 进程 → 修改 `src/tools.js` 增加字段 → 用旧进程 `mcp_get` 拉 schema，仍是旧字段 → 重启后新字段出现。
 
+**后续处置（2026-11-18 17:5x）**
+
+- 本机插件已从 0.46.0 升级为 0.48.0（App 安装器返回 `version:"0.48.0"`、`enabled:true`），连接器 revision 已更新，`manage_app_mcp retry` 返回 `accepted:true`。
+- 独立 stdio 探针直连新 `src/mcp.js`：**140 个工具**，`browser_click_verified` / `browser_upload_verified` 的 expect 均含 `anyOf/anyChange/stableForMs`。当前会话仍显示 **133** 个工具，证明是客户端工具面缓存，而不是磁盘/服务端缺能力。
+- 剩余动作：重启 Qoder 或新开会话后，再按本报告与升级方案复测 upload / navigate；完成该复测前，不把 P0-1/P0-2 的根因固定为单一缺陷。
+
 ---
 
 ### P0-1 `browser_upload_verified` 三类定位全部 `stale_ref`
