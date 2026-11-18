@@ -16,7 +16,7 @@ export const TOOL_GROUPS = [
     'browser_at', 'browser_read', 'browser_eval', 'browser_eval_verified', 'browser_observe', 'browser_ax_snapshot', 'browser_find_text',
     'browser_find_element', 'browser_locate', 'browser_ocr', 'browser_shadow_tree', 'browser_frames', 'browser_performance',
     'browser_wait_for_selector', 'browser_script_inventory', 'browser_source_map', 'browser_event_listeners',
-    'browser_dom_snapshot', 'browser_framework_tree'
+    'browser_dom_snapshot', 'browser_framework_tree', 'browser_css_styles'
   ] },
   { id: 'act', purpose: '点、填、选、按键、滚动', tools: [
     'browser_prepare_action', 'browser_click', 'browser_click_verified', 'browser_fill',
@@ -31,7 +31,8 @@ export const TOOL_GROUPS = [
   ] },
   { id: 'network', purpose: '同源请求：风险/发送/回读', tools: [
     'browser_prepare_request', 'browser_fetch', 'browser_replay_request',
-    'browser_network_summary', 'browser_network_rules', 'browser_devtools_capture'
+    'browser_network_summary', 'browser_network_rules', 'browser_devtools_capture',
+    'browser_request_headers'
   ] },
   { id: 'tab', purpose: '标签、导航、窗口', tools: [
     'browser_tabs', 'browser_open', 'browser_close', 'browser_navigate', 'browser_navigate_verified',
@@ -41,7 +42,7 @@ export const TOOL_GROUPS = [
   { id: 'auth', purpose: '登录态、凭据、cookie、站点存储', tools: [
     'browser_login_state', 'browser_credential_lookup', 'browser_password_manager_reveal',
     'browser_otp_fetch', 'browser_identity', 'browser_cookies', 'browser_cookies_write',
-    'browser_storage_read', 'browser_storage_write'
+    'browser_storage_read', 'browser_storage_write', 'browser_webauthn'
   ] },
   { id: 'capture', purpose: '截图/PDF/剪贴板/模拟/注入', tools: [
     'browser_screenshot', 'browser_capture_element', 'browser_pdf_save', 'browser_save_page', 'browser_clipboard',
@@ -75,24 +76,24 @@ export const TOOL_GROUPS = [
     'browser_privacy_settings_write', 'browser_windows_control', 'browser_proxy',
     'browser_proxy_write', 'browser_native_messaging', 'browser_native_ports',
     'browser_native_host', 'browser_native_host_install', 'browser_certificates',
-    'browser_certificates_write'
+    'browser_certificates_write', 'browser_pwa', 'browser_extension_install'
   ] }
 ];
 
 // Words a caller might use that do not appear in a group id or tool name.
 const ALIASES = {
-  network: ['api', '接口', 'post', 'get', 'http', '请求', '回读', 'verify', '写操作', 'fetch'],
+  network: ['api', '接口', 'post', 'get', 'http', '请求', '回读', 'verify', '写操作', 'fetch', 'header', 'headers', '请求头', 'authorization'],
   act: ['点击', '输入', '填写', '上传', '附件', 'click', 'fill', 'type', 'upload', 'attach file', '提交', 'submit'],
-  read: ['读', '文本', '元素', 'text', 'dom', '内容', 'js', 'eval', 'evaluate', '脚本', 'script', 'expression', '执行', 'ocr', '识别文字', '图片文字', '画布文字', '源码', 'source map', 'sourcemap', 'f12', '脚本清单', '脚本列表', '事件监听', 'listener', '监听器', '组件树', 'react', 'vue', 'angular', 'svelte', 'component tree', 'dom快照', 'dom 快照', '框架'],
+  read: ['读', '文本', '元素', 'text', 'dom', '内容', 'js', 'eval', 'evaluate', '脚本', 'script', 'expression', '执行', 'ocr', '识别文字', '图片文字', '画布文字', '源码', 'source map', 'sourcemap', 'f12', '脚本清单', '脚本列表', '事件监听', 'listener', '监听器', '组件树', 'react', 'vue', 'angular', 'svelte', 'component tree', 'dom快照', 'dom 快照', '框架', 'css', '样式', '层叠', 'cascade'],
   overlay: ['遮挡', '弹窗', '蒙层', 'covered', 'popup', 'toast'],
   tab: ['标签页', '窗口', 'tab', 'navigate', '打开'],
-  auth: ['登录', '密码', 'login', 'password', 'cookie', 'token'],
+  auth: ['登录', '密码', 'login', 'password', 'cookie', 'token', 'webauthn', 'passkey', 'passkeys', '虚拟认证器', '安全密钥', 'authenticator'],
   capture: ['截图', 'screenshot', 'pdf', '打印成pdf', '保存网页为pdf', '剪贴板'],
   download: ['下载', '下载列表', '下载记录', '下载状态', '下载项', 'download', 'download list', 'download history', 'download status', 'download item'],
   debug: ['报错', '卡住', '失败', 'error', 'stuck', '诊断', '排队', '并发', '建议', '下一步', 'queue', 'advisory', 'guidance'],
   desktop: ['原生', 'chrome://', 'uia', '窗口句柄'],
   recipe: ['流程', '复用', 'flow'],
-  maintenance: ['书签', '历史', '扩展', '代理', '证书', '设置']
+  maintenance: ['书签', '历史', '扩展', '代理', '证书', '设置', 'pwa', '安装应用', '安装 pwa', 'extension install', '扩展安装', 'load unpacked', 'unpacked']
 };
 
 const englishAliasMatches = (needle, alias) => {

@@ -54,3 +54,26 @@ export const NATIVE_HOST_CONFIRMATION = 'modify_native_host_once';
 // root that gets added or removed changes what every application on the machine
 // trusts. Reads (stores, list, inspect) are not gated; the two writes are.
 export const CERTIFICATE_WRITE_CONFIRMATION = 'modify_certificates_once';
+
+// A virtual authenticator is a test double for a security key. Adding one
+// changes what a relying party sees in this tab, and exporting its private key
+// exports live key material, so those actions are gated. Creating/removing the
+// authenticator or reading credential metadata without the private key is not:
+// it changes only the test environment and reveals no secret.
+export const WEBAUTHN_WRITE_CONFIRMATION = 'modify_webauthn_once';
+
+// Installing or uninstalling a PWA changes what is installed on the machine,
+// and the browser may show its own confirmation. Reads (inspect, list) are not
+// gated. The install itself is bound to the existing tab's prompt; this string
+// attests that the caller asked for a real installation.
+export const PWA_WRITE_CONFIRMATION = 'modify_pwa_once';
+
+// Loading an unpacked extension gives a folder of code the extension APIs of
+// this browser profile. That is a program installation, not a page change, so
+// it gets its own attestation. Uninstalling stays under EXTENSION_STATE.
+export const EXTENSION_INSTALL_CONFIRMATION = 'modify_extension_install_once';
+
+// Request headers can contain Authorization, Cookie and CSRF tokens. The
+// capture is bounded to one tab and never persisted, but the reply is still a
+// secret, so the caller has to ask for it explicitly.
+export const REQUEST_HEADERS_CONFIRMATION = 'reveal_request_headers_once';

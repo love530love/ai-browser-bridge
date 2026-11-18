@@ -30,7 +30,8 @@ const TOOL_CATEGORIES = {
       'browser_ai_status', 'browser_capabilities', 'browser_tool_index',
       'browser_queue_status', 'browser_agent_advice', 'browser_wait_until_ready', 'browser_capability_guide',
       'browser_hosts', 'browser_screenshot', 'browser_cookies',
-      'browser_storage_read', 'browser_network_summary'
+      'browser_storage_read', 'browser_network_summary',
+      'browser_css_styles', 'browser_request_headers'
     ],
     baseScore: 10,
     cost: 'low'
@@ -49,7 +50,8 @@ const TOOL_CATEGORIES = {
     tools: [
       'browser_click', 'browser_upload', 'browser_drag',
       'browser_dialog', 'browser_storage_write', 'browser_init_script',
-      'browser_network_rules', 'browser_recipe_run', 'browser_popup'
+      'browser_network_rules', 'browser_recipe_run', 'browser_popup',
+      'browser_webauthn', 'browser_pwa', 'browser_extension_install'
     ],
     baseScore: 60,
     cost: 'high'

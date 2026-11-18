@@ -13,7 +13,8 @@ import {
   BOOKMARKS_WRITE_CONFIRMATION, HISTORY_DELETE_CONFIRMATION, DOWNLOADS_CONTROL_CONFIRMATION,
   EXTENSION_STATE_CONFIRMATION, COOKIES_WRITE_CONFIRMATION, BROWSING_DATA_CONFIRMATION,
   SITE_SETTINGS_WRITE_CONFIRMATION, PRIVACY_SETTING_WRITE_CONFIRMATION,
-  WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION
+  WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION,
+  EXTENSION_INSTALL_CONFIRMATION, REQUEST_HEADERS_CONFIRMATION
 } from '../src/confirmations.js';
 
 const EXPECTED = {
@@ -28,8 +29,16 @@ const EXPECTED = {
   browser_site_settings_write: SITE_SETTINGS_WRITE_CONFIRMATION,
   browser_privacy_settings_write: PRIVACY_SETTING_WRITE_CONFIRMATION,
   browser_windows_control: WINDOW_CONTROL_CONFIRMATION,
-  browser_proxy_write: PROXY_CONFIRMATION
+  browser_proxy_write: PROXY_CONFIRMATION,
+  browser_extension_install: EXTENSION_INSTALL_CONFIRMATION,
+  browser_request_headers: REQUEST_HEADERS_CONFIRMATION
 };
+
+// Two tools gate by action rather than as a whole: reading WebAuthn status or
+// listing PWAs is not a write. Their confirmation is therefore optional in the
+// schema and enforced in src/server.js for the actions that change something.
+// The exception is listed explicitly so a future tool cannot quietly join it.
+const ACTION_GATED_CONFIRMATION_TOOLS = new Set(['browser_webauthn', 'browser_pwa']);
 
 test('each confirmation-gated tool advertises exactly the value the service checks', () => {
   for (const [name, value] of Object.entries(EXPECTED)) {
@@ -52,8 +61,16 @@ test('every tool that declares a confirmation requires one and offers a single v
   assert.ok(gated.length >= 5, `expected several confirmation-gated tools, found ${gated.length}`);
   for (const tool of gated) {
     const confirmation = tool.inputSchema.properties.confirmation;
-    assert.ok(tool.inputSchema.required.includes('confirmation'),
-      `${tool.name}: confirmation must be in required`);
+    const actionGated = ACTION_GATED_CONFIRMATION_TOOLS.has(tool.name);
+    if (actionGated) {
+      assert.ok(!tool.inputSchema.required.includes('confirmation'),
+        `${tool.name}: an action-gated tool must not require confirmation for its read actions`);
+      assert.ok(tool.inputSchema.properties.action,
+        `${tool.name}: action-gated confirmation needs an action field to select the gated actions`);
+    } else {
+      assert.ok(tool.inputSchema.required.includes('confirmation'),
+        `${tool.name}: confirmation must be in required`);
+    }
     assert.equal(confirmation.type, 'string', `${tool.name}: confirmation must be a string`);
     assert.ok(Array.isArray(confirmation.enum) && confirmation.enum.length === 1,
       `${tool.name}: confirmation must accept exactly one documented value, found ${JSON.stringify(confirmation.enum)}`);

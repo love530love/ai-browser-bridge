@@ -1,3 +1,35 @@
+## 0.48.0 — 2026-11-18（**CSS 层叠读取 / 请求头导出 / WebAuthn 虚拟认证器 / PWA 与解包扩展 / 日志断点**）
+
+触发：按「符合开放能力边界，不设能力禁区」盘点此前因高风险而排除的 Chrome 能力；硬约束仍是复用用户已登录的现有 Chrome，**不启动第二个浏览器**。因此本轮只接能在现有扩展 + 长活 CDP 会话内闭环、且有前后证据的能力；Lighthouse 这类自带 Chromium/调试端口的路线继续排除。
+
+### 交付
+
+- **`browser_css_styles`（只读）**：像 DevTools Styles 面板那样读取某个 ref/selector 的层叠结果——匹配规则及来源、选择器、声明、媒体/容器/层/作用域条件、继承链、伪元素、计算样式与 CSS 自定义属性。CSS 域不可转发时回 `unsupported` 而不是「没有规则」；selector 匹配不到回 `not_found`，并说明它不证明 iframe/closed shadow root 内也不存在。单次 attach 读取，不修改规则、不刷新页面。
+- **`browser_request_headers`（显式秘密导出）**：有界采集一个标签页的 `Network.requestWillBeSent` + `requestWillBeSentExtraInfo`，默认只保留标签页同源、去掉 query、**永不采集请求体**；跨站请求必须显式 `scope:"all"`，`scope:"current_page"` 只留当前路径。返回 `secrets:true`、`noPersistence:true` 与逐项 `partialReasons`，值只回调用方，不写盘、不进审计账本。需要 `confirmation:"reveal_request_headers_once"`。
+- **`browser_webauthn`（虚拟认证器）**：`status/list/enable/add/credentials/add_credential/clear_credentials/remove/remove_all/disable`，走长活 CDP 会话的 `WebAuthn` 域。虚拟认证器只存在于该调试会话，Chrome 设置里看不到；`credentials` 默认省略 privateKey，需显式 `includePrivateKey:true`。写动作统一要求 `confirmation:"modify_webauthn_once"`；域不可转发时回 `unsupported`。
+- **`browser_pwa`**：`inspect` 读 Chrome 自己的 installabilityErrors、manifest 摘要与 appId；`install` 注入 `beforeinstallprompt` 捕获脚本、重载标签页、再以 `userGesture:true` 打开真实安装提示，用户未选择时如实回 `waiting/userActionRequired`，**不把「已打开提示」说成「已安装」**；`uninstall` 走 `chrome.management` 并在返回前核对应用已消失。安装/卸载需 `confirmation:"modify_pwa_once"`。通过浏览器 UI 安装的 PWA 可能不在 `chrome.management` 列表里，空列表不是「没装」的证据。
+- **`browser_extension_install`**：在目标标签页的调试会话里执行 `Extensions.loadUnpacked` 安装一个解包扩展，前后各读一次 `chrome.management.getAll` 做证据核对；Chrome 常要求 `--enable-unsafe-extension-debugging`，不具备时如实回 `unsupported`。需 `confirmation:"modify_extension_install_once"`，只装本地未打包目录，不做商店安装，也不改开发者模式设置。
+- **`browser_debugger` 日志断点**：新增 `set_logpoint` / `list_logpoints`——条件断点的条件只记录 `logExpression` 并返回 false，页面不暂停、不产生暂停态；缺少 `logExpression` 在派发前拒绝。
+- **控制台/异常栈**：`browser_devtools_capture` 的 console、exception 与 log 事件现在带**有界** `stackFrames`/栈数组，保留调用位置而不是只留一行消息。
+- **探针扩展**：`cdp-probe` 增加 `Page.getInstallabilityErrors`、`Page.getAppManifest` 两个只读探针与域可用性映射，manifest URL 只保留 scheme+host。
+- **门控与索引**：新工具进入读写优先级、租约写集合、意图索引与能力引导；`browser_request_headers`、`browser_extension_install` 为整工具确认，WebAuthn/PWA 按 action 门控。工具数 135 → 140，索引 3623 字节（上限 3800）。
+
+### 验收
+
+- 全量 `npm test` → **1106/1106**（exit 0，0 fail；在隔离 `AIB_STATE_DIR` 下运行，避免与其他 agent 的实时租约互相干扰）。
+- 新增测试：`test/css-styles.test.js`（缺参拒绝、CSS 域不可用、selector 未命中、非法 selector、规则/继承/计算样式/上限）、`test/header-capture.test.js`（默认同源与去 query、ExtraInfo 合并、scope all/current_page、响应头开关、非 http 默认拒绝、截断原因）、`test/cdp-capabilities.test.js`（WebAuthn 增删查与私钥省略、PWA 列表/卸载/安装提示成功与未出现、扩展安装证据与 unsupported）、`test/cdp-session.test.js` 日志断点用例。
+- 插件版本同步：`node scripts/sync-qoder-plugin.mjs --check` → `PLUGIN_CHECK_OK version=0.48.0 skillFiles=1`。
+- 工具数 135 → 140（`browser_css_styles`、`browser_request_headers`、`browser_webauthn`、`browser_pwa`、`browser_extension_install`）；工具索引 3623 字节（上限 3800）。
+- **已部署（2026-11-18 10:06–10:08 +0800）**：`restart-service-when-idle --apply` 空闲重启（intent `3bd58d23…`，旧监听 pid 85124 → 新服务 pid **81988**，`serviceVersion:"0.48.0"`、`deploymentStale:false`；上一进程退出被账本记为 `planned_restart`，旧 buildId `2a0feab7…`）。两个宿主各自 `chrome.runtime.reload` 自载到扩展 0.48.0，`foregroundTaken:false`、未开标签页、未发按键：`h-0b47a521c4384e90beb4`（系统 Chrome 156.0.8078.49，session `ea4d94c2…` → `841d442c…`）与 `h-b76b872f85d347a49e00`（ChatGPT 内嵌 Chrome 157.0.8103.78，session `bc807587…` → `05302fa1…`）。部署后复验：`browser_hosts` 两宿主均 `extensionVersion:"0.48.0"`；`status` → buildId `f336078a…` 与磁盘一致、`extensionVersionSkew:false`、`actionRequired:[]`；`heartbeat` → `verdict:"clean"`、`provenClean:true`、`findings:[]`、`degraded:false`。
+
+### 边界
+
+- 请求头导出返回的是**实时凭据**：调用方不得把它写进报告、日志、页面或另一个服务；本工具自身不持久化，但调用方如何处理不在桥的控制内。
+- WebAuthn 虚拟认证器是调试会话内的测试替身，不是系统级安全密钥，也不改变 Chrome 的 passkey 设置。
+- PWA 安装提示必须由用户选择；`browser_pwa install` 只负责把真实提示交到用户面前。卸载只覆盖 `chrome.management` 能看到的条目。
+- 解包扩展安装依赖 Chrome 的调试开关；这是 Chrome 的安全边界，桥不绕过，也不把它说成已支持。
+- 本轮仍未实现：Lighthouse（自带 Chromium/调试端口，违反硬约束；后续只能尝试复用现有 Chrome 的既有调试端口）、性能 trace 录制与 trace-engine 分析、堆快照/泄漏分析、WebMCP 发现与执行、批量表单填充、真实 source map 行列映射、协议 schema 绑定。
+
 ## 0.47.0 — 2026-11-18（**提交结果的多分支期望 / commandId 参数绑定 / eval 审计写 / 元素级放大截图**）
 
 触发：2026-11-18 赛事报名实测报告（`docs/FIELD-REPORT-20261118-competition-registration.md`，Bridge 0.46.0 + Chrome 156，华为云/昇腾/数字武当杯全部报名成功）。四次报名暴露了「验证契约问的问题和调用方想问的不是同一个」：提交可能导航、行内报错、或只发请求，而 `expect` 只能描述一种；复用 `commandId` 改参数会重放旧的 `not_dispatched`；登录 toast 让 `textAppears:"成功"` 在点击前就为真，提交根本没发出；Element Plus 单选与 `javascript:void(0)` 导航只能靠无账本的 `browser_eval` 点击。

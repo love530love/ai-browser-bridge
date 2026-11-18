@@ -144,7 +144,7 @@ Verified write contract: every state-changing action MUST use its `_verified` va
 
 Describe a submit by its possible outcomes, not by one phrase: expect accepts anyOf (up to six alternatives such as urlContains, textAppears, elementLabelAppears), anyChange (any URL/text/DOM/network change from the pre-dispatch baseline; never true before dispatch) and stableForMs (the matched alternative must hold continuously, so a leftover toast cannot satisfy it; a branch may carry its own window). On success the reply carries outcome navigated|dom_changed|condition_met; on failure it carries validationErrors only when inline errors are visibly painted, otherwise outcome validation_error or no_change. A not_dispatched answer carries matchedIn (selector, visible, isTransient): when the match is a toast, change the condition instead of retrying. A commandId identifies one exact command; reusing it with different arguments returns command_id_params_mismatch plus suggestedCommandId and dispatches nothing - the recorded outcome is not replayed. When no ref can address the control (a hidden native input such as Element Plus .el-radio__original, or a javascript:void(0) SPA link), use browser_eval_verified with an expect and keep the result in the ledger; plain browser_eval stays a read probe. For a small captcha image use browser_capture_element(ref, scale) instead of injecting an overlay.
 
-For breakpoint debugging use browser_debugger: open a session on the tab, find the script URL with action:"scripts" plus urlFilter (an unfiltered list is a tail and can hide the page's own script), set a 1-based breakpoint, then trigger it asynchronously (evaluate "setTimeout(fn, N)") because a synchronous trigger pauses inside the call that made it and that call never returns. Poll action:"status" until paused, inspect with action:"frames", evaluate on a frame, then step or resume, and always finish with action:"close". While the tab is paused every other page tool returns status:"waiting" with reason:"tab_paused_by_debugger" instead of hanging; browser_health still answers and reports the pause. The session shows a debugging banner on that tab and blocks a manually opened DevTools from attaching meanwhile; a paused session nobody touches is resumed automatically after session.paused.autoResumeInMs, but close it explicitly when done.
+For breakpoint debugging use browser_debugger: open a session on the tab, find the script URL with action:"scripts" plus urlFilter (an unfiltered list is a tail and can hide the page's own script), set a 1-based breakpoint, then trigger it asynchronously (evaluate "setTimeout(fn, N)") because a synchronous trigger pauses inside the call that made it and that call never returns. Poll action:"status" until paused, inspect with action:"frames", evaluate on a frame, then step or resume, and always finish with action:"close". While the tab is paused every other page tool returns status:"waiting" with reason:"tab_paused_by_debugger" instead of hanging; browser_health still answers and reports the pause. The session shows a debugging banner on that tab and blocks a manually opened DevTools from attaching meanwhile; a paused session nobody touches is resumed automatically after session.paused.autoResumeInMs, but close it explicitly when done. A logpoint is a breakpoint that records without pausing: action:"set_logpoint" requires logExpression, its condition logs and returns false, and action:"list_logpoints" lists the ones this session created. browser_devtools_capture now keeps bounded stackFrames on console, exception and log events instead of only the message line.
 
 Changing what a running script does is done with action:"evaluate" (redefine the function or the global), not with action:"set_script_source". That action is wired up and correctly validated, but the browser refuses it: current Chrome answers Debugger.setScriptSource with the ServerError "setScriptSource functionality no longer available", returned from an unconditional stub in V8 before any argument is read. It replies reason:"script_edit_removed_by_v8" with blockedBy:"v8_inspector" and a list of alternatives, applied is always false, and it is never retried - do not send it again with a different scriptId, a different source or without dryRun, because the outcome cannot change. Use evaluate instead, and describe what it did accurately: it changes behaviour immediately without a reload, but the script text, its line numbers and its source map stay exactly as they were.
 
@@ -403,7 +403,41 @@ when you are done with it.
   accessibility engine turned on. browser_password_manager_reveal works because
   it types into the page, not because UIA can see it.
 
-Protected Chrome UI is not a blanket denial, but only advertised actions are executable. On Windows, use browser_protected_ui_plan; browser_desktop_windows may list visible Chrome windows, and browser_reload_extension can reload only this project's fixed extension. It opens chrome://extensions in a new tab in the selected window and preserves the current tab. Select a current windowHandle, obtain direct user approval for exactly one reload, and pass confirmation:"reload_extension_once" only after approval. This fixed value is a caller attestation, not independent human authentication; the service cannot prove who approved. Concurrent calls are blocked, but distinct later calls are not deduplicated, so obtain fresh direct user approval per call. The service pauses competing browser work during the action. If the result is uncertain, inspect connection/version before deciding whether to act again; never blindly retry. Chrome settings writes, extension install/removal, and browser data access are not implemented by this UI Automation route - they are implemented by the extension-side tools above (browser_privacy_settings_write, browser_extension_state, browser_clear_browsing_data), which do not take the foreground. Breakpoint debugging is available through browser_debugger, not through this route, and a single saved password is read with browser_password_manager_reveal as described with the login flow above. Never describe a planner, keyboard dispatch, or UI click as successful without independent state verification.
+Five more capabilities run inside the existing Chrome, without a second browser:
+- browser_css_styles is the Styles pane without the pane: pass a ref/selector (or
+  a nodeId from a prior read) and get the matched rules, origin, selector,
+  declarations, inherited chain, pseudo-elements, computed style and custom
+  properties. Read-only, no rule edited, no reload. unsupported means the CSS
+  domain is not forwarded by this Chrome build - not that the element has no
+  rules; not_found means the selector matched nothing in the main frame, which is
+  not evidence about iframes or closed shadow roots.
+- browser_request_headers exports live request headers after
+  confirmation:"reveal_request_headers_once". The default scope is the tab's own
+  origin, the query string is dropped, request bodies are never captured, and
+  cross-site requests need scope:"all" deliberately. Response headers only with
+  includeResponseHeaders:true. The result is secrets:true and noPersistence:true:
+  the values return to you only and must never be copied into a report, a page, a
+  log or another service. A non-http tab is refused under the default scope.
+- browser_webauthn drives a virtual authenticator inside the debugger session:
+  status, list, enable, add, credentials, add_credential, clear_credentials,
+  remove, remove_all, disable. It is a test double, not a system security key and
+  not a Chrome setting; privateKey is omitted unless includePrivateKey:true.
+  Writes need confirmation:"modify_webauthn_once".
+- browser_pwa inspects installability and manifest, lists installed apps, opens
+  the real install prompt, or uninstalls through chrome.management. install
+  reloads the tab to capture beforeinstallprompt and returns waiting/
+  userActionRequired until the user chooses; a prompt that opened is not an
+  install. uninstall verifies the app left the list, but a PWA installed through
+  the browser UI may never appear in chrome.management, so an empty list is not
+  proof. install/uninstall need confirmation:"modify_pwa_once".
+- browser_extension_install loads one local unpacked extension through
+  Extensions.loadUnpacked and proves it with before/after chrome.management
+  reads. It does not install from a store and does not change developer mode;
+  Chrome often requires --enable-unsafe-extension-debugging, and unsupported
+  means that requirement is not met. Confirmation:
+  "modify_extension_install_once".
+
+Protected Chrome UI is not a blanket denial, but only advertised actions are executable. On Windows, use browser_protected_ui_plan; browser_desktop_windows may list visible Chrome windows, and browser_reload_extension can reload only this project's fixed extension. It opens chrome://extensions in a new tab in the selected window and preserves the current tab. Select a current windowHandle, obtain direct user approval for exactly one reload, and pass confirmation:"reload_extension_once" only after approval. This fixed value is a caller attestation, not independent human authentication; the service cannot prove who approved. Concurrent calls are blocked, but distinct later calls are not deduplicated, so obtain fresh direct user approval per call. The service pauses competing browser work during the action. If the result is uncertain, inspect connection/version before deciding whether to act again; never blindly retry. Chrome settings writes, extension removal, and browser data access are not implemented by this UI Automation route - they are implemented by the extension-side tools above (browser_privacy_settings_write, browser_extension_state, browser_clear_browsing_data), which do not take the foreground. Breakpoint debugging is available through browser_debugger, not through this route, and a single saved password is read with browser_password_manager_reveal as described with the login flow above. Never describe a planner, keyboard dispatch, or UI click as successful without independent state verification.
 
 ## AI-Assisted Discovery
 

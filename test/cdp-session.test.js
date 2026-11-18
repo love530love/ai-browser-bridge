@@ -455,3 +455,49 @@ test('editing while paused is allowed and reports that the page is frozen', asyn
   assert.equal(h.manager.get(7).paused !== null, true, 'an edit must not resume the target behind the caller');
   assert.equal(h.log.includes('Debugger.resume'), false);
 });
+
+test('a logpoint is a condition that logs and returns false, so the page never pauses', async () => {
+  const breakpointParams = [];
+  let sequence = 0;
+  const h = harness({
+    responses: {
+      'Debugger.setBreakpointByUrl': params => {
+        breakpointParams.push(params);
+        sequence += 1;
+        return { breakpointId: `bp-${sequence}`, locations: [] };
+      }
+    }
+  });
+  await h.manager.open({ tabId: 7 });
+  const result = await h.manager.call({ tabId: 7, action: 'set_logpoint',
+    args: { scriptUrl: 'https://a.example/app.js', lineNumber: 10, logExpression: 'user.id' } });
+  assert.equal(result.status, 'success');
+  assert.equal(result.breakpoint.kind, 'logpoint');
+  assert.equal(result.breakpoint.logExpression, 'user.id');
+  assert.equal(result.pagePrivileged, true);
+  assert.ok(breakpointParams[0], 'the breakpoint must reach the browser');
+  assert.match(breakpointParams[0].condition, /console\.log/);
+  assert.match(breakpointParams[0].condition, /return false/);
+  assert.match(breakpointParams[0].condition, /user\.id/);
+  assert.equal(h.log.includes('Debugger.resume'), false, 'setting a logpoint must not resume anything');
+
+  const list = await h.manager.call({ tabId: 7, action: 'list_logpoints' });
+  assert.equal(list.status, 'success');
+  assert.equal(list.count, 1);
+  assert.equal(list.logpoints[0].breakpointId, 'bp-1');
+
+  await h.manager.call({ tabId: 7, action: 'set_breakpoint',
+    args: { scriptUrl: 'https://a.example/app.js', lineNumber: 20 } });
+  const after = await h.manager.call({ tabId: 7, action: 'list_logpoints' });
+  assert.equal(after.count, 1, 'list_logpoints must not mix in ordinary breakpoints');
+});
+
+test('a logpoint without logExpression is refused before any breakpoint is sent', async () => {
+  const h = harness();
+  await h.manager.open({ tabId: 7 });
+  const result = await h.manager.call({ tabId: 7, action: 'set_logpoint',
+    args: { scriptUrl: 'https://a.example/app.js', lineNumber: 10 } });
+  assert.equal(result.status, 'denied');
+  assert.equal(result.reason, 'log_expression_required');
+  assert.equal(h.log.includes('Debugger.setBreakpointByUrl'), false);
+});

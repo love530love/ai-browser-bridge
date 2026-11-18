@@ -335,29 +335,60 @@ export function createSessionManager({
       };
     }
 
-    if (action === 'set_breakpoint') {
+    if (action === 'set_breakpoint' || action === 'set_logpoint') {
       const url = typeof args.scriptUrl === 'string' ? args.scriptUrl : '';
       const lineNumber = args.lineNumber;
       if (!url || !Number.isSafeInteger(lineNumber) || lineNumber < 1) {
         return { status: 'denied', retryable: false, reason: 'invalid_breakpoint_target', dispatched: false,
-          message: 'A breakpoint needs scriptUrl (an exact script URL from action:"scripts") and a 1-based lineNumber.' };
+          message: `${action === 'set_logpoint' ? 'A logpoint' : 'A breakpoint'} needs scriptUrl (an exact script URL from action:"scripts") and a 1-based lineNumber.` };
       }
+      const condition = typeof args.condition === 'string' && args.condition ? args.condition.slice(0, MAX_EXPRESSION_CHARS) : null;
+      const expression = action === 'set_logpoint'
+        ? (typeof args.logExpression === 'string' ? args.logExpression.trim().slice(0, MAX_EXPRESSION_CHARS) : '')
+        : '';
+      if (action === 'set_logpoint' && !expression) {
+        return { status: 'denied', retryable: false, reason: 'log_expression_required', dispatched: false,
+          message: 'A logpoint needs logExpression: the JavaScript expression to print each time the line is reached. It is evaluated in the page, like a DevTools logpoint, and its value is written to the page console.' };
+      }
+      // A logpoint is a conditional breakpoint whose condition logs and then
+      // returns false, so execution never pauses. The expression is intentionally
+      // page-privileged: it is the same power as a DevTools logpoint or a
+      // breakpoint condition, and it is reported as such in the reply.
+      const logpointCondition = action === 'set_logpoint'
+        ? `(() => { try { console.log(${JSON.stringify(`[bridge logpoint] ${url}:${lineNumber}`)}, (${expression})); } catch (e) { try { console.error('[bridge logpoint] evaluation failed', e); } catch (_) {} } return false; })()`
+        : null;
+      const effectiveCondition = logpointCondition
+        ? (condition ? `!!(${condition}) && ${logpointCondition}` : logpointCondition)
+        : condition;
       const result = await send(tabId, 'Debugger.setBreakpointByUrl', {
         url, lineNumber: lineNumber - 1, columnNumber: Number.isSafeInteger(args.columnNumber) ? args.columnNumber - 1 : 0,
-        ...(typeof args.condition === 'string' && args.condition ? { condition: args.condition } : {})
+        ...(effectiveCondition ? { condition: effectiveCondition } : {})
       });
       const record = {
         breakpointId: result?.breakpointId ?? null,
+        kind: action === 'set_logpoint' ? 'logpoint' : 'breakpoint',
         url,
         lineNumber,
         columnNumber: Number.isSafeInteger(args.columnNumber) ? args.columnNumber : null,
-        condition: typeof args.condition === 'string' && args.condition ? args.condition : null,
+        condition,
+        ...(action === 'set_logpoint' ? { logExpression: expression } : {}),
         resolved: Array.isArray(result?.locations) && result.locations.length > 0,
         locations: Array.isArray(result.locations) ? result.locations.map(location => ({ lineNumber: location.lineNumber + 1, columnNumber: location.columnNumber + 1 })) : []
       };
       if (record.breakpointId) session.breakpoints.set(record.breakpointId, record);
       return { status: 'success', breakpoint: record,
-        note: record.resolved ? undefined : 'The breakpoint is registered but no loaded script matched yet. It will bind when that script loads.' };
+        ...(action === 'set_logpoint' ? {
+          pagePrivileged: true,
+          note: 'The logpoint prints to the page console and never pauses execution. The expression runs with page privileges, exactly like a DevTools logpoint; its output is page-authored data.'
+        } : {}),
+        ...(record.resolved ? {} : { note: record.kind === 'logpoint'
+          ? 'The logpoint is registered but no loaded script matched yet. It will bind when that script loads; nothing is printed until the line is reached.'
+          : 'The breakpoint is registered but no loaded script matched yet. It will bind when that script loads.' }) };
+    }
+
+    if (action === 'list_logpoints') {
+      const logpoints = [...session.breakpoints.values()].filter(record => record.kind === 'logpoint');
+      return { status: 'success', count: logpoints.length, logpoints };
     }
 
     if (action === 'remove_breakpoint') {
@@ -551,7 +582,7 @@ export function createSessionManager({
     }
 
     return { status: 'denied', retryable: false, reason: 'unsupported_debugger_action', dispatched: false,
-      supported: ['status', 'scripts', 'set_breakpoint', 'remove_breakpoint', 'pause', 'resume', 'step_over', 'step_into', 'step_out', 'frames', 'evaluate', 'set_script_source'] };
+      supported: ['status', 'scripts', 'set_breakpoint', 'set_logpoint', 'list_logpoints', 'remove_breakpoint', 'pause', 'resume', 'step_over', 'step_into', 'step_out', 'frames', 'evaluate', 'set_script_source'] };
   }
 
   async function closeAll(reason = 'shutdown') {

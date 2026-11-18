@@ -1,6 +1,6 @@
 {
   "name": "ai-browser-bridge",
-  "version": "0.47.0",
+  "version": "0.48.0",
   "description": "通过本机 AI Browser Bridge 服务驱动用户现有 Chrome：后台优先、验证写、结构化失败。",
   "descriptionZh": "通过本机 AI Browser Bridge 服务驱动用户现有 Chrome：后台优先、验证写、结构化失败。",
   "author": {

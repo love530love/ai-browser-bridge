@@ -16,6 +16,8 @@ function fakeSend(overrides = {}) {
     'Runtime.evaluate': { result: { type: 'number', value: 2 } },
     'Input.setIgnoreInputEvents': {},
     'Network.getCookies': { cookies: [{ name: 'session', value: 'SECRET-COOKIE' }] },
+    'Page.getInstallabilityErrors': { installabilityErrors: [{ errorId: 'not-in-main-frame', errorArguments: [{ name: 'x', value: 'secret' }] }] },
+    'Page.getAppManifest': { url: 'https://secret.example/manifest.json?token=abc', data: '{"name":"Secret App"}', errors: [] },
     ...overrides
   };
   return async (method) => {
@@ -60,7 +62,8 @@ test('probe reports every accepted command and redacts page data', async () => {
   assert.equal(result.verdict.gate1, 'target_domain_available');
   assert.deepEqual(result.verdict.gate2.accepted, [
     'Target.getTargets', 'Schema.getDomains', 'Page.getFrameTree',
-    'Runtime.evaluate', 'Input.setIgnoreInputEvents', 'Network.getCookies'
+    'Runtime.evaluate', 'Input.setIgnoreInputEvents', 'Network.getCookies',
+    'Page.getInstallabilityErrors', 'Page.getAppManifest'
   ]);
   assert.deepEqual(result.verdict.gate2.unsupported, []);
   assert.deepEqual(result.verdict.gate2.refused, []);
@@ -100,6 +103,6 @@ test('a missing chrome.debugger.getTargets API does not stop the command probes'
   });
   assert.equal(result.extensionApi.ok, false);
   assert.equal(result.extensionApi.classification, 'refused');
-  assert.equal(result.commands.filter(command => command.ok).length, 6);
+  assert.equal(result.commands.filter(command => command.ok).length, 8);
   assert.equal(result.channel, 'reused_session');
 });

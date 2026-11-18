@@ -11,6 +11,7 @@ const MAX_BYTES = 65536;
 const MAX_EVENTS = 200;
 const MAX_DURATION_MS = 5000;
 const MAX_METRICS = 40;
+const MAX_STACK_FRAMES = 15;
 
 // DevTools Console shows these as distinct levels; anything else is reported as
 // "other" instead of being mapped onto a level the page never used.
@@ -30,6 +31,21 @@ function bounded(value, max = MAX_STRING) {
 function countOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+// Full console stacks are what turn "an error happened" into "this function at
+// this line threw". They are reported raw and not source-mapped: browser_source_map
+// is the tool that maps generated positions to original source. A stack is page
+// data, so URLs go through safeResourceUrl and frame text is bounded.
+function stackFrames(stackTrace) {
+  const frames = Array.isArray(stackTrace?.callFrames) ? stackTrace.callFrames : [];
+  return frames.slice(0, MAX_STACK_FRAMES).map((frame, index) => ({
+    index,
+    functionName: bounded(frame?.functionName, 120) ?? '(anonymous)',
+    url: frame?.url ? safeResourceUrl(frame.url) : null,
+    line: countOrNull(frame?.lineNumber),
+    column: countOrNull(frame?.columnNumber)
+  }));
 }
 
 // Credentials, query strings, fragments and non-http payloads are excluded so a
@@ -104,6 +120,7 @@ export function createRecorder({ maxEvents = 100, maxBytes = MAX_BYTES } = {}) {
           messages.add({ kind: 'console', level: CONSOLE_LEVELS[params.type] ?? 'other',
             rawType: bounded(params.type, 40), text: consoleText(params.args),
             url: frame?.url ? safeResourceUrl(frame.url) : null, line: countOrNull(frame?.lineNumber),
+            stack: stackFrames(params.stackTrace),
             atMs: Date.now() - startedAt });
           return;
         }
@@ -114,7 +131,9 @@ export function createRecorder({ maxEvents = 100, maxBytes = MAX_BYTES } = {}) {
           messages.add({ kind: 'exception', level: 'error',
             text: bounded(details.exception?.description, 600) ?? bounded(details.text),
             url: details.url ? safeResourceUrl(details.url) : (frame?.url ? safeResourceUrl(frame.url) : null),
-            line: countOrNull(details.lineNumber ?? frame?.lineNumber), atMs: Date.now() - startedAt });
+            line: countOrNull(details.lineNumber ?? frame?.lineNumber),
+            stack: stackFrames(details.stackTrace),
+            atMs: Date.now() - startedAt });
           return;
         }
         case 'Log.entryAdded': {
@@ -123,6 +142,7 @@ export function createRecorder({ maxEvents = 100, maxBytes = MAX_BYTES } = {}) {
           messages.add({ kind: 'log', level: bounded(entry.level, 20) ?? 'info',
             source: bounded(entry.source, 20), text: bounded(entry.text, 600),
             url: entry.url ? safeResourceUrl(entry.url) : null, line: countOrNull(entry.lineNumber),
+            stack: stackFrames(entry.stackTrace),
             atMs: Date.now() - startedAt });
           return;
         }
@@ -209,7 +229,8 @@ const NEGATIVE_EVIDENCE = [
   'Only the selected tab target is observed. Other tabs, dedicated workers, service workers and out-of-process iframes are separate targets.',
   'Buffers are bounded; dropped and truncated counters report overflow instead of hiding it.',
   'Network records carry method, URL without query, status, type and timing only: no headers, cookies or bodies.',
-  'Console object arguments are summarised by type, not serialised.'
+  'Console object arguments are summarised by type, not serialised.',
+  'Stack frames are raw generated positions. Source-map mapping is not applied here; use browser_source_map for that.'
 ];
 
 // Debugger events are broadcast for every attached target. Without this filter a

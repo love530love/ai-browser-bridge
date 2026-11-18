@@ -20,6 +20,14 @@ const ROLE_INTERACTIVE = new Set([
 
 const MAX_MOCK_BODY = 200000;
 const MAX_MOCK_RULES = 20;
+const MAX_PWA_WAIT_MS = 15000;
+const PWA_PROMPT_SCRIPT = `(() => {
+  globalThis.__bridgePwaPrompt = null;
+  addEventListener('beforeinstallprompt', event => {
+    event.preventDefault();
+    globalThis.__bridgePwaPrompt = event;
+  });
+})();`;
 
 function denied(tool, reason, message, extra = {}) {
   return { status: 'denied', retryable: false, reason, tool, message, ...extra };
@@ -30,6 +38,14 @@ function failed(tool, error, extra = {}) {
     status: 'failed', retryable: false, reason: 'cdp_command_rejected', tool,
     message: error?.message ? String(error.message) : String(error), ...extra
   };
+}
+
+function unsupported(tool, reason, message, extra = {}) {
+  return { status: 'unsupported', retryable: false, reason, tool, dispatched: false, message, ...extra };
+}
+
+function isDomainUnavailable(error) {
+  return /-32601|wasn't found|is not supported|not supported by this channel|not found/i.test(String(error?.message ?? error ?? ''));
 }
 
 const clampInt = (value, fallback, min, max) => {
@@ -64,6 +80,14 @@ export function createCdpAdvanced({ sessions }) {
   // a clear on 156), so clear has to compare a read of the page against what was
   // set. Without this record there is nothing to compare against.
   const emulationState = new Map();
+  // Virtual authenticators are owned by the tab's debugger session and vanish
+  // when it is detached. Chrome cannot enumerate them, so this is the only
+  // record of which ids this bridge created and may remove.
+  const webauthnState = new Map();
+  // The beforeinstallprompt event is page state and cannot be replayed. Remember
+  // which init script this tab already has so a second install attempt does not
+  // stack duplicate listeners.
+  const pwaState = new Map();
 
   // Reads what the page can actually see of its own environment. Used twice:
   // once before an override is applied (that reading is the only thing that can
@@ -982,6 +1006,382 @@ export function createCdpAdvanced({ sessions }) {
     return denied('browser_network_rules', 'unknown_action', `Unknown action "${action}"; use list, block, unblock, mock, fail or clear.`);
   }
 
+  // -------------------------------------------------------------------------
+  // virtual WebAuthn authenticator
+  // -------------------------------------------------------------------------
+
+  function webauthnTracked(tabId) {
+    return webauthnState.get(tabId) ?? { enabled: false, authenticators: [] };
+  }
+
+  async function webauthn(tab, args) {
+    const action = args.action ?? 'status';
+    if (action === 'status' || action === 'list') {
+      const state = webauthnTracked(tab.id);
+      return {
+        status: 'success', retryable: false, action,
+        enabled: state.enabled,
+        authenticators: state.authenticators,
+        trackedOnly: true,
+        note: 'Chrome cannot enumerate virtual authenticators, so this lists only the ones created through this tool during the current debugger session. They are removed when the session detaches.'
+      };
+    }
+    if (!['enable', 'add', 'credentials', 'add_credential', 'clear_credentials', 'remove', 'remove_all', 'disable'].includes(action)) {
+      return denied('browser_webauthn', 'unknown_action', `Unknown action "${action}"; use status, list, enable, add, credentials, add_credential, clear_credentials, remove, remove_all or disable.`);
+    }
+    if (action === 'remove_all') {
+      const send = sessions.activeSend(tab.id);
+      if (!send) {
+        return { status: 'not_dispatched', retryable: false, action, reason: 'no_debugger_session',
+          message: 'The session that owned these authenticators is gone, so they are already gone with it.' };
+      }
+      const state = webauthnTracked(tab.id);
+      const removed = [];
+      const rejected = [];
+      for (const item of state.authenticators) {
+        try { await send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: item.authenticatorId }); removed.push(item.authenticatorId); }
+        catch (error) { rejected.push({ authenticatorId: item.authenticatorId, message: String(error?.message ?? error) }); }
+      }
+      webauthnState.set(tab.id, { enabled: state.enabled, authenticators: state.authenticators.filter(item => !removed.includes(item.authenticatorId)) });
+      return { status: rejected.length ? 'partial' : 'success', retryable: false, action, removed, rejected,
+        note: 'Only authenticators created through this tool are known. A session detach removes the rest.' };
+    }
+    const { send, opened } = await ensureSession(tab);
+    try {
+      if (action === 'enable') {
+        await send('WebAuthn.enable', { enableUI: args.enableUI === true });
+        const state = webauthnTracked(tab.id);
+        webauthnState.set(tab.id, { ...state, enabled: true });
+        return { status: 'success', retryable: false, action, enabled: true,
+          ...sessionNote(opened, { note: 'enableUI is off unless requested, so no browser prompt is shown. An enable without a virtual authenticator does not make tests pass; add one next.' }) };
+      }
+      if (action === 'add') {
+        const protocol = args.protocol === 'u2f' ? 'u2f' : 'ctap2';
+        const transport = ['usb', 'nfc', 'ble', 'internal', 'hybrid'].includes(args.transport) ? args.transport : 'internal';
+        const options = {
+          protocol, transport,
+          hasResidentKey: args.hasResidentKey !== false,
+          hasUserVerification: args.hasUserVerification !== false,
+          isUserVerified: args.isUserVerified !== false,
+          automaticPresenceSimulation: args.automaticPresenceSimulation !== false
+        };
+        const result = await send('WebAuthn.addVirtualAuthenticator', { options });
+        const authenticatorId = typeof result?.authenticatorId === 'string' ? result.authenticatorId : null;
+        const state = webauthnTracked(tab.id);
+        const record = { authenticatorId, protocol, transport, hasResidentKey: options.hasResidentKey,
+          hasUserVerification: options.hasUserVerification, isUserVerified: options.isUserVerified,
+          automaticPresenceSimulation: options.automaticPresenceSimulation, addedAt: new Date().toISOString() };
+        webauthnState.set(tab.id, { enabled: true, authenticators: [...state.authenticators, record] });
+        return { status: 'success', retryable: false, action, authenticator: record,
+          ...sessionNote(opened, { note: 'This authenticator exists only inside the current debugger session and only for this tab. It is not a hardware key and does not affect the user\'s real passkeys.' }) };
+      }
+      if (action === 'credentials') {
+        const authenticatorId = String(args.authenticatorId ?? '');
+        if (!authenticatorId) return denied('browser_webauthn', 'authenticator_id_required', 'credentials needs authenticatorId from action:"add" or action:"list".');
+        const result = await send('WebAuthn.getCredentials', { authenticatorId });
+        const includePrivateKey = args.includePrivateKey === true;
+        const credentials = (Array.isArray(result?.credentials) ? result.credentials : []).slice(0, 100).map(item => ({
+          credentialId: item?.credentialId ?? null,
+          isResidentCredential: item?.isResidentCredential === true,
+          rpId: item?.rpId ?? null,
+          userHandle: item?.userHandle ?? null,
+          signCount: Number.isFinite(item?.signCount) ? item.signCount : null,
+          largeBlob: item?.largeBlob ?? null,
+          ...(includePrivateKey && item?.privateKey ? { privateKey: item.privateKey } : {})
+        }));
+        return { status: 'success', retryable: false, action, authenticatorId, count: credentials.length, credentials,
+          secrets: includePrivateKey,
+          note: includePrivateKey
+            ? 'privateKey was requested and is returned to the caller only. It is live key material: do not write it to a report, a log or a page.'
+            : 'Private keys are omitted by default. Pass includePrivateKey:true only when the key material itself is the goal.' };
+      }
+      if (action === 'add_credential') {
+        const authenticatorId = String(args.authenticatorId ?? '');
+        const credential = args.credential && typeof args.credential === 'object' ? args.credential : null;
+        if (!authenticatorId || !credential) return denied('browser_webauthn', 'credential_required', 'add_credential needs authenticatorId and a credential object.');
+        const clean = {
+          credentialId: String(credential.credentialId ?? ''),
+          isResidentCredential: credential.isResidentCredential === true,
+          rpId: String(credential.rpId ?? ''),
+          privateKey: String(credential.privateKey ?? ''),
+          ...(typeof credential.userHandle === 'string' ? { userHandle: credential.userHandle } : {}),
+          ...(Number.isFinite(credential.signCount) ? { signCount: credential.signCount } : {})
+        };
+        if (!clean.credentialId || !clean.rpId || !clean.privateKey) {
+          return denied('browser_webauthn', 'credential_fields_required', 'A credential needs credentialId, rpId and privateKey (base64), and may include userHandle and signCount.');
+        }
+        await send('WebAuthn.addCredential', { authenticatorId, credential: clean });
+        const check = await send('WebAuthn.getCredentials', { authenticatorId }).catch(() => null);
+        const verified = Array.isArray(check?.credentials) && check.credentials.some(item => item?.credentialId === clean.credentialId);
+        return { status: 'success', retryable: false, action, authenticatorId, credentialId: clean.credentialId, verified,
+          note: verified ? 'The credential is readable back from the virtual authenticator. The private key is not echoed.' : 'Chrome accepted the credential but it was not observed in a read-back; re-read credentials before relying on it.' };
+      }
+      if (action === 'clear_credentials') {
+        const authenticatorId = String(args.authenticatorId ?? '');
+        if (!authenticatorId) return denied('browser_webauthn', 'authenticator_id_required', 'clear_credentials needs authenticatorId.');
+        await send('WebAuthn.clearCredentials', { authenticatorId });
+        return { status: 'success', retryable: false, action, authenticatorId, cleared: true, verified: true,
+          note: 'clearCredentials removes every credential on this virtual authenticator. Chrome does not return a count.' };
+      }
+      if (action === 'remove') {
+        const authenticatorId = String(args.authenticatorId ?? '');
+        if (!authenticatorId) return denied('browser_webauthn', 'authenticator_id_required', 'remove needs authenticatorId.');
+        await send('WebAuthn.removeVirtualAuthenticator', { authenticatorId });
+        const state = webauthnTracked(tab.id);
+        webauthnState.set(tab.id, { ...state, authenticators: state.authenticators.filter(item => item.authenticatorId !== authenticatorId) });
+        return { status: 'success', retryable: false, action, authenticatorId, removed: true };
+      }
+      if (action === 'disable') {
+        await send('WebAuthn.disable');
+        webauthnState.delete(tab.id);
+        return { status: 'success', retryable: false, action, enabled: false, ...sessionNote(opened) };
+      }
+    } catch (error) {
+      if (isDomainUnavailable(error)) {
+        return unsupported('browser_webauthn', 'webauthn_domain_unavailable',
+          'This Chrome build does not expose the WebAuthn domain over chrome.debugger, so a virtual authenticator cannot be created here. Nothing was changed.', { action });
+      }
+      return failed('browser_webauthn', error, { action });
+    }
+    return denied('browser_webauthn', 'unknown_action', `Unknown action "${action}".`);
+  }
+
+  // -------------------------------------------------------------------------
+  // PWA inspect, install and uninstall
+  // -------------------------------------------------------------------------
+
+  const PWA_TYPES = new Set(['hosted_app', 'packaged_app', 'legacy_packaged_app', 'platform_app']);
+
+  function urlSummary(raw) {
+    try {
+      const url = new URL(String(raw));
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+      return `${url.origin}${url.pathname}`;
+    } catch { return null; }
+  }
+
+  async function managementApps() {
+    if (!chrome.management?.getAll) throw new Error('chrome.management.getAll is not available');
+    const all = await chrome.management.getAll();
+    return (Array.isArray(all) ? all : []).filter(item => PWA_TYPES.has(item?.type)).map(item => ({
+      id: item.id, name: item.name ?? null, version: item.version ?? null, type: item.type,
+      enabled: item.enabled === true, installType: item.installType ?? null,
+      appLaunchUrl: item.appLaunchUrl ? urlSummary(item.appLaunchUrl) ?? item.appLaunchUrl : null,
+      mayDisable: item.mayDisable !== false
+    }));
+  }
+
+  async function pwa(tab, args) {
+    const action = args.action ?? 'list';
+    if (action === 'list') {
+      try {
+        const apps = await managementApps();
+        return { status: 'success', retryable: false, action, count: apps.length, apps,
+          note: 'Chrome management lists installed apps, but a PWA installed through the browser UI may not appear there. An empty list is not proof that nothing is installed.' };
+      } catch (error) {
+        return unsupported('browser_pwa', 'management_unavailable', String(error?.message ?? error), { action });
+      }
+    }
+    if (action === 'uninstall') {
+      let apps;
+      try { apps = await managementApps(); }
+      catch (error) { return unsupported('browser_pwa', 'management_unavailable', String(error?.message ?? error), { action }); }
+      const appId = typeof args.appId === 'string' ? args.appId : null;
+      const name = typeof args.name === 'string' ? args.name : null;
+      const launchUrl = args.url ? urlSummary(args.url) : null;
+      const matches = apps.filter(item => (appId && item.id === appId)
+        || (!appId && name && item.name === name)
+        || (!appId && !name && launchUrl && item.appLaunchUrl === launchUrl));
+      if (!matches.length) {
+        return { status: 'not_found', retryable: false, action, appId, name, url: launchUrl,
+          message: 'No installed app matched. A PWA installed through the browser UI may not be exposed through chrome.management; uninstall it from chrome://apps instead. Nothing was changed.' };
+      }
+      if (matches.length > 1) {
+        return { status: 'ambiguous', retryable: false, action, candidates: matches,
+          message: 'More than one installed app matched. Pass appId to choose exactly one; nothing was changed.' };
+      }
+      const target = matches[0];
+      if (!target.mayDisable) {
+        return denied('browser_pwa', 'app_protected', 'Chrome or a policy protects this app, so it cannot be uninstalled here.', { app: target });
+      }
+      try {
+        await Promise.race([
+          chrome.management.uninstall(target.id, { showConfirmDialog: args.showConfirmDialog !== false }),
+          new Promise(resolve => setTimeout(() => resolve({ timedOut: true }), 15000))
+        ]);
+      } catch (error) {
+        return failed('browser_pwa', error, { action, app: target });
+      }
+      const after = await managementApps().catch(() => null);
+      const stillThere = after ? after.some(item => item.id === target.id) : null;
+      return { status: stillThere === false ? 'success' : 'uncertain', retryable: false, action,
+        app: target, verified: stillThere === false, stillInstalled: stillThere,
+        note: stillThere === false
+          ? 'The app is no longer in chrome.management after the call.'
+          : 'Chrome accepted the request but the app is still listed, or the list could not be read. Do not repeat the uninstall blindly; re-read action:"list".' };
+    }
+    if (action === 'inspect') {
+      const existing = sessions.activeSend(tab.id);
+      const run = async send => {
+        const [errors, manifest, appId] = await Promise.all([
+          send('Page.getInstallabilityErrors').catch(error => ({ error: String(error?.message ?? error) })),
+          send('Page.getAppManifest').catch(error => ({ error: String(error?.message ?? error) })),
+          send('Page.getAppId').catch(() => null)
+        ]);
+        if (errors?.error && isDomainUnavailable(errors.error)) {
+          return unsupported('browser_pwa', 'installability_domain_unavailable', errors.error, { action });
+        }
+        let parsed = null;
+        if (typeof manifest?.data === 'string') {
+          try { parsed = JSON.parse(manifest.data); } catch { parsed = null; }
+        }
+        const installabilityErrors = Array.isArray(errors?.installabilityErrors) ? errors.installabilityErrors : [];
+        const manifestErrors = Array.isArray(manifest?.errors) ? manifest.errors : [];
+        return {
+          status: 'success', retryable: false, action,
+          installable: installabilityErrors.length === 0 && Boolean(manifest?.url) && manifestErrors.length === 0,
+          installabilityErrors: installabilityErrors.slice(0, 30).map(item => ({
+            errorId: item?.errorId ?? item?.error ?? 'unknown',
+            message: typeof item?.message === 'string' ? item.message.slice(0, 300) : null
+          })),
+          manifest: manifest?.url ? {
+            url: urlSummary(manifest.url) ?? '[non-http manifest]',
+            dataChars: typeof manifest.data === 'string' ? manifest.data.length : null,
+            name: typeof parsed?.name === 'string' ? parsed.name.slice(0, 200) : null,
+            shortName: typeof parsed?.short_name === 'string' ? parsed.short_name.slice(0, 200) : null,
+            startUrl: typeof parsed?.start_url === 'string' ? urlSummary(parsed.start_url) ?? parsed.start_url.slice(0, 500) : null,
+            display: typeof parsed?.display === 'string' ? parsed.display.slice(0, 40) : null,
+            iconCount: Array.isArray(parsed?.icons) ? parsed.icons.length : null,
+            errors: manifestErrors.slice(0, 20).map(item => typeof item?.message === 'string' ? item.message.slice(0, 300) : String(item).slice(0, 300))
+          } : null,
+          appId: typeof appId?.appId === 'string' ? appId.appId : null,
+          recommendedId: typeof appId?.recommendedId === 'string' ? appId.recommendedId : null,
+          debuggerBanner: Boolean(existing),
+          contentTrust: 'untrusted page manifest',
+          note: 'Read-only. installable is Chrome\'s own installability verdict, not a promise that the browser will show an install prompt: a prompt also depends on engagement and on this tab being visible enough for the browser UI.'
+        };
+      };
+      if (existing) return run(existing);
+      const opened = await sessions.open({ tabId: tab.id, expectedUrl: tab.url });
+      if (opened.status !== 'success') return { ...opened, action };
+      try {
+        const send = sessions.activeSend(tab.id);
+        return { ...await run(send), sessionReused: false, debuggerBanner: true };
+      } finally {
+        await sessions.close({ tabId: tab.id, reason: 'pwa_inspect_read' }).catch(() => {});
+      }
+    }
+    if (action !== 'install') {
+      return denied('browser_pwa', 'unknown_action', `Unknown action "${action}"; use inspect, install, list or uninstall.`);
+    }
+    if (!/^https?:/i.test(tab.url)) {
+      return denied('browser_pwa', 'http_tab_required', 'Installing a PWA needs an http(s) tab; this tab cannot carry an install prompt.');
+    }
+    const { send, opened } = await ensureSession(tab, { enablePage: true });
+    const timeoutMs = clampInt(args.timeoutMs, 8000, 1000, MAX_PWA_WAIT_MS);
+    const state = pwaState.get(tab.id) ?? {};
+    try {
+      if (!state.promptScriptId) {
+        const { identifier } = await send('Page.addScriptToEvaluateOnNewDocument', { source: PWA_PROMPT_SCRIPT });
+        pwaState.set(tab.id, { ...state, promptScriptId: identifier });
+      }
+      await send('Page.reload', { ignoreCache: true });
+      const deadline = Date.now() + timeoutMs;
+      let promptSeen = false;
+      while (Date.now() < deadline) {
+        const probe = await send('Runtime.evaluate', {
+          expression: 'Boolean(globalThis.__bridgePwaPrompt)', returnByValue: true, awaitPromise: false
+        }).catch(() => null);
+        if (probe?.result?.value === true) { promptSeen = true; break; }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      if (!promptSeen) {
+        return {
+          status: 'failed', retryable: false, action, dispatched: true, reloaded: true, promptSeen: false,
+          reason: 'beforeinstallprompt_not_observed',
+          message: `The tab was reloaded and no beforeinstallprompt event was captured within ${timeoutMs}ms. The page may not be installable, or Chrome may require more engagement or a visible tab. Nothing was installed. Run action:"inspect" to read Chrome's installability errors.`,
+          ...sessionNote(opened)
+        };
+      }
+      const outcome = await send('Runtime.evaluate', {
+        expression: `(async () => {
+          const prompt = globalThis.__bridgePwaPrompt;
+          if (!prompt) return { available: false };
+          globalThis.__bridgePwaPrompt = null;
+          prompt.prompt();
+          const choice = await Promise.race([
+            prompt.userChoice,
+            new Promise(resolve => setTimeout(() => resolve({ outcome: 'timeout', platform: 'bridge_timeout' }), 8000))
+          ]);
+          return { available: true, outcome: choice?.outcome ?? 'unknown', platform: choice?.platform ?? null };
+        })()`,
+        returnByValue: true, awaitPromise: true, userGesture: true
+      });
+      const value = outcome?.result?.value ?? null;
+      if (!value?.available) {
+        return { status: 'uncertain', retryable: false, action, dispatched: true, reloaded: true, promptSeen: true,
+          reason: 'install_prompt_unavailable_after_reload',
+          message: 'The beforeinstallprompt event was seen, but the prompt object was gone when the install step ran. Nothing was installed; re-run action:"install" once.', ...sessionNote(opened) };
+      }
+      if (value.outcome === 'timeout') {
+        return { status: 'waiting', retryable: true, action, dispatched: true, reloaded: true, promptSeen: true,
+          outcome: 'timeout', userActionRequired: true,
+          nextPollTool: 'browser_pwa', nextPollArgs: { action: 'list' },
+          message: 'The browser install prompt is open and the user has not chosen yet. Do not repeat the prompt; ask the user to choose, then call action:"list" to see the result.', ...sessionNote(opened) };
+      }
+      return { status: 'success', retryable: false, action, dispatched: true, reloaded: true, promptSeen: true,
+        outcome: value.outcome, platform: value.platform, verified: false,
+        message: value.outcome === 'accepted'
+          ? 'The browser reported that the user accepted the install prompt. The install itself may still be finalising; call action:"list" to confirm.'
+          : 'The browser reported that the install prompt was dismissed. Nothing was installed.',
+        ...sessionNote(opened) };
+    } catch (error) {
+      if (isDomainUnavailable(error)) {
+        return unsupported('browser_pwa', 'pwa_install_domain_unavailable',
+          'This Chrome build does not expose the commands the install prompt needs over chrome.debugger. Nothing was installed.', { action });
+      }
+      return failed('browser_pwa', error, { action, dispatched: true, reloaded: true });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // extension install
+  // -------------------------------------------------------------------------
+
+  async function extensionInstall(tab, args) {
+    const path = typeof args.path === 'string' ? args.path.trim() : '';
+    if (!path) return denied('browser_extension_install', 'path_required', 'Installing an unpacked extension needs the absolute folder path.');
+    if (!chrome.management?.getAll) {
+      return unsupported('browser_extension_install', 'management_unavailable', 'chrome.management is not available, so the result cannot be verified.');
+    }
+    const before = await chrome.management.getAll().catch(() => []);
+    const beforeIds = new Set((Array.isArray(before) ? before : []).map(item => item?.id));
+    const { send, opened } = await ensureSession(tab);
+    let result;
+    try {
+      result = await send('Extensions.loadUnpacked', { path });
+    } catch (error) {
+      if (isDomainUnavailable(error)) {
+        return unsupported('browser_extension_install', 'extensions_domain_unavailable',
+          'This Chrome build does not expose Extensions.loadUnpacked over chrome.debugger. Chrome normally requires --enable-unsafe-extension-debugging for this command. Nothing was installed.', { path });
+      }
+      return failed('browser_extension_install', error, { path });
+    }
+    const after = await chrome.management.getAll().catch(() => null);
+    const added = after ? (Array.isArray(after) ? after : []).filter(item => item?.id && !beforeIds.has(item.id)) : [];
+    const extensionId = typeof result?.id === 'string' ? result.id : (added[0]?.id ?? null);
+    const verified = Boolean(after && added.some(item => item.id === extensionId));
+    return {
+      status: 'success', retryable: false, action: 'install', path,
+      extensionId,
+      verified,
+      added: added.map(item => ({ id: item.id, name: item.name ?? null, version: item.version ?? null, enabled: item.enabled === true })),
+      ...sessionNote(opened, { note: verified
+        ? 'The extension is visible in chrome.management after loading. Chrome may still show its own confirmation UI for some install types.'
+        : 'Chrome accepted loadUnpacked but no new extension was observed in chrome.management. Do not repeat the call blindly; read browser_extensions first.' })
+    };
+  }
+
   const HANDLERS = {
     browser_dialog: dialog,
     browser_emulation: emulation,
@@ -989,7 +1389,10 @@ export function createCdpAdvanced({ sessions }) {
     browser_drag: drag,
     browser_pdf_save: pdfSave,
     browser_init_script: initScript,
-    browser_network_rules: networkRules
+    browser_network_rules: networkRules,
+    browser_webauthn: webauthn,
+    browser_pwa: pwa,
+    browser_extension_install: extensionInstall
   };
 
   return {

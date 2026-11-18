@@ -33,6 +33,11 @@ export const WRITE_TOOLS = new Set([
   // because it is one call would let two agents replay into the same page at
   // the same time.
   'browser_recipe_run',
+  // A virtual authenticator, an install prompt and an extension load all bind
+  // to one tab's debugger session and change what that tab will accept next.
+  // They are governed as a whole; the read actions inside them are cheap to
+  // queue and finishing a lease is the point.
+  'browser_webauthn', 'browser_pwa', 'browser_extension_install',
   // browser_popup is governed as a whole even though probe and reveal are
   // reads, because its open and choose actions click a trigger and then a
   // button inside the bubble it opens. A popconfirm confirm is usually a

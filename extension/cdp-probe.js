@@ -104,15 +104,31 @@ export async function runCdpProbe({ tab, send, getTargets, channel, now = Date.n
 
   const commands = [];
   commands.push(await probeCommand(send, 'Target.getTargets', {}, value => summarizeTargets(value?.targetInfos)));
+  const domainNames = new Set();
   commands.push(await probeCommand(send, 'Schema.getDomains', {}, value => {
-    const names = new Set((Array.isArray(value?.domains) ? value.domains : []).map(domain => domain?.name).filter(Boolean));
+    for (const domain of Array.isArray(value?.domains) ? value.domains : []) {
+      if (domain?.name) domainNames.add(domain.name);
+    }
     return {
-      domainCount: names.size,
-      hasTarget: names.has('Target'),
-      hasPage: names.has('Page'),
-      hasRuntime: names.has('Runtime'),
-      hasInput: names.has('Input'),
-      hasNetwork: names.has('Network')
+      domainCount: domainNames.size,
+      hasTarget: domainNames.has('Target'),
+      hasPage: domainNames.has('Page'),
+      hasRuntime: domainNames.has('Runtime'),
+      hasInput: domainNames.has('Input'),
+      hasNetwork: domainNames.has('Network'),
+      hasDOM: domainNames.has('DOM'),
+      hasCSS: domainNames.has('CSS'),
+      hasOverlay: domainNames.has('Overlay'),
+      hasServiceWorker: domainNames.has('ServiceWorker'),
+      hasFetch: domainNames.has('Fetch'),
+      hasWebAuthn: domainNames.has('WebAuthn'),
+      hasTracing: domainNames.has('Tracing'),
+      hasHeapProfiler: domainNames.has('HeapProfiler'),
+      hasAudits: domainNames.has('Audits'),
+      hasExtensions: domainNames.has('Extensions'),
+      hasLog: domainNames.has('Log'),
+      hasAccessibility: domainNames.has('Accessibility'),
+      hasPerformance: domainNames.has('Performance')
     };
   }));
   commands.push(await probeCommand(send, 'Page.getFrameTree', {}, value => ({
@@ -129,6 +145,20 @@ export async function runCdpProbe({ tab, send, getTargets, channel, now = Date.n
   commands.push(await probeCommand(send, 'Input.setIgnoreInputEvents', { ignore: false }, () => ({ accepted: true, changedDefault: false })));
   commands.push(await probeCommand(send, 'Network.getCookies', { urls: ['https://example.invalid/'] }, value => ({
     cookieCount: Array.isArray(value?.cookies) ? value.cookies.length : null
+  })));
+  // Read-only installability evidence for the PWA route. The manifest body is
+  // summarised rather than returned: it is page-controlled text and the probe is
+  // not a content reader.
+  commands.push(await probeCommand(send, 'Page.getInstallabilityErrors', {}, value => ({
+    errorCount: Array.isArray(value?.installabilityErrors) ? value.installabilityErrors.length : null,
+    errorIds: Array.isArray(value?.installabilityErrors)
+      ? value.installabilityErrors.map(item => clamp(item?.errorId ?? item?.error ?? 'unknown', 80)).slice(0, 20)
+      : []
+  })));
+  commands.push(await probeCommand(send, 'Page.getAppManifest', {}, value => ({
+    manifestUrl: value?.url ? redactUrl(value.url) : null,
+    dataChars: typeof value?.data === 'string' ? value.data.length : null,
+    parseErrorCount: Array.isArray(value?.errors) ? value.errors.length : null
   })));
 
   const byMethod = Object.fromEntries(commands.map(command => [command.method, command]));
@@ -153,6 +183,10 @@ export async function runCdpProbe({ tab, send, getTargets, channel, now = Date.n
       gate1,
       gate2: { accepted, unsupported, refused },
       targetDomain: targetCommand?.ok ? 'answers_in_page_session' : targetCommand?.classification === 'unsupported' ? 'not_exposed_in_page_session' : 'unknown',
+      // Schema.getDomains reports what the page-level debugger channel will
+      // answer, not what this bridge has implemented. A domain listed here is
+      // reachable; a command inside it can still be refused.
+      domainAvailability: Object.fromEntries([...domainNames].sort().map(name => [name, true])),
       browserLevelEndpoint: false,
       note: 'A page-level debugger session answering Target.* is not a browser-level CDP endpoint. connect_over_cdp also needs browser WebSocket discovery and Target.attachToTarget(flatten), which this probe does not test.'
     },

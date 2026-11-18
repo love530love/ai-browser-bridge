@@ -3,6 +3,8 @@ import { withDebugger, pointer, key } from './cdp.js';
 import { createErrorJournal } from './error-journal.js';
 import { evaluatedValue, resourceSummary } from './cdp-results.js';
 import { captureDevtools, createTabSubscription } from './cdp-capture.js';
+import { readCssStyles } from './css-styles.js';
+import { captureRequestHeaders } from './header-capture.js';
 import { readStorage, writeStorage } from './cdp-storage.js';
 import { replayRequest, fetchRequest, readVerifyValue, verifyRequest } from './cdp-replay.js';
 import { createSessionManager } from './cdp-session.js';
@@ -783,6 +785,41 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       send,
       subscribe: createTabSubscription(chrome.debugger, tab.id),
       // A pending navigation must not be reported as a stable same-page window.
+      readUrl: async () => {
+        const now = await chrome.tabs.get(tab.id);
+        return now.pendingUrl ? `pending:${now.pendingUrl}` : now.url;
+      }
+    }));
+  }
+  if (name === 'browser_css_styles') {
+    const tab = await chrome.tabs.get(args.tabId);
+    checkedUrl(tab.url, config);
+    const paused = pausedGuard(tab.id);
+    if (paused) return paused;
+    return await withTabDebugger(tab, async send => readCssStyles({
+      send,
+      selector: args.selector,
+      nodeId: args.nodeId,
+      includeInherited: args.includeInherited,
+      maxRules: args.maxRules
+    }));
+  }
+  if (name === 'browser_request_headers') {
+    const tab = await chrome.tabs.get(args.tabId);
+    checkedUrl(tab.url, config);
+    const paused = pausedGuard(tab.id);
+    if (paused) return paused;
+    return await withTabDebugger(tab, async send => captureRequestHeaders({
+      tabId: tab.id,
+      pageUrl: tab.url,
+      durationMs: args.durationMs,
+      maxRequests: args.maxRequests,
+      urlPattern: args.urlPattern,
+      scope: args.scope,
+      includeQuery: args.includeQuery === true,
+      includeResponseHeaders: args.includeResponseHeaders === true,
+      send,
+      subscribe: createTabSubscription(chrome.debugger, tab.id),
       readUrl: async () => {
         const now = await chrome.tabs.get(tab.id);
         return now.pendingUrl ? `pending:${now.pendingUrl}` : now.url;

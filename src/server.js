@@ -56,7 +56,8 @@ import {
   EXTENSION_STATE_CONFIRMATION, COOKIES_WRITE_CONFIRMATION, BROWSING_DATA_CONFIRMATION,
   SITE_SETTINGS_WRITE_CONFIRMATION, PRIVACY_SETTING_WRITE_CONFIRMATION,
   WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION,
-  CLIPBOARD_WRITE_CONFIRMATION, NATIVE_MESSAGING_CONFIRMATION, NATIVE_HOST_CONFIRMATION
+  CLIPBOARD_WRITE_CONFIRMATION, NATIVE_MESSAGING_CONFIRMATION, NATIVE_HOST_CONFIRMATION,
+  WEBAUTHN_WRITE_CONFIRMATION, PWA_WRITE_CONFIRMATION, EXTENSION_INSTALL_CONFIRMATION, REQUEST_HEADERS_CONFIRMATION
 } from './confirmations.js';
 
 // Browser-wide writes (extension/browser-authority.js) are gated here, before a
@@ -80,7 +81,11 @@ const AUTHORITY_CONFIRMATIONS = {
   // should learn that its attestation is wrong before it costs a queue slot.
   browser_clipboard_write: CLIPBOARD_WRITE_CONFIRMATION,
   browser_native_messaging: NATIVE_MESSAGING_CONFIRMATION,
-  browser_native_host_install: NATIVE_HOST_CONFIRMATION
+  browser_native_host_install: NATIVE_HOST_CONFIRMATION,
+  // Installing an extension and exporting request headers are whole-tool
+  // decisions, not action-dependent ones: the tool has no unconfirmed reading.
+  browser_extension_install: EXTENSION_INSTALL_CONFIRMATION,
+  browser_request_headers: REQUEST_HEADERS_CONFIRMATION
 };
 import { recipeDir, recipeFileName, buildRecipe, saveRecipe, loadRecipe, listRecipes, deleteRecipe, missingVariables, MAX_RECIPE_STEPS } from './recipes.js';
 
@@ -2175,6 +2180,19 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (name === 'browser_desktop_windows' || name === 'browser_devtools' || name === 'browser_native_snapshot' ||
         name === 'browser_native_action') return desktopCall(name, args);
     if (name === 'browser_storage_write' && args.confirmation !== STORAGE_WRITE_CONFIRMATION) return denyUnconfirmed(name, args, STORAGE_WRITE_CONFIRMATION);
+    // A virtual authenticator changes what the site sees, and exporting its
+    // private key hands out live key material. Reads of metadata are allowed
+    // without the phrase so a caller can inspect what already exists.
+    const webauthnWrite = name === 'browser_webauthn' && (
+      ['enable', 'add', 'add_credential', 'clear_credentials', 'remove', 'remove_all', 'disable'].includes(args.action) ||
+      (args.action === 'credentials' && args.includePrivateKey === true)
+    );
+    if (webauthnWrite && args.confirmation !== WEBAUTHN_WRITE_CONFIRMATION) return denyUnconfirmed(name, args, WEBAUTHN_WRITE_CONFIRMATION);
+    // Inspecting and listing installed apps are reads; installing and
+    // uninstalling change the browser's installation state.
+    if (name === 'browser_pwa' && ['install', 'uninstall'].includes(args.action) && args.confirmation !== PWA_WRITE_CONFIRMATION) {
+      return denyUnconfirmed(name, args, PWA_WRITE_CONFIRMATION);
+    }
     if (AUTHORITY_CONFIRMATIONS[name] && args.confirmation !== AUTHORITY_CONFIRMATIONS[name]) return denyUnconfirmed(name, args, AUTHORITY_CONFIRMATIONS[name]);
     if (name === 'browser_replay_request' && args.confirmation !== REPLAY_REQUEST_CONFIRMATION) return denyUnconfirmed(name, args, REPLAY_REQUEST_CONFIRMATION);
     // browser_fetch is the one network tool with no confirmation string, so its

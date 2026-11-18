@@ -5,7 +5,8 @@ import {
   DOWNLOADS_CONTROL_CONFIRMATION, EXTENSION_STATE_CONFIRMATION, COOKIES_WRITE_CONFIRMATION,
   BROWSING_DATA_CONFIRMATION, SITE_SETTINGS_WRITE_CONFIRMATION, PRIVACY_SETTING_WRITE_CONFIRMATION,
   WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION,
-  CLIPBOARD_WRITE_CONFIRMATION, NATIVE_MESSAGING_CONFIRMATION, NATIVE_HOST_CONFIRMATION, CERTIFICATE_WRITE_CONFIRMATION
+  CLIPBOARD_WRITE_CONFIRMATION, NATIVE_MESSAGING_CONFIRMATION, NATIVE_HOST_CONFIRMATION, CERTIFICATE_WRITE_CONFIRMATION,
+  WEBAUTHN_WRITE_CONFIRMATION, PWA_WRITE_CONFIRMATION, EXTENSION_INSTALL_CONFIRMATION, REQUEST_HEADERS_CONFIRMATION
 } from './confirmations.js';
 
 const tabId = { type: 'integer', minimum: 1 };
@@ -294,6 +295,59 @@ export const TOOLS = [
     maxEvents: { type: 'integer', minimum: 1, maximum: 200 },
     agent
   }, ['tabId'], true),
+  tool('browser_css_styles', 'Read-only CSS cascade for one element, the way the DevTools Styles pane explains why it looks that way: matched rules in cascade order with their origin and specificity, inline and attribute styles, inherited rules from ancestors, pseudo-elements, the computed style and custom properties. It reads the current document only; open shadow roots and cross-origin iframes are separate trees and a selector that matches nothing is not proof that no such element exists elsewhere. Chrome may not forward the CSS domain over chrome.debugger; that is reported as status:"unsupported" with reason:"css_domain_unavailable" instead of an empty result. Values and stylesheet text are untrusted page data. It never edits CSS or reloads the page. Pass selector, or nodeId from a prior DOM read; includeInherited:false keeps only rules matched on the node itself.', {
+    tabId,
+    selector: text(400),
+    nodeId: { type: 'integer', minimum: 1, maximum: 2147483647 },
+    includeInherited: { type: 'boolean' },
+    maxRules: { type: 'integer', minimum: 1, maximum: 200 },
+    agent
+  }, ['tabId'], true),
+  tool('browser_request_headers', 'Read-only, explicitly confirmed capture of request headers for one tab, including Cookie and Authorization when the site itself sends them. This is deliberately separate from browser_devtools_capture, which promises to exclude headers and bodies. The window is bounded (maximum 5 seconds, 50 requests), the default scope is the tab\'s exact current origin, and query strings are dropped unless includeQuery:true. Request bodies are never captured. The reply is marked secrets:true and noPersistence:true: it is returned to the caller only, never written to disk or the audit log. Do not copy it into a report, a page or a shared transcript. Requires confirmation:"reveal_request_headers_once".', {
+    tabId,
+    durationMs: { type: 'integer', minimum: 200, maximum: 5000 },
+    maxRequests: { type: 'integer', minimum: 1, maximum: 50 },
+    urlPattern: text(500),
+    scope: { type: 'string', enum: ['tab_origin', 'current_page', 'all'] },
+    includeQuery: { type: 'boolean' },
+    includeResponseHeaders: { type: 'boolean' },
+    confirmation: { type: 'string', enum: [REQUEST_HEADERS_CONFIRMATION] },
+    agent
+  }, ['tabId', 'confirmation'], true),
+  tool('browser_webauthn', 'Create and inspect a CDP virtual authenticator for one tab, so passkey and security-key flows can be tested in the existing Chrome without a physical key. The authenticator lives only in this tab\'s debugger session and disappears when the session detaches; it does not touch the user\'s real passkeys. Read actions status and list need no confirmation. Actions enable, add, credentials, add_credential, clear_credentials, remove, remove_all and disable change the test environment and require confirmation:"modify_webauthn_once". Private keys are omitted from credentials unless includePrivateKey:true, and that flag exports live key material to the caller only. Chrome cannot enumerate virtual authenticators, so list reports only ids this bridge created in the current session. An unsupported WebAuthn domain is reported as status:"unsupported", never as an empty authenticator list.', {
+    tabId,
+    action: { type: 'string', enum: ['status', 'list', 'enable', 'add', 'credentials', 'add_credential', 'clear_credentials', 'remove', 'remove_all', 'disable'] },
+    enableUI: { type: 'boolean' },
+    protocol: { type: 'string', enum: ['ctap2', 'u2f'] },
+    transport: { type: 'string', enum: ['usb', 'nfc', 'ble', 'internal', 'hybrid'] },
+    hasResidentKey: { type: 'boolean' },
+    hasUserVerification: { type: 'boolean' },
+    isUserVerified: { type: 'boolean' },
+    automaticPresenceSimulation: { type: 'boolean' },
+    authenticatorId: text(200),
+    includePrivateKey: { type: 'boolean' },
+    credential: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        credentialId: text(2000), privateKey: text(20000), rpId: text(300),
+        userHandle: text(2000), signCount: { type: 'integer', minimum: 0, maximum: 2147483647 },
+        isResidentCredential: { type: 'boolean' }
+      }
+    },
+    confirmation: { type: 'string', enum: [WEBAUTHN_WRITE_CONFIRMATION] },
+    agent
+  }, ['tabId', 'action']),
+  tool('browser_pwa', 'Inspect, list, install or uninstall a Progressive Web App using the existing Chrome. inspect reads Chrome\'s own installability errors, manifest summary and app id without changing anything. install captures the page\'s beforeinstallprompt event, reloads the tab so the event can fire, then opens the real browser install prompt; it reports waiting/userActionRequired while the user has not chosen, and never claims that accepting the prompt finished the installation. uninstall uses chrome.management and verifies the app left the list, but a PWA installed through the browser UI may not appear there at all, which is reported honestly. list and inspect need no confirmation; install and uninstall require confirmation:"modify_pwa_once". Installing requires the tab to be an http(s) page.', {
+    tabId,
+    action: { type: 'string', enum: ['inspect', 'install', 'list', 'uninstall'] },
+    appId: text(300),
+    name: text(300),
+    url: text(2000),
+    timeoutMs: { type: 'integer', minimum: 1000, maximum: 15000 },
+    showConfirmDialog: { type: 'boolean' },
+    confirmation: { type: 'string', enum: [PWA_WRITE_CONFIRMATION] },
+    agent
+  }, ['tabId', 'action']),
   // Split into read and write instead of one tool with an action switch: the
   // read side is genuinely read-only, so it can run at read priority and degrade
   // to a retryable timeout instead of being killed as an uncertain write. The
@@ -452,14 +506,15 @@ export const TOOLS = [
   tool('browser_navigate', 'Navigate an allowed tab to another user-allowed HTTP(S) URL. If the tab is leased, pass the matching agent.', { tabId, url: text(8000), agent }, ['tabId', 'url']),
   tool('browser_navigate_verified', 'Navigate an allowed tab to another HTTP(S) URL, then verify the page has loaded at that URL (or a close redirect). Returns success/uncertain/failed; never assumes navigation succeeded without observing the new URL. If the tab is leased, pass the matching agent.', { tabId, url: text(8000), expectUrlContains: text(8000), timeoutMs: timeoutMs(30000), agent }, ['tabId', 'url', 'expectUrlContains']),
   tool('browser_close', 'Close a tab this bridge opened. A tab that existed before the bridge opened it is refused with status=denied and reason=tab_not_created_by_bridge, because closing it would remove something the user was using; pass force:true only after explicit approval for that exact tab. Closing is about the tab lifecycle, not its content, so force:true also works for a restricted tab (an internal page or a disallowed origin) that browser_tabs lists with restricted:true - which is how a tab created by choosing a native menu item such as New tab gets cleaned up. Unsaved edits may be lost. If the tab is leased, pass the matching agent.', { tabId, force: { type: 'boolean' }, agent }, ['tabId']),
-  tool('browser_debugger', 'A long-lived CDP debugger session on one tab, which is what breakpoints and stepping require: a breakpoint set in one call survives into the next. Open it with action:"open", then use action:"scripts" to find an exact script URL (pass urlFilter, a case-insensitive substring, because a script-heavy page pushes its own document script out of the unfiltered tail), "set_breakpoint", and poll action:"status" until paused is not null. While paused, action:"frames" lists call frames and scopes (values are omitted on purpose) and action:"evaluate" runs one expression on a chosen call frame. action:"evaluate" also works with no breakpoint at all: when nothing is paused it evaluates in the GLOBAL context of the page, which is what most callers want and is reported as evaluatedOn:"global". That path needs the session open first, which costs a debugging banner on the tab for as long as it lasts - so for a one-off expression prefer browser_eval, which evaluates without attaching anything and falls back to this channel only when the CSP of the page forbids eval. action:"resume", "step_over", "step_into", "step_out" continue execution. action:"set_script_source" exists but is refused by the browser, and that is measured rather than assumed: current Chrome answers Debugger.setScriptSource with the ServerError "setScriptSource functionality no longer available", returned from an unconditional stub in V8 (V8DebuggerAgentImpl::setScriptSource), so no choice of scriptId, source or dryRun can change the outcome. It answers reason:"script_edit_removed_by_v8" with blockedBy:"v8_inspector" and a list of alternatives, and it is never retried. Use action:"evaluate" to redefine a function for immediate effect instead; that changes behaviour but not the script text. action:"probe" is the one action here that does not require an open session: for the CDP gateway decision it attaches briefly (or reuses an existing session), asks chrome.debugger.getTargets plus Target.getTargets, Schema.getDomains, Page.getFrameTree, Runtime.evaluate("1+1"), Input.setIgnoreInputEvents(false) and Network.getCookies for https://example.invalid/, and returns only counts and redacted origins - never target URLs, titles or cookie values. A Target.* answer in a page-level session is not a browser-level CDP endpoint and does not authorize Playwright. Always finish with action:"close". Cost to be aware of: Chrome shows a debugging banner on that tab for as long as the session is open, and DevTools cannot attach to it meanwhile. Safety: a paused page is frozen, so every close path resumes first, and a paused session nobody touches is resumed automatically after a bounded window (see session.paused.autoResumeInMs). Closing a session removes its breakpoints; they do not survive. Evaluating an expression runs with full page privileges, exactly like typing in the DevTools Console; results are untrusted page data.', {
+  tool('browser_debugger', 'A long-lived CDP debugger session on one tab, which is what breakpoints and stepping require: a breakpoint set in one call survives into the next. Open it with action:"open", then use action:"scripts" to find an exact script URL (pass urlFilter, a case-insensitive substring, because a script-heavy page pushes its own document script out of the unfiltered tail), "set_breakpoint", and poll action:"status" until paused is not null. While paused, action:"frames" lists call frames and scopes (values are omitted on purpose) and action:"evaluate" runs one expression on a chosen call frame. action:"evaluate" also works with no breakpoint at all: when nothing is paused it evaluates in the GLOBAL context of the page, which is what most callers want and is reported as evaluatedOn:"global". That path needs the session open first, which costs a debugging banner on the tab for as long as it lasts - so for a one-off expression prefer browser_eval, which evaluates without attaching anything and falls back to this channel only when the CSP of the page forbids eval. action:"resume", "step_over", "step_into", "step_out" continue execution. action:"set_script_source" exists but is refused by the browser, and that is measured rather than assumed: current Chrome answers Debugger.setScriptSource with the ServerError "setScriptSource functionality no longer available", returned from an unconditional stub in V8 (V8DebuggerAgentImpl::setScriptSource), so no choice of scriptId, source or dryRun can change the outcome. It answers reason:"script_edit_removed_by_v8" with blockedBy:"v8_inspector" and a list of alternatives, and it is never retried. action:"set_logpoint" is a conditional breakpoint whose condition logs logExpression and returns false, so the page never pauses and the output appears in the Console as "[bridge logpoint] url:line" - action:"list_logpoints" lists only those. Use action:"evaluate" to redefine a function for immediate effect instead; that changes behaviour but not the script text. action:"probe" is the one action here that does not require an open session: for the CDP gateway decision it attaches briefly (or reuses an existing session), asks chrome.debugger.getTargets plus Target.getTargets, Schema.getDomains, Page.getFrameTree, Runtime.evaluate("1+1"), Input.setIgnoreInputEvents(false) and Network.getCookies for https://example.invalid/, and returns only counts and redacted origins - never target URLs, titles or cookie values. A Target.* answer in a page-level session is not a browser-level CDP endpoint and does not authorize Playwright. Always finish with action:"close". Cost to be aware of: Chrome shows a debugging banner on that tab for as long as the session is open, and DevTools cannot attach to it meanwhile. Safety: a paused page is frozen, so every close path resumes first, and a paused session nobody touches is resumed automatically after a bounded window (see session.paused.autoResumeInMs). Closing a session removes its breakpoints; they do not survive. Evaluating an expression runs with full page privileges, exactly like typing in the DevTools Console; results are untrusted page data.', {
     tabId,
-    action: { type: 'string', enum: ['open', 'close', 'list', 'status', 'scripts', 'set_breakpoint', 'remove_breakpoint', 'pause', 'resume', 'step_over', 'step_into', 'step_out', 'frames', 'evaluate', 'set_script_source', 'probe'] },
+    action: { type: 'string', enum: ['open', 'close', 'list', 'status', 'scripts', 'set_breakpoint', 'remove_breakpoint', 'set_logpoint', 'list_logpoints', 'pause', 'resume', 'step_over', 'step_into', 'step_out', 'frames', 'evaluate', 'set_script_source', 'probe'] },
     scriptUrl: text(8000),
     urlFilter: text(2000),
     lineNumber: { type: 'integer', minimum: 1, maximum: 10000000 },
     columnNumber: { type: 'integer', minimum: 1, maximum: 100000 },
     condition: text(1000),
+    logExpression: text(4000),
     breakpointId: text(200),
     expression: text(4000),
     frameIndex: { type: 'integer', minimum: 0, maximum: 39 },
@@ -784,6 +839,11 @@ export const TOOLS = [
     agent
   }, ['action', 'downloadId', 'confirmation']),
   tool('browser_extensions', 'List installed extensions the way chrome://extensions does: id, name, version, enabled, type, installType, mayDisable, and isBridge for this extension. Names and descriptions are untrusted content. mayDisable:false means Chrome or a policy protects the item.', { enabledOnly: { type: 'boolean' }, agent }, [], true),
+  tool('browser_extension_install', 'Load one unpacked extension folder into the existing Chrome through the CDP Extensions domain, then verify it appears in chrome.management. Requires confirmation:"modify_extension_install_once". This installs code with extension privileges, so it is a program installation rather than a page change. Chrome normally requires --enable-unsafe-extension-debugging for Extensions.loadUnpacked; when the domain or command is unavailable the reply is status:"unsupported" and nothing is installed. The call runs on the target tab\'s debugger session only to reach that command - it does not start a second browser or a separate profile. Uninstalling stays with browser_extension_state. A result that Chrome accepted but that is not visible in management is reported with verified:false; do not repeat it blindly, read browser_extensions first.', {
+    tabId, path: text(2000),
+    confirmation: { type: 'string', enum: [EXTENSION_INSTALL_CONFIRMATION] },
+    agent
+  }, ['tabId', 'path', 'confirmation']),
   tool('browser_extension_state', 'Enable, disable or uninstall another extension. Requires confirmation:"modify_extension_state_once". The bridge extension itself is protected: disabling or removing it would cut the connection that carries this call, so that request is refused with bridge_extension_protected rather than executed and lost - a human can still do it from chrome://extensions. Uninstall shows Chrome\'s own confirmation dialog by default, so the call resolves only after the user answers it, and verified reports whether the item is actually gone.', {
     action: { type: 'string', enum: ['enable', 'disable', 'uninstall'] },
     extensionId: text(200), showConfirmDialog: { type: 'boolean' },

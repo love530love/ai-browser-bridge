@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.47.0**（运行中的服务与两个宿主扩展均为 0.47.0，buildId `2a0feab7…`；2026-11-18 09:11 空闲重启并双宿主自载重载，doctor/heartbeat 全绿），默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.48.0**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.48.0 把上一轮因「高风险」而搁置、但只要能在现有 Chrome 内闭环就可以接的能力补齐。新增只读的 `browser_css_styles`，像 Styles 面板一样回答「这个元素为什么是这个颜色」，CSS 域不可转发时回 `unsupported` 而不是空规则。新增 `browser_request_headers`，显式确认后导出有界请求头：默认同源、去 query、永不采集请求体，跨站必须 `scope:"all"`，值只回调用方、不落盘；确认串 `reveal_request_headers_once`。长活 CDP 会话新增 `browser_webauthn`（虚拟认证器，私钥默认省略，写动作需 `modify_webauthn_once`）、`browser_pwa`（installability 检查、真实安装提示、卸载后回读管理列表；写动作需 `modify_pwa_once`）与 `browser_extension_install`（解包扩展安装 + `chrome.management` 前后证据，需 `modify_extension_install_once`）。调试侧新增 `browser_debugger` 日志断点（只记录、不暂停）与控制台/异常的有界栈帧。所有能力都复用现有 Chrome，不启动第二个浏览器；Lighthouse、性能 trace、堆快照与 WebMCP 仍留待下一批。全量测试 1106/1106，工具数 140。
 
 0.47.0 来自 2026-11-18 的赛事报名实测：让「验证」问出调用方真正想问的问题。`expect` 现在支持 `anyOf`（一次写出导航 / 行内报错 / 仅改 DOM 等多个合法结果，最多 6 个分支）、`anyChange`（与派发前基准相比 URL/文本/DOM/网络任一变化；派发前永不成立，因此不会造成假 `not_dispatched`）与 `stableForMs`（条件必须连续成立，瞬态 toast 不能冒充成功）；成功返回 `outcome`（`navigated|dom_changed|condition_met`），失败在行内错误可见时返回 `validationErrors` 和 `validation_error`；`not_dispatched` 会带 `matchedIn`（selector、可见性、是否瞬态 toast），命中残留提示时换条件而不是重试。`commandId` 现在与整次参数绑定：只存每个参数的 SHA-256 摘要，改参复用旧 id 返回 `command_id_params_mismatch` + `suggestedCommandId`，既不派发也不回放旧结果。新增 `browser_eval_verified`，把 `.el-radio__original` 这类 ref 触不到的隐藏原生 input、以及同源 `javascript:void(0)` SPA 导航的 JS 点击纳入审计账本（`mechanism:"js_eval"`、单次派发、`expect` 验证）；新增只读的 `browser_capture_element(ref, scale)`，按元素裁切放大截图（1–8 倍、不注入 overlay），验证码不再需要临时 DOM。`browser_read` 的 `notices` 按 computed style 与 `aria-hidden` 过滤，已消失的 toast 移入 `staleNotices`，也不再能满足 `textAppears`。全量测试 1083/1083。
 
@@ -351,7 +353,7 @@ Chrome 面板应显示「已连接」、角标 `ON`。若 30 秒内未恢复，�
 }
 ```
 
-MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 135 个工具（0.47.0），`browser_screenshot` 返回 MCP 图片内容。
+MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 140 个工具（0.48.0），`browser_screenshot` 返回 MCP 图片内容。
 
 ### Qoder 插件与全局连接器
 
