@@ -121,6 +121,8 @@ AI 裁判返回结构化 JSON（`pageType`, `structureAnalysis`, `recommendedToo
 - 若 AI 裁判返回 `unavailable` 或空响应，不要当作授权——退回标准发现流程（observe → read → pick → action）。
 - 不要无限链式调用 AI。若连续 2 轮 confidence 仍低，升级给人工审查。
 
+**下载可靠性（0.49.0）**：页面按钮调用 `window.open` 时，隐藏标签里可能既没有新标签也没有下载项，`browser_click_verified` 只能回 `uncertain`——不要重放点击。若已从同源 API 拿到可再次请求的 http(s) 地址，改用 `browser_download_url`（确认串 `start_download_once`）启动一次下载并拿准确 `downloadId`，再用 `browser_download_wait` 观察同一 id。`interrupted + USER_CANCELED + 0 字节` 通常是 IDM/迅雷接管，回执会标 `externalDownloadManagerSuspected`；这是接管不是失败，先查外部下载器。
+
 ## 有 MCP 能力
 
 将同目录 `.local/mcp-config.json` 中的服务器条目注册到 Agent 客户端。该文件不含密钥。MCP stdio 入口是 `src/mcp.js`，与上述 CLI 使用同一个已连接浏览器。MCP 注册属于工具接入，并非模型配置；不同宿主不能由一个扩展自动注册。

@@ -209,10 +209,27 @@ string - one approval never covers a second tool:
 - browser_history_search / browser_history_delete ("modify_history_once"):
   search, recent, visits, and the ranked most-visited list; delete one URL, a
   time range, or everything. There is no undo.
-- browser_downloads / browser_downloads_control ("modify_downloads_once"): list,
-  then pause, resume, cancel, open, reveal or erase. open hands the file to the
-  operating system, which is the moment a downloaded installer would run. erase
-  removes the history row only and never the file.
+- browser_downloads / browser_download_wait / browser_downloads_control
+  ("modify_downloads_once"): list, then pause, resume, cancel, open, reveal or
+  erase. open hands the file to the operating system, which is the moment a
+  downloaded installer would run. erase removes the history row only and never
+  the file. Follow one item with browser_download_wait and an exact downloadId;
+  verified:true only means Chrome reports complete and the file exists.
+  interrupted with error USER_CANCELED and zero bytes is what an external
+  download manager (IDM, Thunder and similar) looks like: the reply sets
+  externalDownloadManagerSuspected, is terminal and must not be replayed - check
+  the external manager instead of clicking the page again.
+- browser_download_url ("start_download_once"): when you already hold a
+  repeatable http(s) URL (for example from a same-origin API response), start
+  exactly one download through Chrome's download manager and get the exact
+  numeric downloadId back; then observe that same id with
+  browser_download_wait. Use this when a page button calls window.open in a
+  hidden tab and no download item can be tied to the click. Only http/https is
+  accepted; data:, blob:, file:, javascript: and URLs with embedded credentials
+  are refused, and filename must be a relative path under the download
+  directory. saveAs:false and uniquify mean no prompt and no overwrite. The
+  reply never echoes the URL because it may carry a signature, and verified is
+  false: it proves Chrome accepted one request, not that the file arrived.
 - browser_extensions / browser_extension_state ("modify_extension_state_once"):
   list, enable, disable, uninstall. This bridge extension is protected and
   refuses to disable itself, because that would cut the connection carrying the

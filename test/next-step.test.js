@@ -73,6 +73,16 @@ test('download wait timeout and failures never suggest starting or opening anoth
   });
   assert.equal(interrupted.kind, 'stop');
   assert.equal(interrupted.tool, null);
+
+  const intercepted = nextStepFor('browser_download_wait', { downloadId: 22 }, {
+    status: 'failed', reason: 'download_interrupted', downloadId: 22,
+    externalDownloadManagerSuspected: true
+  });
+  assert.equal(intercepted.kind, 'stop');
+  assert.equal(intercepted.tool, null);
+  assert.match(intercepted.why, /external download manager/);
+  assert.match(intercepted.why, /browser_download_url/);
+  assert.match(intercepted.why, /start_download_once/);
 });
 
 test('a covered click points at the overlay scan, not at a second click', () => {

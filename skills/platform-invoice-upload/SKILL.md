@@ -30,7 +30,7 @@ description: 用 AI Browser Bridge 在已登录 Chrome 里完成平台开票双�
 - 开票：发票业务 → 蓝字发票开具；红冲：红字发票开具（对原蓝票发起）。
 - 全量发票查询：`/invoice-query/invoice-query`。按"数电发票号码"检索：直接对第 9 个 input（React 受控）用原生 setter 赋值 + `input`/`change` 事件，再点"查询"按钮；不要盲改下拉。
 - 下载票据：结果行点"交付" → 对话框"发票下载PDF / 发票下载OFD / 下载为XML"。
-- IDM 拦截下载：Chrome 侧下载会变 `USER_CANCELED`（bridge `browser_downloads` 可见），这是 IDM 接管。用 PowerShell `Get-Process IDMan` 取 `MainWindowTitle`（通常"下载文件信息"），AutoIt `winActivate` → `controlClick("开始下载(&S)")`。用户明确要求"点确认下载"时替代手动点击。
+- IDM 拦截下载：Chrome 侧下载会变 `interrupted / USER_CANCELED / bytesReceived:0`（bridge `browser_downloads` 可见），这是 IDM 接管而不是下载失败。0.49.0 起列表与 `browser_download_wait` 会标 `externalDownloadManagerSuspected` 并给出下一步，**不要重放点击或另起下载**。用 PowerShell `Get-Process IDMan` 取 `MainWindowTitle`（通常"下载文件信息"），AutoIt `winActivate` → `controlClick("开始下载(&S)")`，或 `windows_control.get_ui_tree` → `invoke_element`（automation_id 1006）。用户明确要求"点确认下载"时替代手动点击。
 - 交付弹窗复用同一 `.t-dialog__ctx` 容器，按钮集合固定：邮箱交付/二维码交付/发票下载PDF/发票下载OFD/下载为XML/发票打印/返回。只点需要的按钮，不点"继续发送"。
 
 ## 2. 拼多多（上海寻梦）
@@ -76,8 +76,8 @@ description: 用 AI Browser Bridge 在已登录 Chrome 里完成平台开票双�
 1. 历史列表每行取 `record_id`（与提交回执的 `batch_no` 相同，进度页 URL 可直接取）。
 2. `browser_fetch` GET `/api/ecomfinance/platform/invoice/record/detail?record_id=<id>`，`maxResponseChars≥1700`（900 会截断 `tos-signature`）；读 `ret_data.electron_invoice.file_path`、`invoice_info[0]`、`billIds[0]`、`invoice_amount`（分）。
 3. `file_path` 指向 `*.tos-cn-north.byted.org` 内网对象存储，公网不可解析（本机 Clash fake-ip 198.18.0.160，DoH NXDOMAIN，curl 必失败）。不要用 shell 下载。
-4. 改用同源代理：`browser_open("https://fxg.jinritemai.com/api/ecomfinance/platform/invoicefile/view?bill_id=<billIds[0]>")`，返回 ZIP（内含 `电子发票1.pdf/.ofd/.xml`）。
-5. IDM 拦截时 `browser_downloads` 显示 `interrupted/USER_CANCELED/bytesReceived:0`，这是误报；对每个弹窗用 `windows_control.get_ui_tree` → `invoke_element`（automation_id 1006，名称「开始下载(S)」）确认，再关闭「下载完成」对话框。**每张都要点**。
+4. 改用同源代理：`browser_open("https://fxg.jinritemai.com/api/ecomfinance/platform/invoicefile/view?bill_id=<billIds[0]>")`，返回 ZIP（内含 `电子发票1.pdf/.ofd/.xml`）。0.49.0 部署后可优先用 `browser_download_url` 直接下载同一 URL（确认串 `start_download_once`）并拿准确 `downloadId`，再用 `browser_download_wait` 观察；这条路径尚未在本场景实测。
+5. IDM 拦截时 `browser_downloads` 显示 `interrupted/USER_CANCELED/bytesReceived:0`，这是接管而不是失败；0.49.0 起回执带 `externalDownloadManagerSuspected`，不要重放。对每个弹窗用 `windows_control.get_ui_tree` → `invoke_element`（automation_id 1006，名称「开始下载(S)」）确认，再关闭「下载完成」对话框。**每张都要点**。
 6. ZIP 内中文名按 GBK 还原：`info.filename.encode("cp437").decode("gbk")`。用 XML 核验购方/销方/金额/票号，三件套分别算 SHA256 入台账。
 
 淘宝「已申请发票」：状态「开具中」时只能等待，数电普票预计 5 天内开具；开具后行内「下载」可直接下 PDF。

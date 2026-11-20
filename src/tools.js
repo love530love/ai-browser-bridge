@@ -2,7 +2,7 @@ import { isValidHostId } from './host-registry.js';
 import { RECIPE_STEP_TOOLS } from './recipes.js';
 import {
   RECIPE_RUN_CONFIRMATION, BOOKMARKS_WRITE_CONFIRMATION, HISTORY_DELETE_CONFIRMATION,
-  DOWNLOADS_CONTROL_CONFIRMATION, EXTENSION_STATE_CONFIRMATION, COOKIES_WRITE_CONFIRMATION,
+  DOWNLOADS_CONTROL_CONFIRMATION, DOWNLOAD_URL_CONFIRMATION, EXTENSION_STATE_CONFIRMATION, COOKIES_WRITE_CONFIRMATION,
   BROWSING_DATA_CONFIRMATION, SITE_SETTINGS_WRITE_CONFIRMATION, PRIVACY_SETTING_WRITE_CONFIRMATION,
   WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION,
   CLIPBOARD_WRITE_CONFIRMATION, NATIVE_MESSAGING_CONFIRMATION, NATIVE_HOST_CONFIRMATION, CERTIFICATE_WRITE_CONFIRMATION,
@@ -832,6 +832,11 @@ export const TOOLS = [
     downloadId: { type: 'integer', minimum: 1 }, timeoutMs: { type: 'integer', minimum: 250, maximum: 20000 },
     pollMs: { type: 'integer', minimum: 100, maximum: 1000 }, agent
   }, ['downloadId'], true),
+  tool('browser_download_url', 'Start exactly one download from an http(s) URL you already hold, through Chrome\'s own download manager, and return the exact numeric downloadId. Requires confirmation:"start_download_once". This is the reliable alternative when a page button calls window.open or otherwise hides which download item it created: resolve the URL (for example from a same-origin API response) and pass it here, then observe the returned id with browser_download_wait. Only http/https URLs are accepted; data:, blob:, file: and javascript: URLs are refused, and URLs with embedded credentials are refused. The reply never echoes the URL because it may carry a signature. Chrome uses saveAs:false and uniquifies a filename that already exists rather than overwriting it. verified:false means the download was started, not completed; an external download manager may intercept it, so read the interrupted/USER_CANCELED hint before retrying.', {
+    url: text(8000), filename: text(500),
+    confirmation: { type: 'string', enum: [DOWNLOAD_URL_CONFIRMATION] },
+    agent
+  }, ['url', 'confirmation']),
   tool('browser_downloads_control', 'Act on one download. Requires confirmation:"modify_downloads_once". pause/resume/cancel change the transfer. open hands the finished file to the operating system - the same thing clicking it does, and the moment a downloaded installer would run - so the reply can only report that the request was accepted. show asks the shelf to reveal the item without measuring whether a window came forward. erase removes the history row only and does not delete the file; the reply says fileDeleted:false rather than implying a cleanup.', {
     action: { type: 'string', enum: ['pause', 'resume', 'cancel', 'open', 'show', 'erase'] },
     downloadId: { type: 'integer', minimum: 1 },

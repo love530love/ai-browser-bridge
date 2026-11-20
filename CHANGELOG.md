@@ -1,3 +1,28 @@
+## 0.49.0 — 2026-11-20（**下载可靠性最小闭环：URL 直达下载 / 外部下载管理器误报识别**）
+
+触发：2026-11-20 抖店历史发票下载实测（`docs/FIELD-REPORT-20261120-platform-invoice-download.md`）9 张全部成功，但暴露两处「回执与事实不一致」：隐藏标签里点「下载发票」触发 `window.open(..., "_blank")`，没有用户激活时被静默拦截，`browser_click_verified` 只能报 `uncertain`，而调用方拿不到任何 `downloadId`；IDM 接管时 Chrome 报 `interrupted / USER_CANCELED / bytesReceived:0 / canResume:false`，这是接管而不是失败，按失败处理会诱导重放。本轮只做最小闭环，不把平台基础设施（内网 TOS 域名）和 `windows_control` 的 DPI 问题并入 Bridge。
+
+### 交付
+
+- **`browser_download_url`（新工具，浏览器级写）**：用 `chrome.downloads.download` 从一个调用方已持有的 http(s) URL 启动**恰好一次**下载，返回 Chrome 分配的**准确数值 `downloadId`**，补上「页面点击无法关联下载项」的缺口。只接受 http/https；`data:`/`blob:`/`file:`/`javascript:` 与 URL 内嵌凭据在派发前拒绝；`filename` 只接受下载目录下的相对路径（拒绝绝对路径、盘符与 `..`）。固定 `saveAs:false` + `conflictAction:"uniquify"`，不弹保存框、不覆盖同名文件、不抢前台。需 `confirmation:"start_download_once"`；回执不回声 URL（可能带签名），并明确 `verified:false`——只证明 Chrome 接受了一个下载请求，不证明文件已到达，后续用 `browser_download_wait {"downloadId":<id>}` 观察同一 id。
+- **外部下载管理器误报识别**：`browser_downloads` 的每一行新增 `externalDownloadManagerSuspected`；列表顶层新增 `externalDownloadManagerSuspected`、`suspectedDownloadIds` 与可执行的 `recommendedNextAction`。`browser_download_wait` 命中 `interrupted + USER_CANCELED + bytesReceived:0` 时不再给可重试的失败，而是 `terminal:true`、`externalDownloadManagerSuspected:true`，提示先查 IDM/迅雷接管、不要重放点击或另起下载；只有文件确实不存在时才用 `browser_download_url` + `start_download_once`。判定用词保持「suspected」：真实用户取消与接管在本机证据上无法区分。
+- **`next-step.js` 终止规则**：`download_interrupted` 在疑似外部接管时返回 `stop`，并同时给出「检查下载器」与「确认文件不存在后才用 URL 直达」两条路径；普通中断仍按原 semantics 终止，不提供盲重试。
+- **门控与索引**：`browser_download_url` 进入 `AUTHORITY_CONFIRMATIONS`、复杂写优先级、能力引导（`download-manager` / `download-from-page` / `backgroundSafeTools`）与意图索引下载组。工具数 140 → 141，索引 3645 字节（上限 3800）。
+- **文档口径修正**：`browser_fetch` 源码本就有 `bodyLength`/`bodyTruncated`，本轮不重复实现；真正缺口是**截断后的偏移续读**，留待后续。DPI 敏感坐标点击属于 `windows_control`，不归 Bridge。现场报告追加「Bridge 复核（2026-11-20）」注记，操作 Skill 同步下载可靠性新路径。
+
+### 验收
+
+- 全量 `npm test` → **1110/1110**（exit 0，0 fail）。
+- 新增/扩展测试：`test/browser-authority.test.js` 覆盖列表标记疑似接管、`download_wait` 把 `USER_CANCELED + 0 字节` 判为接管而非可重试、URL 下载恰好派发一次且不回显签名 URL、非 http/内嵌凭据/越界文件名在派发前拒绝；`test/confirmation-schemas.test.js` 固定 `start_download_once`；`test/next-step.test.js` 覆盖接管终止指引；`test/capability-guide.test.js` 覆盖两条下载意图。
+- 插件版本同步：`node scripts/sync-qoder-plugin.mjs --check` → `PLUGIN_CHECK_OK version=0.49.0 skillFiles=1`。
+- **未部署**：本轮只改源码、测试、插件源与文档；运行中的服务与扩展仍为 0.48.0。重启服务、重载扩展、安装新插件 ZIP 都需要单独授权。
+
+### 边界
+
+- 疑似接管不能证明「文件一定由 IDM 完成」；它只解释为什么 Chrome 侧是 0 字节中断。真实用户取消会得到同样的三者组合。
+- `browser_download_url` 不解析页面里的 `window.open`、`blob:` URL 或需要用户激活的临时对象 URL；调用方必须先拿到可再次请求的 http(s) 地址（例如同源 API 返回的下载地址）。它也不校验文件内容。
+- 本轮未实现：`browser_fetch` 偏移续读、点击与下载项的自动关联、外部下载器 UI 驱动（仍归 `windows_control`）、DPI 感知坐标点击。
+
 ## 0.48.0 — 2026-11-18（**CSS 层叠读取 / 请求头导出 / WebAuthn 虚拟认证器 / PWA 与解包扩展 / 日志断点**）
 
 触发：按「符合开放能力边界，不设能力禁区」盘点此前因高风险而排除的 Chrome 能力；硬约束仍是复用用户已登录的现有 Chrome，**不启动第二个浏览器**。因此本轮只接能在现有扩展 + 长活 CDP 会话内闭环、且有前后证据的能力；Lighthouse 这类自带 Chromium/调试端口的路线继续排除。

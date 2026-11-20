@@ -232,12 +232,17 @@ test('the DevTools-parity capabilities are routed to by goal, not by name', () =
   assert.equal(pageDownload.primary.intent, 'download-from-page');
   assert.ok(pageDownload.primary.tools.includes('browser_downloads'));
   assert.ok(pageDownload.primary.tools.includes('browser_click'));
+  assert.ok(pageDownload.primary.tools.includes('browser_download_url'));
   assert.ok(!pageDownload.primary.tools.includes('browser_upload'));
   assert.match(pageDownload.primary.why, /not automatically correlated to a download ID/i);
+  assert.match(pageDownload.primary.prefer, /start_download_once/);
+  assert.match(pageDownload.primary.prefer, /external download manager/i);
 
   const downloadList = capabilityGuide({ goal: '查看下载列表' });
   assert.equal(downloadList.primary.intent, 'download-manager');
   assert.ok(downloadList.primary.tools.includes('browser_download_wait'));
+  assert.ok(downloadList.primary.tools.includes('browser_download_url'));
+  assert.match(downloadList.primary.prefer, /start_download_once/);
   assert.deepEqual(downloadList.matchedIntents, ['download-manager']);
   assert.ok(!downloadList.chain.includes('browser_upload'));
   assert.ok(!downloadList.chain.includes('browser_history_delete'));

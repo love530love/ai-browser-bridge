@@ -247,6 +247,8 @@ test('download wait does not overstate a missing file or an interrupted transfer
   assert.equal(interrupted.status, 'failed');
   assert.equal(interrupted.reason, 'download_interrupted');
   assert.equal(interrupted.retryable, false);
+  assert.equal(interrupted.externalDownloadManagerSuspected, false,
+    'NETWORK_FAILED is a genuine transfer failure, not the interception pattern');
 });
 
 test('download wait times out without starting or replaying a download', async () => {
@@ -278,4 +280,86 @@ test('a chrome API rejection becomes a structured failure, not an exception', as
   assert.equal(result.status, 'failed');
   assert.equal(result.reason, 'browser_api_rejected');
   assert.match(result.message, /No download with id: 7/);
+});
+
+test('download listing flags the external-manager pattern and names the suspect ids', async () => {
+  const { module, chrome } = await load();
+  chrome.downloads.downloadSearchResponses = [[
+    { id: 31, state: 'interrupted', error: 'USER_CANCELED', bytesReceived: 0, filename: 'C:\\a.zip' },
+    { id: 32, state: 'interrupted', error: 'NETWORK_FAILED', bytesReceived: 0, filename: 'C:\\b.zip' },
+    { id: 33, state: 'interrupted', error: 'USER_CANCELED', bytesReceived: 12, filename: 'C:\\c.zip' }
+  ]];
+  const result = await module.runAuthorityTool('browser_downloads', {});
+  assert.equal(result.externalDownloadManagerSuspected, true);
+  assert.deepEqual(result.suspectedDownloadIds, [31]);
+  assert.equal(result.downloads[0].externalDownloadManagerSuspected, true);
+  assert.equal(result.downloads[1].externalDownloadManagerSuspected, false);
+  assert.equal(result.downloads[2].externalDownloadManagerSuspected, false,
+    'bytes already received makes an interception much less likely');
+  assert.match(result.recommendedNextAction, /external download manager/);
+  assert.match(result.recommendedNextAction, /Do not replay/);
+  assert.match(result.recommendedNextAction, /browser_download_url/);
+});
+
+test('download wait turns USER_CANCELED with zero bytes into a suspicion, not a retry', async () => {
+  const { module, chrome } = await load();
+  chrome.downloads.downloadSearchResponses = [[{
+    id: 41, state: 'interrupted', error: 'USER_CANCELED', bytesReceived: 0,
+    canResume: false, filename: 'C:\\invoice.zip'
+  }]];
+  const result = await module.runAuthorityTool('browser_download_wait', { downloadId: 41 });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'download_interrupted');
+  assert.equal(result.retryable, false);
+  assert.equal(result.externalDownloadManagerSuspected, true);
+  assert.equal(result.download.externalDownloadManagerSuspected, true);
+  assert.match(result.recommendedNextAction, /external download manager/);
+  assert.match(result.recommendedNextAction, /browser_download_url/);
+  assert.match(result.note, /USER_CANCELED/);
+});
+
+test('download URL starts exactly one download and does not echo the signed URL', async () => {
+  const { module, chrome } = await load();
+  const signed = 'https://files.example/invoice.zip?X-Amz-Signature=secret';
+  chrome.downloads.download = async details => {
+    chrome.calls.push({ area: 'downloads', method: 'download', args: [details] });
+    return 77;
+  };
+  const result = await module.runAuthorityTool('browser_download_url', {
+    url: signed, filename: 'invoices/2026-11.zip'
+  });
+  assert.equal(result.status, 'success');
+  assert.equal(result.downloadId, 77);
+  assert.equal(result.dispatched, true);
+  assert.equal(result.verified, false);
+  assert.equal(JSON.stringify(result).includes('secret'), false, 'the signed URL must not be echoed');
+  const call = chrome.calls.find(item => item.method === 'download');
+  assert.deepEqual(call.args[0], {
+    url: signed, filename: 'invoices/2026-11.zip', saveAs: false, conflictAction: 'uniquify'
+  });
+  assert.match(result.recommendedNextAction, /77/);
+  assert.match(result.note, /does not prove the file arrived/);
+});
+
+test('download URL refuses non-http schemes, embedded credentials and escaping filenames', async () => {
+  const { module, chrome } = await load();
+  let called = 0;
+  chrome.downloads.download = async () => { called++; return 1; };
+  const missing = await module.runAuthorityTool('browser_download_url', {});
+  assert.equal(missing.reason, 'http_url_required');
+  const data = await module.runAuthorityTool('browser_download_url', { url: 'data:text/plain,hi' });
+  assert.equal(data.reason, 'http_url_required');
+  const credentials = await module.runAuthorityTool('browser_download_url', {
+    url: 'https://user:pass@example.com/a.zip'
+  });
+  assert.equal(credentials.reason, 'url_credentials_not_allowed');
+  const traversal = await module.runAuthorityTool('browser_download_url', {
+    url: 'https://example.com/a.zip', filename: '../escape.zip'
+  });
+  assert.equal(traversal.reason, 'invalid_filename');
+  const absolute = await module.runAuthorityTool('browser_download_url', {
+    url: 'https://example.com/a.zip', filename: 'C:\\Windows\\x.zip'
+  });
+  assert.equal(absolute.reason, 'invalid_filename');
+  assert.equal(called, 0, 'no refused call may reach chrome.downloads.download');
 });

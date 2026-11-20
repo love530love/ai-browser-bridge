@@ -99,3 +99,14 @@ handleDownloadInvoice: e => {
 - 归档：`J:\WorkAndData\双柏彝笙商城\60_店铺经营\进项发票\2026\平台给我方开票_20261119\抖店\`（9 张 × PDF/OFD/XML = 27 个文件，SHA256 已登记）
 - 台账：`进项发票登记表_2026.md` §5.2–5.4
 - 相关：`docs/FIELD-REPORT-20261118-platform-invoice.md`（P2-1 首次记录 IDM）、`skills/platform-invoice-upload/SKILL.md` §5.5
+
+## 5. Bridge 复核（2026-11-20）
+
+> 维护侧逐条复核与 0.49.0 处置，不改变上文现场记录。
+
+- **P1-3 / IDM：接受并已实现。** `browser_downloads` 每行新增 `externalDownloadManagerSuspected`；列表顶层新增同名布尔、`suspectedDownloadIds` 与可执行的 `recommendedNextAction`。`browser_download_wait` 命中 `interrupted + USER_CANCELED + bytesReceived:0` 时返回 `terminal:true`、`externalDownloadManagerSuspected:true`，`next-step.js` 给出「先查外部下载器、不要重放」的终止步骤。字段采用 Bridge 既有的 camelCase 命名，不是报告建议的 snake_case；判定保持「suspected」，因为真实用户取消与接管在本机证据上不可区分。
+- **P1-1 / window.open：部分解决。** 新增 `browser_download_url`（确认串 `start_download_once`）：调用方已持有可再次请求的 http(s) URL 时，经 `chrome.downloads.download` 启动恰好一次下载并返回准确 `downloadId`，再用 `browser_download_wait` 观察同一 id。本版**没有**监听 `window.open`/`popup_blocked`，点击回执仍只能是 `uncertain`，也不会自动把点击与下载项关联；隐藏标签下仍应先读 API 拿 URL，再走 URL 直达。
+- **P2-1 / browser_fetch：口径修正。** 当前源码在响应中已返回 `bodyLength` 与 `bodyTruncated`，默认预览上限为 4000 字符（`extension/cdp-replay.js:35`），只有显式传 `maxResponseChars:900` 才会截断。因此「回执没有等价字段」不成立——真实缺口是**截断后的偏移续读**，本版未实现；调用方应省略 `maxResponseChars` 或先读 `bodyTruncated`。
+- **P2-3 / DPI：不属于 Bridge。** 报告中的 `click_element`、`get_ui_tree`、`invoke_element` 来自 `windows_control` MCP；Bridge 的坐标路径不经过该实现，本轮不并入，转交该工具维护方。
+- **P1-2 / 内网 TOS：** 平台基础设施事实，不并入 Bridge；`skills/platform-invoice-upload/SKILL.md` 已把它写成通用警示与同源代理路径。
+- **状态：** 0.49.0 仅完成源码、测试、插件源与文档；运行中的服务与扩展仍为 0.48.0，未重启、未重载、未安装新插件。

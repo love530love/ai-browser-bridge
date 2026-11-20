@@ -49,7 +49,7 @@ export const TOOL_GROUPS = [
     'browser_clipboard_write', 'browser_emulation', 'browser_init_script'
   ] },
   { id: 'download', purpose: '下载/等待/管理', tools: [
-    'browser_downloads', 'browser_download_wait', 'browser_downloads_control'
+    'browser_download_url', 'browser_downloads', 'browser_download_wait', 'browser_downloads_control'
   ] },
 
   { id: 'fleet', purpose: '宿主', tools: [

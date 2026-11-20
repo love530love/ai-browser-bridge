@@ -79,6 +79,16 @@ function historyRow(item) {
   };
 }
 
+// An external download manager (IDM, Thunder and similar) can take a URL away
+// from Chrome before the first byte arrives. Chrome then records interrupted /
+// USER_CANCELED / bytesReceived:0. A real user cancel looks identical, so this
+// is a suspicion that stops blind retries, never a verdict about what happened.
+function externalDownloadManagerSuspected(item) {
+  return item?.state === 'interrupted'
+    && item?.error === 'USER_CANCELED'
+    && Number(item?.bytesReceived ?? 0) === 0;
+}
+
 // DownloadItem carries absolute filesystem paths and the full URL. Both are
 // returned because a caller cleaning up a download needs them, but the size of
 // the object is the problem: returning it whole would push megabytes of
@@ -99,7 +109,8 @@ function downloadRow(item) {
     endTime: item.endTime ?? null,
     exists: item.exists ?? null,
     danger: item.danger ?? null,
-    error: item.error ?? null
+    error: item.error ?? null,
+    externalDownloadManagerSuspected: externalDownloadManagerSuspected(item)
   };
 }
 
@@ -313,7 +324,13 @@ async function downloadsRead(args) {
   if (Number.isInteger(args.limit)) query.limit = limit(args.limit, 50, 500);
   const items = await chrome.downloads.search(query);
   const rows = items.slice(0, limit(args.limit, 50, 500)).map(downloadRow);
+  const suspected = rows.filter(row => row.externalDownloadManagerSuspected);
   return { status: 'success', count: rows.length, downloads: rows, contentTrust: UNTRUSTED,
+    externalDownloadManagerSuspected: suspected.length > 0,
+    suspectedDownloadIds: suspected.map(row => row.id),
+    ...(suspected.length ? {
+      recommendedNextAction: 'One or more items were interrupted with USER_CANCELED and zero bytes received. That is also what Chrome records when an external download manager (IDM, Thunder and similar) intercepts the URL before Chrome receives data; it is a suspicion, not proof. Do not replay the click or start another download. Check the external manager window: if the file is there, it completed outside Chrome. If it is not, start exactly one download with browser_download_url and confirmation:"start_download_once".'
+    } : {}),
     note: 'filename is an absolute local path. exists says whether the file is still on disk; Chrome cannot report that for a file it was never allowed to stat.' };
 }
 
@@ -347,9 +364,16 @@ async function downloadsWait(args) {
           : 'Chrome reports this exact download complete, but does not confirm the file still exists. This is not a content-integrity check; the file was not opened.' };
     }
     if (item.state === 'interrupted') {
+      const suspected = externalDownloadManagerSuspected(item);
       return { status: 'failed', retryable: false, reason: 'download_interrupted', downloadId: id,
         outcome: 'interrupted', terminal: true, download: last, polls, contentTrust: UNTRUSTED,
-        note: 'Chrome reports this exact download interrupted. No retry or second download was started.' };
+        externalDownloadManagerSuspected: suspected,
+        ...(suspected ? {
+          recommendedNextAction: 'Chrome recorded USER_CANCELED with zero bytes received. That is also what happens when an external download manager (IDM, Thunder and similar) intercepts the URL before Chrome receives data; it is a suspicion, not proof. Do not replay the click or start another download. Check the external manager window: if the file is there, it completed outside Chrome. If it is not, start exactly one download with browser_download_url and confirmation:"start_download_once".'
+        } : {}),
+        note: suspected
+          ? 'Chrome reports this exact download interrupted with USER_CANCELED and zero bytes. No retry or second download was started. That pattern can mean an external download manager intercepted the URL; check its window before deciding anything else.'
+          : 'Chrome reports this exact download interrupted. No retry or second download was started.' };
     }
     if (Date.now() >= deadline) {
       return { status: 'in_progress', retryable: true, reason: 'download_wait_timeout', downloadId: id,
@@ -359,6 +383,51 @@ async function downloadsWait(args) {
     }
     await new Promise(resolve => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
   }
+}
+
+// A filename that Chrome resolves under the download directory. An absolute
+// path or a ".." segment would be a way to ask the browser to write somewhere
+// else, so those are refused here rather than trusted to Chrome's sanitizer.
+function relativeDownloadFilename(raw) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string') return undefined;
+  const value = raw.trim();
+  if (!value) return null;
+  if (value.length > 500 || value.includes('\0')) return undefined;
+  const normalized = value.replace(/\\/g, '/');
+  if (normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized)) return undefined;
+  if (normalized.split('/').some(part => part === '..')) return undefined;
+  return value;
+}
+
+async function downloadUrl(args) {
+  const raw = typeof args.url === 'string' ? args.url.trim() : '';
+  let parsed = null;
+  try { parsed = new URL(raw); } catch { /* reported below */ }
+  if (!parsed || !['http:', 'https:'].includes(parsed.protocol)) {
+    return badRequest('browser_download_url', 'http_url_required',
+      'Starting a download needs an explicit http(s) URL. data:, blob:, file:, javascript: and other schemes are refused.');
+  }
+  if (parsed.username || parsed.password) {
+    return badRequest('browser_download_url', 'url_credentials_not_allowed',
+      'The URL contains embedded credentials. Remove them; this tool will not accept a URL carrying a secret.');
+  }
+  const filename = relativeDownloadFilename(args.filename);
+  if (filename === undefined) {
+    return badRequest('browser_download_url', 'invalid_filename',
+      'filename must be a relative path under the download directory: no leading slash, drive letter or ".." segment.');
+  }
+  const details = { url: raw, saveAs: false, conflictAction: 'uniquify' };
+  if (filename) details.filename = filename;
+  const downloadId = await chrome.downloads.download(details);
+  if (!Number.isInteger(downloadId)) {
+    return failed('browser_download_url', new Error('Chrome did not return a numeric downloadId.'));
+  }
+  return { status: 'success', retryable: false, downloadId, requestedFilename: filename,
+    saveAs: false, conflictAction: 'uniquify', dispatched: true, verified: false,
+    contentTrust: UNTRUSTED,
+    recommendedNextAction: `Observe this exact id with browser_download_wait {"downloadId":${downloadId}}. Do not start a second download; if Chrome reports interrupted with USER_CANCELED and zero bytes, check whether an external download manager took over.`,
+    note: 'Chrome accepted one download request and returned this exact downloadId. The URL was not echoed because it may carry a signature. This does not prove the file arrived: verified stays false until a later browser_download_wait reports complete with exists:true. Chrome uses saveAs:false and uniquifies an existing filename rather than overwriting it.' };
 }
 
 async function downloadsControl(args) {
@@ -893,6 +962,7 @@ const HANDLERS = {
   browser_history_delete: historyDelete,
   browser_downloads: downloadsRead,
   browser_download_wait: downloadsWait,
+  browser_download_url: downloadUrl,
   browser_downloads_control: downloadsControl,
   browser_extensions: extensionsRead,
   browser_extension_state: extensionState,

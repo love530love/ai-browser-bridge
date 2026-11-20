@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.48.0**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.49.0**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.49.0 是下载可靠性的最小闭环，来自 2026-11-20 抖店历史发票下载实测：页面按钮调 `window.open` 时，隐藏标签里既拿不到新标签也拿不到 `downloadId`，点击只能报 `uncertain`。新增浏览器级工具 `browser_download_url`（确认串 `start_download_once`）：调用方已持有可再次请求的 http(s) 地址时，直接经 `chrome.downloads.download` 启动**恰好一次**下载并返回准确数值 `downloadId`，再用 `browser_download_wait` 观察同一 id；只收 http/https，拒绝 URL 内嵌凭据与越界文件名，`saveAs:false` + `uniquify` 不弹框、不覆盖，回执不回声可能带签名的 URL，`verified:false` 只表示请求已受理。同时 `browser_downloads` / `browser_download_wait` 把 `interrupted + USER_CANCELED + 0 字节` 标为 `externalDownloadManagerSuspected`（IDM/迅雷接管），给出 `suspectedDownloadIds` 与可执行的 `recommendedNextAction`，不再把它当可重试失败诱导重放。全量测试 1110/1110，工具数 141。运行中的服务与扩展仍为 0.48.0，本轮未部署。
 
 0.48.0 把上一轮因「高风险」而搁置、但只要能在现有 Chrome 内闭环就可以接的能力补齐。新增只读的 `browser_css_styles`，像 Styles 面板一样回答「这个元素为什么是这个颜色」，CSS 域不可转发时回 `unsupported` 而不是空规则。新增 `browser_request_headers`，显式确认后导出有界请求头：默认同源、去 query、永不采集请求体，跨站必须 `scope:"all"`，值只回调用方、不落盘；确认串 `reveal_request_headers_once`。长活 CDP 会话新增 `browser_webauthn`（虚拟认证器，私钥默认省略，写动作需 `modify_webauthn_once`）、`browser_pwa`（installability 检查、真实安装提示、卸载后回读管理列表；写动作需 `modify_pwa_once`）与 `browser_extension_install`（解包扩展安装 + `chrome.management` 前后证据，需 `modify_extension_install_once`）。调试侧新增 `browser_debugger` 日志断点（只记录、不暂停）与控制台/异常的有界栈帧。所有能力都复用现有 Chrome，不启动第二个浏览器；Lighthouse、性能 trace、堆快照与 WebMCP 仍留待下一批。全量测试 1106/1106，工具数 140。
 
@@ -76,7 +78,7 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 - 点击、填写、选择、滚动、上传、下载、导航和关闭标签页，并对关键写操作做结果验证。密码框默认拒绝填写，`browser_fill` / `browser_fill_verified` 需显式 `secret:true` 才放行，且不回显写入的值。
 - 处理 iframe、重型 SPA、虚拟滚动、下拉框、广告、引导层、客服浮窗和透明遮挡。
 - 通过 DOM、Accessibility、Debugger、截图和坐标适配器进行分层兜底；没有 GPT 时仍可使用本地确定性工具链。
-- **下载意图有独立路由和终态观察（0.32.0）**：查看记录走下载列表，等待已有记录用精确 `downloadId` 的 `browser_download_wait`（最长 20 秒），上传与页面下载不再混为一条路径。页面下载要先定位链接并显式点击，再用 URL/文件名/时间证据核对 Chrome 下载记录；当前没有可靠的一键 click→downloadId 关联，多候选就报告歧义。`verified:true` 只证明 Chrome 报 complete 且文件存在，不代表内容可信或已安全扫描，工具不会自动打开文件。
+- **下载意图有独立路由和终态观察（0.49.0 补强）**：查看记录走下载列表，等待已有记录用精确 `downloadId` 的 `browser_download_wait`（最长 20 秒），上传与页面下载不再混为一条路径。页面点击仍无法可靠关联它创建的下载项，多候选就报告歧义；如果调用方**已持有可再次请求的 http(s) 地址**（例如同源 API 返回的下载地址），改用 `browser_download_url`（确认串 `start_download_once`）直接启动一次下载并拿到准确 `downloadId`，再观察同一 id。IDM/迅雷等外部下载管理器接管时，Chrome 会报 `interrupted / USER_CANCELED / bytesReceived:0`，列表与等待会标 `externalDownloadManagerSuspected` 并给出下一步——这是接管而不是失败，**不要重放点击或另起下载**。`verified:true` 只证明 Chrome 报 complete 且文件存在，不代表内容可信或已安全扫描，工具不会自动打开文件。
 - **坐标与 DOM ref 现在能无缝交接（0.31.0）**：`browser_prepare_coordinate` 返回 `target.hitRef`，并在目标为语义控件或可验证的 `cursor:pointer` 卡片时另给 `clickRef` + 证据。若 DOM 点击语义相同，优先 `browser_click({tabId, ref:clickRef})`，免去截图像素→坐标→DOM 目标的往返；坐标 token 仍留给必须复现真实指针行为的场景。`browser_pick` 找不到选择器时会在不点击的前提下扫描精确可见卡片，返回可复用 ref、匹配质量、几何和可点击证据；只有一个完全匹配的 `cursor:pointer` 卡片时才附带经 schema 校验的 `browser_click` nextStep；同名语义按钮、多个相同项或子串命中只引导读上下文，不会猜着点。共享 `cursor:pointer` 父容器包着多张卡片时会定位到各自卡片，不会把整组当一张；坐标命中标题文字时会提升到最近的卡片级节点。普通 checkbox/input 不会被误当 picker 触发点击。
 - 停靠式 DevTools 可观察、可选择 Elements/Console/Network 等面板，也可由基座**打开与关闭**：`browser_devtools` 的 `open` / `close` 走浏览器自己的菜单（More tools → Developer tools），不合成 F12，没有焦点竞态；对外是请求一个状态而非切换，已在目标状态就 `dispatched:false`。关闭要求走查完整（`partial:false`）才算数。分离（detached）DevTools 只报 `detachedDevtools`，尚不能绑定。
 - `browser_devtools_capture` 通过 CDP 在单次 attach 的有界窗口内只读捕获 Console 消息、异常、Network 请求行、Sources 脚本列表和 Performance 指标；空结果不证明没有发生，网络记录不含 header/cookie/body，缓冲溢出以 `dropped`/`truncated` 计数上报。
@@ -353,7 +355,7 @@ Chrome 面板应显示「已连接」、角标 `ON`。若 30 秒内未恢复，�
 }
 ```
 
-MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 140 个工具（0.48.0），`browser_screenshot` 返回 MCP 图片内容。
+MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 141 个工具（0.49.0），`browser_screenshot` 返回 MCP 图片内容。
 
 ### Qoder 插件与全局连接器
 

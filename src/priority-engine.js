@@ -51,7 +51,8 @@ const TOOL_CATEGORIES = {
       'browser_click', 'browser_upload', 'browser_drag',
       'browser_dialog', 'browser_storage_write', 'browser_init_script',
       'browser_network_rules', 'browser_recipe_run', 'browser_popup',
-      'browser_webauthn', 'browser_pwa', 'browser_extension_install'
+      'browser_webauthn', 'browser_pwa', 'browser_extension_install',
+      'browser_download_url'
     ],
     baseScore: 60,
     cost: 'high'

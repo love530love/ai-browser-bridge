@@ -18,6 +18,7 @@
 // authority, so a step that needs a confirmation string still carries the
 // confirmation the gate asked for - never a fabricated one.
 import { TOOLS } from './tools.js';
+import { DOWNLOAD_URL_CONFIRMATION } from './confirmations.js';
 
 const SUCCESS_STATUSES = new Set(['success', 'verified', 'nothing_to_clear', 'cleared', 'already_in_state', 'available']);
 const WAIT_STEP = () => ({
@@ -201,10 +202,15 @@ const RULES = [
   {
     id: 'download_interrupted',
     match: r => r.reason === 'download_interrupted',
-    step: () => ({
-      kind: 'stop', tool: null, arguments: {},
-      why: 'Chrome reports this exact download interrupted. Do not automatically repeat it: inspect the reason, destination and user intent before deciding whether a new download is appropriate.'
-    })
+    step: r => r.externalDownloadManagerSuspected
+      ? {
+        kind: 'stop', tool: null, arguments: {},
+        why: `Chrome recorded USER_CANCELED with zero bytes, which is also what happens when an external download manager intercepts the URL. Do not repeat the click or start another download. Check the manager window: if the file is there, it completed outside Chrome. If it is not, start exactly one new download with browser_download_url and confirmation:"${DOWNLOAD_URL_CONFIRMATION}".`
+      }
+      : {
+        kind: 'stop', tool: null, arguments: {},
+        why: 'Chrome reports this exact download interrupted. Do not automatically repeat it: inspect the reason, destination and user intent before deciding whether a new download is appropriate.'
+      }
   },
   {
     id: 'coordinate_token',

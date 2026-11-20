@@ -11,6 +11,7 @@ import { TOOLS } from '../src/tools.js';
 import {
   STORAGE_WRITE_CONFIRMATION, REPLAY_REQUEST_CONFIRMATION,
   BOOKMARKS_WRITE_CONFIRMATION, HISTORY_DELETE_CONFIRMATION, DOWNLOADS_CONTROL_CONFIRMATION,
+  DOWNLOAD_URL_CONFIRMATION,
   EXTENSION_STATE_CONFIRMATION, COOKIES_WRITE_CONFIRMATION, BROWSING_DATA_CONFIRMATION,
   SITE_SETTINGS_WRITE_CONFIRMATION, PRIVACY_SETTING_WRITE_CONFIRMATION,
   WINDOW_CONTROL_CONFIRMATION, PROXY_CONFIRMATION,
@@ -23,6 +24,7 @@ const EXPECTED = {
   browser_bookmarks_write: BOOKMARKS_WRITE_CONFIRMATION,
   browser_history_delete: HISTORY_DELETE_CONFIRMATION,
   browser_downloads_control: DOWNLOADS_CONTROL_CONFIRMATION,
+  browser_download_url: DOWNLOAD_URL_CONFIRMATION,
   browser_extension_state: EXTENSION_STATE_CONFIRMATION,
   browser_cookies_write: COOKIES_WRITE_CONFIRMATION,
   browser_clear_browsing_data: BROWSING_DATA_CONFIRMATION,
@@ -87,6 +89,7 @@ test('every confirmation gate is distinct and named after what it authorises', (
     `confirmation values must not be shared between tools, found ${JSON.stringify(values)}`);
   // A single shared word would let one confirmation authorise an unrelated tool.
   // The verb has to say what kind of thing is being authorised: `run_` covers a
-  // stored recipe, which is many writes from one approval.
-  for (const value of values) assert.match(value, /^(modify|replay|reveal|read|reload|run)_/);
+  // stored recipe, which is many writes from one approval, and `start_` covers
+  // starting a new download, which is not a modification of an existing one.
+  for (const value of values) assert.match(value, /^(modify|replay|reveal|read|reload|run|start)_/);
 });

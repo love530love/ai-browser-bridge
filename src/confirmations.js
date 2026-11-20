@@ -22,6 +22,12 @@ export const RECIPE_RUN_CONFIRMATION = 'run_recipe_once';
 export const BOOKMARKS_WRITE_CONFIRMATION = 'modify_bookmarks_once';
 export const HISTORY_DELETE_CONFIRMATION = 'modify_history_once';
 export const DOWNLOADS_CONTROL_CONFIRMATION = 'modify_downloads_once';
+// Starting a download from a URL the caller already holds is a different
+// decision from controlling an existing item: it makes a new network request
+// and writes a new file, and it is the reliable route when a page click cannot
+// be bound to a downloadId. Sharing the control phrase would let one approval
+// cover an unrelated action.
+export const DOWNLOAD_URL_CONFIRMATION = 'start_download_once';
 export const EXTENSION_STATE_CONFIRMATION = 'modify_extension_state_once';
 export const COOKIES_WRITE_CONFIRMATION = 'modify_cookies_once';
 export const BROWSING_DATA_CONFIRMATION = 'modify_browsing_data_once';
