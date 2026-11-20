@@ -22,7 +22,7 @@ handleDownloadInvoice: e => {
 
 `blank:!0` 即 `window.open(url, "_blank")`。在后台标签 + CDP 合成点击（无用户激活）下：
 
-- `browser_click_verified` 回执为点击已派发，但 `browser_network_summary` 请求数 0、`domDelta` 0、无新标签、无下载条目
+- `browser_click_verified` 回执为 uncertain（点击已派发但结果未证实）；`browser_network_summary` 请求数 0、`domDelta` 0、无新标签、无下载条目
 - 页面文本仍正常，读起来像"点过了"，实际什么都没发生
 - 同一 URL 用 `browser_open` 打开（前台/后台均可）能触发 ZIP 下载
 
