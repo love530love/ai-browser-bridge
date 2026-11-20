@@ -1,6 +1,6 @@
 ---
 name: platform-invoice-upload
-description: 用 AI Browser Bridge 在已登录 Chrome 里完成"给电商平台开票"全链路：云南电子税务局开数电票（含红冲重开）→ 拼多多/淘宝/抖音商家后台提交发票 → 核对提交记录与截图归档。凡涉及 mms.pinduoduo.com/cashier、myseller.taobao.com/whale-accountant/invoice、fxg.jinritemai.com/ffa/m-invoice、dppt.yunnan.chinatax.gov.cn、IDM 下载确认、文件上传对话框的任务，先读本 skill。
+description: 用 AI Browser Bridge 在已登录 Chrome 里完成平台开票双向全链路：云南电子税务局开数电票（含红冲重开）→ 拼多多/淘宝/抖音商家后台提交发票；以及平台给我方开票的逐笔申请、历史下载、核验归档。凡涉及 mms.pinduoduo.com/cashier、myseller.taobao.com/whale-accountant/invoice、fxg.jinritemai.com/ffa/m-invoice、fxg.jinritemai.com/ffa/saas/platform-invoice、invoicefile/view?bill_id=、dppt.yunnan.chinatax.gov.cn、IDM 下载确认、文件上传对话框的任务，先读本 skill。
 ---
 
 # 平台开票（税局开票 → 平台回传）操作 skill
@@ -69,6 +69,19 @@ description: 用 AI Browser Bridge 在已登录 Chrome 里完成"给电商平台
 | 提交按钮 click_verified 只匹配到 toast "提交成功" | 瞬态证据；0.47 已提供 `stableForMs`，旧进程不暴露 | 用 `stableForMs:1500` + `anyOf`，并另读 URL/详情页持久状态（批次号、审核中、历史记录） |
 | 查询按钮被看不见的 `.t-dialog__ctx` 遮住（element_covered） | 后台标签动画冻结/弹窗残留 | Esc→getAnimations finish→仍不行就 `display='none'` 隐藏该 ctx |
 
+## 5.5 平台给我方开票：历史发票下载（2026-11-20 抖店实测）
+
+> 屏幕上的「下载发票」按钮调用 `window.open(file_path)`；后台标签 + 合成点击下会被静默拦截（无网络、无新标签、无下载，页面看起来像点过了）。不要重放该点击。
+
+1. 历史列表每行取 `record_id`（与提交回执的 `batch_no` 相同，进度页 URL 可直接取）。
+2. `browser_fetch` GET `/api/ecomfinance/platform/invoice/record/detail?record_id=<id>`，`maxResponseChars≥1700`（900 会截断 `tos-signature`）；读 `ret_data.electron_invoice.file_path`、`invoice_info[0]`、`billIds[0]`、`invoice_amount`（分）。
+3. `file_path` 指向 `*.tos-cn-north.byted.org` 内网对象存储，公网不可解析（本机 Clash fake-ip 198.18.0.160，DoH NXDOMAIN，curl 必失败）。不要用 shell 下载。
+4. 改用同源代理：`browser_open("https://fxg.jinritemai.com/api/ecomfinance/platform/invoicefile/view?bill_id=<billIds[0]>")`，返回 ZIP（内含 `电子发票1.pdf/.ofd/.xml`）。
+5. IDM 拦截时 `browser_downloads` 显示 `interrupted/USER_CANCELED/bytesReceived:0`，这是误报；对每个弹窗用 `windows_control.get_ui_tree` → `invoke_element`（automation_id 1006，名称「开始下载(S)」）确认，再关闭「下载完成」对话框。**每张都要点**。
+6. ZIP 内中文名按 GBK 还原：`info.filename.encode("cp437").decode("gbk")`。用 XML 核验购方/销方/金额/票号，三件套分别算 SHA256 入台账。
+
+淘宝「已申请发票」：状态「开具中」时只能等待，数电普票预计 5 天内开具；开具后行内「下载」可直接下 PDF。
+
 ## 6. OS 级文件上传（两站三次实测成功）
 
 前置：目标页必须是前台显示标签（`winGetTitle("[ACTIVE]")` 确认标题）。
@@ -87,5 +100,6 @@ description: 用 AI Browser Bridge 在已登录 Chrome 里完成"给电商平台
 ## 8. 现场记录与后续
 
 - 现场报告：`docs/FIELD-REPORT-20261118-platform-invoice.md`（P0-0 工具面错配、upload stale、navigate 子串、遮罩、无标签激活、IDM）
+- 现场报告：`docs/FIELD-REPORT-20261120-platform-invoice-download.md`（隐藏标签 window.open 静默拦截、内网 TOS、IDM 二次出现、fetch 截断）
 - 升级方案：`docs/UPGRADE-PLAN-20261118-platform-invoice-site-feedback.md`（源码坐标 + 验收）
 - 全链路复盘：`J:\WorkAndData\双柏彝笙商城\60_店铺经营\平台开票_20261118\复盘_平台开票全链路_20261118.md`
