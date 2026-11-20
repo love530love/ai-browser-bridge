@@ -6,7 +6,7 @@
 
 一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.49.0**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
 
-0.49.0 是下载可靠性的最小闭环，来自 2026-11-20 抖店历史发票下载实测：页面按钮调 `window.open` 时，隐藏标签里既拿不到新标签也拿不到 `downloadId`，点击只能报 `uncertain`。新增浏览器级工具 `browser_download_url`（确认串 `start_download_once`）：调用方已持有可再次请求的 http(s) 地址时，直接经 `chrome.downloads.download` 启动**恰好一次**下载并返回准确数值 `downloadId`，再用 `browser_download_wait` 观察同一 id；只收 http/https，拒绝 URL 内嵌凭据与越界文件名，`saveAs:false` + `uniquify` 不弹框、不覆盖，回执不回声可能带签名的 URL，`verified:false` 只表示请求已受理。同时 `browser_downloads` / `browser_download_wait` 把 `interrupted + USER_CANCELED + 0 字节` 标为 `externalDownloadManagerSuspected`（IDM/迅雷接管），给出 `suspectedDownloadIds` 与可执行的 `recommendedNextAction`，不再把它当可重试失败诱导重放。全量测试 1110/1110，工具数 141。运行中的服务与扩展仍为 0.48.0，本轮未部署。
+0.49.0 是下载可靠性的最小闭环，来自 2026-11-20 抖店历史发票下载实测：页面按钮调 `window.open` 时，隐藏标签里既拿不到新标签也拿不到 `downloadId`，点击只能报 `uncertain`。新增浏览器级工具 `browser_download_url`（确认串 `start_download_once`）：调用方已持有可再次请求的 http(s) 地址时，直接经 `chrome.downloads.download` 启动**恰好一次**下载并返回准确数值 `downloadId`，再用 `browser_download_wait` 观察同一 id；只收 http/https，拒绝 URL 内嵌凭据与越界文件名，`saveAs:false` + `uniquify` 不弹框、不覆盖，回执不回声可能带签名的 URL，`verified:false` 只表示请求已受理。同时 `browser_downloads` / `browser_download_wait` 把 `interrupted + USER_CANCELED + 0 字节` 标为 `externalDownloadManagerSuspected`（IDM/迅雷接管），给出 `suspectedDownloadIds` 与可执行的 `recommendedNextAction`，不再把它当可重试失败诱导重放。全量测试 1110/1110，工具数 141。已部署（2026-11-20 12:15–12:18 +0800）：服务 pid 7916 / buildId `b3e53eb0…`、两个扩展宿主均 0.49.0、插件 `ai-browser-bridge@local` 0.49.0；`status` 无版本漂移，新会话工具面 141。
 
 0.48.0 把上一轮因「高风险」而搁置、但只要能在现有 Chrome 内闭环就可以接的能力补齐。新增只读的 `browser_css_styles`，像 Styles 面板一样回答「这个元素为什么是这个颜色」，CSS 域不可转发时回 `unsupported` 而不是空规则。新增 `browser_request_headers`，显式确认后导出有界请求头：默认同源、去 query、永不采集请求体，跨站必须 `scope:"all"`，值只回调用方、不落盘；确认串 `reveal_request_headers_once`。长活 CDP 会话新增 `browser_webauthn`（虚拟认证器，私钥默认省略，写动作需 `modify_webauthn_once`）、`browser_pwa`（installability 检查、真实安装提示、卸载后回读管理列表；写动作需 `modify_pwa_once`）与 `browser_extension_install`（解包扩展安装 + `chrome.management` 前后证据，需 `modify_extension_install_once`）。调试侧新增 `browser_debugger` 日志断点（只记录、不暂停）与控制台/异常的有界栈帧。所有能力都复用现有 Chrome，不启动第二个浏览器；Lighthouse、性能 trace、堆快照与 WebMCP 仍留待下一批。全量测试 1106/1106，工具数 140。
 
@@ -109,10 +109,10 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 > **版本标记口径**：`package.json` / `extension/manifest.json` 的工程版本号（如 `0.41.0`）与部分历史文档、部署记录里的功能叙述版本号（如 `0.5.x`）是**两套并行标记，不能据数字大小判断代码新旧**，看起来像「降级」的快进也可能是正常升级。以 `git HEAD`、`buildId` 和 `doctor` 为准。此说明同样适用于 Release 页面。
 
 - 所有版本：[GitHub Releases](https://github.com/love530love/ai-browser-bridge/releases)
-- 版本号必须同时更新 `package.json`、`package-lock.json`、`extension/manifest.json` 和 `CHANGELOG.md`，再创建同名 Git tag 与 GitHub Release。
+- 版本号必须同时更新 `package.json`、`package-lock.json` 的两个版本字段、`extension/manifest.json` 和 `CHANGELOG.md`；插件 Skill 副本与 ZIP 也要同步，再创建同名 Git tag 与 GitHub Release。
 - Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
 
-### 当前版本升级指南（0.45.0）
+### 当前版本升级指南（0.49.0）
 
 > **只 `git pull` 不等于升级完成。** 磁盘代码、运行中的服务进程、Chrome 里加载的扩展、`.local/config.json` 的新字段是四层独立状态；只更新第一层会出现「面板已连接、体检却跑在旧代码上」的假健康状态。
 
@@ -122,13 +122,14 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 node src/cli.js upgrade-check
 ```
 
-固定五步：
+固定六步：
 
 1. `git pull --ff-only origin main`（浅克隆或落后很多个提交同样适用）。
 2. **重启服务**：`doctor` 的 `service-build-current` 会比较运行 buildId 与磁盘 buildId；落后时执行 `node src/cli.js restart-service-when-idle --apply`。它先只读核对 `/status` pid、LISTENING pid、进程命令行、看门狗身份与队列空闲，任一不符即拒绝且不发信号；通过后写 `restart_intent`，服务自查空闲后自行退出，看门狗拉起新源码，CLI 轮询到 `buildId === 磁盘 buildId`（`status:verified`）才算完成。只看预检可去掉 `--apply`。旧服务没有该端点时返回 `restart_endpoint_unavailable` 且不发信号，按 [升级文档](docs/UPGRADE-OPERATIONS.md) 做一次性手工迁移。不要用 `stop.ps1`（它会写 `service-paused`，让守护自我暂停），也不要按 `.local/server.pid` 杀进程。
 3. **重载扩展**：扩展已连接时 `browser_reload_extension` 走 `chrome.runtime.reload()` 自我重载；多宿主时先 `browser_hosts`，按每个 `hostId` 分别调用，不要只重载 primary。
 4. **补配置字段**：旧配置缺 `browserTarget` 时用 `node src/cli.js set-browser-target --from-running-chrome`（默认只打印建议与证据，确认后加 `--write` 才写回）；其它缺项见 `upgrade-check` 输出。
 5. **复验**：`doctor-lite.bat` → `doctor.bat`，期望 `ok:true`，`service-build-current` 与 `version-match` 全通过。
+6. **同步插件**：`node scripts/sync-qoder-plugin.mjs --zip` 后，执行 `qoder plugin install "<仓库绝对路径>/qoder-plugin/ai-browser-bridge" --scope user`（或经 Qoder 插件视图安装 ZIP），确认 `qoder plugin list` 显示同版本；插件安装后需新会话才加载新工具面。
 
 `upgrade-check` 是只读的：不重启服务、不重载扩展、不改配置。每条建议都带可直接复制的命令。
 

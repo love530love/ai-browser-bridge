@@ -15,7 +15,8 @@
 - 全量 `npm test` → **1110/1110**（exit 0，0 fail）。
 - 新增/扩展测试：`test/browser-authority.test.js` 覆盖列表标记疑似接管、`download_wait` 把 `USER_CANCELED + 0 字节` 判为接管而非可重试、URL 下载恰好派发一次且不回显签名 URL、非 http/内嵌凭据/越界文件名在派发前拒绝；`test/confirmation-schemas.test.js` 固定 `start_download_once`；`test/next-step.test.js` 覆盖接管终止指引；`test/capability-guide.test.js` 覆盖两条下载意图。
 - 插件版本同步：`node scripts/sync-qoder-plugin.mjs --check` → `PLUGIN_CHECK_OK version=0.49.0 skillFiles=1`。
-- **未部署**：本轮只改源码、测试、插件源与文档；运行中的服务与扩展仍为 0.48.0。重启服务、重载扩展、安装新插件 ZIP 都需要单独授权。
+- **已部署（2026-11-20 12:15–12:18 +0800）**：`restart-service-when-idle --apply` 空闲重启（intent `58a3e258…`，旧 pid 3772 → 新 pid **7916**，`runningBuildId = diskBuildId = b3e53eb0…`、`deploymentStale:false`）。两个宿主分别经 `chrome.runtime.reload` 自载到扩展 0.49.0，`foregroundTaken:false`、未开标签页、未发按键：`h-0b47a521c4384e90beb4`（系统 Chrome 156，session `8108d0b6…` → `5854a021…`）与 `h-b76b872f85d347a49e00`（ChatGPT 内嵌 Chrome 157，session `8cff1a78…` → `53a7583f…`）。`status` 复验两宿主均 `extensionVersion:"0.49.0"`、`extensionVersionSkew:false`、`actionRequired:[]`、`hostsDegraded:0`；服务工具面 141（含 `browser_download_url`）。
+- **插件同步**：`qoder plugin install ... --scope user --json` → `ai-browser-bridge@local v0.49.0`，缓存目录 `plugins/cache/local/ai-browser-bridge/0.49.0`；独立 stdio 探针经该目录 `bin/launch-bridge.mjs` 实测 141 工具，且含 `browser_download_url` / `browser_reload_extension`。当前会话的 MCP schema 仍缓存旧工具面，新会话才会注入 141。
 
 ### 边界
 

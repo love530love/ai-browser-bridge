@@ -4,6 +4,14 @@
 
 ## 目标
 
+## 2026-11-20 接手增量（0.49.0，已部署）：URL 直达下载 / 外部下载管理器误报识别
+
+- **交付**：新增浏览器级 `browser_download_url`（确认串 `start_download_once`），只接受 http(s)，经 `chrome.downloads.download` 启动恰好一次下载并返回准确 `downloadId`；拒绝 URL 内嵌凭据与越界文件名，`saveAs:false` + `uniquify`，回执不回声 URL。`browser_downloads` / `browser_download_wait` 识别 `interrupted + USER_CANCELED + 0 字节` 为 `externalDownloadManagerSuspected`，返回 `suspectedDownloadIds` 与 `recommendedNextAction`，不再诱导重放。工具面 140 → **141**。
+- **部署证据（2026-11-20 12:15–12:18 +0800）**：`restart-service-when-idle --apply` intent `58a3e258…`，旧 pid 3772 → 新 pid **7916**，`runningBuildId = diskBuildId = b3e53eb0…`。两个宿主各自 `chrome.runtime.reload` 到扩展 0.49.0（`foregroundTaken:false`）：`h-0b47a521c4384e90beb4`（系统 Chrome 156）与 `h-b76b872f85d347a49e00`（ChatGPT 内嵌 Chrome 157）。插件 `ai-browser-bridge@local v0.49.0` 已安装到 `plugins/cache/local/ai-browser-bridge/0.49.0`。
+- **复验**：全量 `npm test` **1110/1110**；`heartbeat` → `verdict:"clean"`、`provenClean:true`、`findings:[]`；`status` → `extensionVersionSkew:false`、`deploymentStale:false`、`actionRequired:[]`、`hostsDegraded:0`；独立 stdio 探针经已安装插件的 `bin/launch-bridge.mjs` 得到 **141** 个工具。
+- **发布硬规则**：每次版本更新必须同步服务、扩展、插件与测试面；规则已写入 `AGENTS.md` 与 `docs/DEVELOPMENT-GUIDE.md`。当前旧会话可能仍缓存 140 工具 schema，新会话才会加载 141。
+- **边界**：页面点击仍无法可靠关联它创建的下载项；外部管理器识别是启发式，真实用户取消会呈现同一模式；DPI 问题属于 `windows_control`，未塞入 Bridge。
+
 ## 2026-11-16 接手增量（0.46.0，已部署）：统一失败错误码 / 页面 DOM 脚本兜底 / P4 跨页面基准
 
 触发：P3 之后要求用真实页面表面验收「后台也能驱动、失败可分支、绝不假成功」。基准第一次跑就抓到三个真问题：Chrome 156 的 `Debugger.enable` replay 漏报主世界页面脚本；后台标签里 `confirm()` 被 Chrome 静默压掉，调用方只能干等到超时；下载探针把 `tabId` 传给不接受它的下载工具。

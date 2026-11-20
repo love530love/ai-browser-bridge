@@ -109,4 +109,4 @@ handleDownloadInvoice: e => {
 - **P2-1 / browser_fetch：口径修正。** 当前源码在响应中已返回 `bodyLength` 与 `bodyTruncated`，默认预览上限为 4000 字符（`extension/cdp-replay.js:35`），只有显式传 `maxResponseChars:900` 才会截断。因此「回执没有等价字段」不成立——真实缺口是**截断后的偏移续读**，本版未实现；调用方应省略 `maxResponseChars` 或先读 `bodyTruncated`。
 - **P2-3 / DPI：不属于 Bridge。** 报告中的 `click_element`、`get_ui_tree`、`invoke_element` 来自 `windows_control` MCP；Bridge 的坐标路径不经过该实现，本轮不并入，转交该工具维护方。
 - **P1-2 / 内网 TOS：** 平台基础设施事实，不并入 Bridge；`skills/platform-invoice-upload/SKILL.md` 已把它写成通用警示与同源代理路径。
-- **状态：** 0.49.0 仅完成源码、测试、插件源与文档；运行中的服务与扩展仍为 0.48.0，未重启、未重载、未安装新插件。
+- **状态（2026-11-20 12:15–12:18 +0800，已部署）：** 服务 0.49.0（pid 7916，buildId `b3e53eb0…`）；两个宿主扩展均 0.49.0（`h-0b47a521c4384e90beb4` 系统 Chrome 156、`h-b76b872f85d347a49e00` ChatGPT 内嵌 Chrome 157）；插件 `ai-browser-bridge@local` 0.49.0；`status` 无 `deploymentStale` / `extensionVersionSkew` / `actionRequired`；服务与新会话工具面 141。当前旧会话仍缓存 140 工具 schema。

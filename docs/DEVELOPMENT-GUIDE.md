@@ -27,7 +27,21 @@ node -e "const pkg=JSON.parse(require('fs').readFileSync('package.json','utf8'))
 node -e "const m=JSON.parse(require('fs').readFileSync('extension/manifest.json','utf8'));console.log('Extension:',m.version)"
 ```
 
-**两处输出必须一致。**
+**这两处（以及 `package-lock.json` 的两个版本字段）必须一致。**
+
+### 每次版本发布必须同步全部开发/测试面（硬规则，2026-11-20）
+
+源码版本一致只是第一层。发布完成前还必须：
+
+1. `npm test` 全量通过。
+2. `node scripts/sync-qoder-plugin.mjs --zip` 重新生成插件 ZIP；插件版本与 Skill 副本必须跟随仓库。
+3. `node src/cli.js restart-service-when-idle --apply` 空闲重启服务，确认 `/status` 的 `runningVersion` 与 `runningBuildId` 和磁盘一致。
+4. 对 `browser_hosts` 返回的**每个** host 调用 `browser_reload_extension`，确认 `extensionVersion` 为新版本，且 `foregroundTaken:false`。
+5. 执行 `qoder plugin install "<仓库绝对路径>/qoder-plugin/ai-browser-bridge" --scope user`（或经 Qoder 插件视图安装 ZIP），确认 `qoder plugin list`、`installed_plugins_v2.json` 与插件缓存目录都是新版本。
+6. 复验 `status`：`deploymentStale:false`、`extensionVersionSkew:false`、`actionRequired:[]`；所有 host 版本一致。
+7. CHANGELOG、README 与 AEP 任务写入部署证据，提交并 `git push origin main`。
+
+任一端点未完成时只能报告“部分同步”，不得称为“已发布”。插件安装后当前会话可能仍缓存旧 MCP schema，工具面核验必须在新会话进行。
 
 ## 维护操作的目标绑定（0.35.1 血泪教训）
 
@@ -115,8 +129,8 @@ git commit -m "type: description
 - 具体修改 2
 - 验证方法/结果"
 
-# 推送远程
-git push sshpush main
+# 推送远程（发布分支固定为 origin/main）
+git push origin main
 ```
 
 ### 2. 版本号更新
@@ -132,18 +146,24 @@ git push sshpush main
 #### 更新步骤
 
 ```bash
-# 1. 更新 package.json
-# 编辑 package.json 中的 "version" 字段
+# 1. 更新四处版本号
+#    - package.json
+#    - extension/manifest.json
+#    - package-lock.json 顶层 version
+#    - package-lock.json 的 packages[""].version
 
-# 2. 更新 extension/manifest.json
-# 编辑 extension/manifest.json 中的 "version" 字段
+# 2. 同步插件 Skill 副本并生成 ZIP
+node scripts/sync-qoder-plugin.mjs --zip
 
-# 3. 提交版本更新
-git add package.json extension/manifest.json
+# 3. 全量测试
+npm test
+
+# 4. 提交版本更新
+git add package.json package-lock.json extension/manifest.json qoder-plugin
 git commit -m "bump: version X.Y.Z → X.Y+1 for <description>"
 
-# 4. 推送远程
-git push sshpush main
+# 5. 推送远程
+git push origin main
 ```
 
 ### 3. 创建 GitHub Release
@@ -168,31 +188,41 @@ gh release create vX.Y.Z \
 - **Bug fix**：必须说明修复前/后的对比数据（如测试页面元素数量对比）
 - **新功能**：必须说明新增工具/能力列表
 
-### 4. 扩展重新加载
+### 4. 同步部署全部端点
 
 ```bash
-# 重新加载扩展以应用新版本
-node src/cli.js call browser_reload_extension '{"confirmation":"reload_extension_once"}'
+# 1. 空闲重启服务（队列/租约/in-flight 任一非空时只等待，不强杀）
+node src/cli.js restart-service-when-idle --apply
 
-# 验证扩展状态
+# 2. 对每个已连接 host 重载扩展；不要省略 hostId
+node src/cli.js call browser_hosts '{}'
+node src/cli.js call browser_reload_extension '{"confirmation":"reload_extension_once","hostId":"<hostId>"}'
+
+# 3. 安装本地插件（已同步版本；也可经 Qoder 插件视图安装 dist ZIP）
+qoder plugin install "<仓库绝对路径>/qoder-plugin/ai-browser-bridge" --scope user --json
+qoder plugin list
+
+# 4. 复验服务、扩展与插件版本
 node src/cli.js status
+node src/cli.js heartbeat
 ```
 
-**必须确认 `extensionVersion` 已更新到新版本。**
+**必须确认：服务 `runningVersion`/`runningBuildId` 与磁盘一致；每个 host 的 `extensionVersion` 都是新版本；已安装插件版本是新版本；`status` 无 `deploymentStale` / `extensionVersionSkew` / `actionRequired`。** 新会话中再核验 MCP 工具面，旧会话缓存不算同步完成。
 
 ## 版本一致性检查清单
 
-每次发布前，逐项检查：
+每次发布完成前，逐项检查：
 
-- [ ] `package.json` 版本号已更新
-- [ ] `extension/manifest.json` 版本号已更新
-- [ ] 两处版本号完全一致
-- [ ] 所有修改已提交（`git status` 无 uncommitted 文件）
-- [ ] 版本更新已提交并推送远程
-- [ ] GitHub Release 已创建
-- [ ] 扩展已重新加载
-- [ ] 扩展版本号已验证为最新版本
-- [ ] 扩展错误列表已清除（无报错）
+- [ ] 四处版本号完全一致（含 `package-lock.json` 两处）
+- [ ] `npm test` 全量通过
+- [ ] 插件 Skill 副本已同步，ZIP 已重新生成
+- [ ] 服务已空闲重启，running version/buildId 与磁盘一致
+- [ ] 每个已连接 host 的扩展已重载且版本为新版
+- [ ] 新插件 ZIP 已安装，安装记录与缓存目录为新版
+- [ ] `status` 无 `deploymentStale` / `extensionVersionSkew` / `actionRequired`
+- [ ] CHANGELOG、README 与 AEP 任务已记录部署证据
+- [ ] 所有修改已提交并推送 `origin/main`
+- [ ] 新会话已核验工具面；扩展错误列表已检查（无报错）
 
 ## Git 操作规范
 
