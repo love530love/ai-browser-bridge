@@ -170,6 +170,7 @@ A version update is not complete at source commit. Before calling a release done
 6. Re-check `status` for zero `deploymentStale`, zero `extensionVersionSkew`, and empty `actionRequired`; confirm all hosts agree.
 7. Record deployment evidence in `CHANGELOG.md`, `README.md`, and the active AEP task, then commit and push `origin/main`.
 8. Tag the release commit with an annotated `v<version>` (matching `package.json`) and push the tag to `origin`; a release pushed without its version tag is incomplete.
+9. Publish the plugin ZIP remotely: create or update the GitHub Release `v<version>` with `qoder-plugin/dist/ai-browser-bridge-<version>.zip` as an asset, download it back and verify its SHA256 equals the local file, and record the release URL plus the install command (`qoder plugin install https://github.com/love530love/ai-browser-bridge/releases/download/v<version>/ai-browser-bridge-<version>.zip --scope user`) in `CHANGELOG.md`. A release whose asset is missing, stale, or digest-unverified is not published.
 
 If any surface cannot be synchronized, report a partial sync with the exact blocked step and evidence; never describe it as unified. A running agent session may keep its cached MCP schema after a plugin install, so tool-surface verification belongs in a new session.
 
