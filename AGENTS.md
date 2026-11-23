@@ -169,6 +169,7 @@ A version update is not complete at source commit. Before calling a release done
 5. Install the new plugin ZIP through the Qoder local plugin installer and confirm the installed version in the plugin record/cache.
 6. Re-check `status` for zero `deploymentStale`, zero `extensionVersionSkew`, and empty `actionRequired`; confirm all hosts agree.
 7. Record deployment evidence in `CHANGELOG.md`, `README.md`, and the active AEP task, then commit and push `origin/main`.
+8. Tag the release commit with an annotated `v<version>` (matching `package.json`) and push the tag to `origin`; a release pushed without its version tag is incomplete.
 
 If any surface cannot be synchronized, report a partial sync with the exact blocked step and evidence; never describe it as unified. A running agent session may keep its cached MCP schema after a plugin install, so tool-surface verification belongs in a new session.
 
