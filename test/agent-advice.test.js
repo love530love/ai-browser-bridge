@@ -211,10 +211,11 @@ test('work is never moved to another browser silently', () => {
   assert.equal(closed.decision, 'wait', 'a known tab must not be moved to a host where its id means another tab');
 });
 
-test('an unknown tool name routes to the index instead of a guessed call', () => {
+test('an unknown tool name routes to search instead of a guessed call', () => {
   const result = advise({ toolName: 'browser_typo', goal: 'read the page' });
   assert.equal(result.decision, 'diagnose');
-  assert.equal(result.nextStep.tool, 'browser_tool_index');
+  assert.equal(result.nextStep.tool, 'browser_tool_search');
+  assert.equal(result.nextStep.arguments.query, 'browser_typo');
   assert.match(result.why, /browser_typo/);
 });
 

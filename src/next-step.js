@@ -440,6 +440,15 @@ const ERROR_REASONS = [
 
 export function nextStepForError(name, args = {}, message = '') {
   const text = typeof message === 'string' ? message : '';
+  const unknown = text.match(/^Unknown tool:\s*([^\s.]+)/);
+  if (unknown) {
+    return {
+      kind: 'plan',
+      tool: 'browser_tool_search',
+      arguments: { query: unknown[1] },
+      why: 'The requested name is not registered. Search the complete catalogue, then read the exact schema before calling it.'
+    };
+  }
   const matched = ERROR_REASONS.find(([pattern]) => pattern.test(text));
   if (!matched) return null;
   return nextStepFor(name, args, { status: 'failed', reason: matched[1], message: text });

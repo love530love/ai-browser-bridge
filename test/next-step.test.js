@@ -219,11 +219,14 @@ test('a thrown failure gets the same single step as a returned one', async () =>
 
 test('the thrown path is wired end to end, not just implemented', async () => {
   const { readFileSync } = await import('node:fs');
+  const { errorSurfaceFields } = await import('../src/tool-surface.js');
   const server = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
   const client = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8');
   const mcp = readFileSync(new URL('../src/mcp.js', import.meta.url), 'utf8');
   assert.match(server, /nextStepForError\(name, args \?\? \{\}, error\?\.message/, 'the service must derive a step for a throw');
-  assert.match(server, /json\(res, 400, \{ error: e\.message, .*nextStep/, 'the 400 body must carry it');
+  assert.match(server, /json\(res, 400, \{ error: e\.message, \.\.\.errorSurfaceFields\(e\) \}\)/, 'the 400 body must carry it');
+  assert.equal(errorSurfaceFields({ nextStep: { tool: 'browser_read' } }).nextStep.tool, 'browser_read', 'the spread must actually forward nextStep');
   assert.match(client, /error\.nextStep = result\.nextStep/, 'the client must not drop it');
-  assert.match(mcp, /nextStep: e\.nextStep/, 'the MCP error text must carry it');
+  assert.match(mcp, /status: 'failed', retryable: false, error: e\.message, \.\.\.fields/, 'the MCP error text must carry the structured fields');
+  assert.match(mcp, /const fields = errorSurfaceFields\(e\)/, 'the MCP error text must include nextStep through the shared surface');
 });

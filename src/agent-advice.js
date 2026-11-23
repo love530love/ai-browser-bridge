@@ -35,6 +35,7 @@ const DEFAULT_NAV_MS = 4000;
 // enqueueJob; a name that is wrong here only makes the advice more conservative.
 const QUEUE_EXEMPT = new Set([
   'browser_agent_guide', 'browser_capabilities', 'browser_tool_index',
+  'browser_tool_search', 'browser_tool_schema',
   'browser_prepare_request', 'browser_protected_ui_plan', 'browser_execution_profile',
   'browser_capability_guide', 'browser_queue_status', 'browser_scheduler_status',
   'browser_hosts', 'browser_wait_until_ready', 'browser_failure_help',
@@ -53,6 +54,7 @@ const QUEUE_EXEMPT = new Set([
 // block them. Everything else waits.
 const PRE_MAINTENANCE = new Set([
   'browser_agent_guide', 'browser_capabilities', 'browser_tool_index',
+  'browser_tool_search', 'browser_tool_schema',
   'browser_prepare_request', 'browser_protected_ui_plan', 'browser_execution_profile',
   'browser_capability_guide', 'browser_queue_status', 'browser_scheduler_status',
   'browser_hosts', 'browser_wait_until_ready', 'browser_route_task',
@@ -402,9 +404,9 @@ export function buildAgentAdvice({
       why: `No registered tool is called "${text(toolName, 120)}". Guessing a similar call is how a mistyped tool name becomes a wrong action.`,
       nextStep: {
         kind: 'plan',
-        tool: 'browser_tool_index',
-        arguments: { goal: text(goal, 200) || text(toolName, 200) },
-        why: 'Read the compact index, pick the exact tool name, then call browser_capability_guide for the path.'
+        tool: 'browser_tool_search',
+        arguments: { query: text(toolName, 200) || text(goal, 200) },
+        why: 'Search the complete catalogue for the intended capability, then read the exact schema. The first tools/list batch is only a core profile.'
       }
     });
   }

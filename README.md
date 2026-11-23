@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.49.0**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.50.0**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.50.0 修的是「弱调用方只看到首批工具就以为能力不存在」。实测症状不是工具缺失，而是发现方式只有拉取式：`tools/list` 按声明顺序返回，索引类工具埋在中间，轻量模型往往看完前二十个名字就停，随后凭记忆猜一个不存在的工具名，收到一句 bare error 后卡住或改走别的通道。本轮把发现做成常显第一屏：`tools/list` 先返回 24 个日常核心工具（含 `browser_tool_search` / `browser_tool_schema`），再按声明顺序列出**全部** 143 个，任何工具都没有被删；新增服务本地、不触浏览器的 `browser_tool_search`（按自然语言检索全目录，返回带 `basis` 的确定性排名，并标出非验证写入工具的 `verifiedVariant`）和 `browser_tool_schema`（返回单个工具的精确 schema、必填/可选参数）；未知工具名现在返回 `code:"UNKNOWN_TOOL"`、`suggestedTools` 与可执行 `browser_tool_search` 下一步，而不是一句不可行动的句子；MCP 初始化说明压缩成一页可读完的契约（完整 43 KB 契约仍是 `bridge://skills/ai-browser-bridge` 资源），并新增 `bridge://capabilities` 机器可读清单；`browser_health.toolSurface` 暴露运行中工具数、核心画、surface hash 与 `staleToolSurface`，工具面与磁盘不一致时直接给出重启客户端的 `nextStep`。返回体新增 `warnings`（uncertain/partial/unsupported 咨询信息）与 `handoff`（只有真正需要人回答 Chrome/OS 提示时才出现），两者都**只咨询、不阻断**，接入方自行判断并如实转告用户。新增确定性弱 agent 基准 `test/bench/weak-agent.js`：旧版「只有首批 + bare error」5/5 卡住，当前「核心优先 + 搜索」5/5 恢复、0 次假成功。
 
 0.49.0 是下载可靠性的最小闭环，来自 2026-11-20 抖店历史发票下载实测：页面按钮调 `window.open` 时，隐藏标签里既拿不到新标签也拿不到 `downloadId`，点击只能报 `uncertain`。新增浏览器级工具 `browser_download_url`（确认串 `start_download_once`）：调用方已持有可再次请求的 http(s) 地址时，直接经 `chrome.downloads.download` 启动**恰好一次**下载并返回准确数值 `downloadId`，再用 `browser_download_wait` 观察同一 id；只收 http/https，拒绝 URL 内嵌凭据与越界文件名，`saveAs:false` + `uniquify` 不弹框、不覆盖，回执不回声可能带签名的 URL，`verified:false` 只表示请求已受理。同时 `browser_downloads` / `browser_download_wait` 把 `interrupted + USER_CANCELED + 0 字节` 标为 `externalDownloadManagerSuspected`（IDM/迅雷接管），给出 `suspectedDownloadIds` 与可执行的 `recommendedNextAction`，不再把它当可重试失败诱导重放。全量测试 1110/1110，工具数 141。已部署（2026-11-20 12:15–12:18 +0800）：服务 pid 7916 / buildId `b3e53eb0…`、两个扩展宿主均 0.49.0、插件 `ai-browser-bridge@local` 0.49.0；`status` 无版本漂移，新会话工具面 141。
 
@@ -112,7 +114,7 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 - 版本号必须同时更新 `package.json`、`package-lock.json` 的两个版本字段、`extension/manifest.json` 和 `CHANGELOG.md`；插件 Skill 副本与 ZIP 也要同步，再创建同名 Git tag 与 GitHub Release。
 - Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
 
-### 当前版本升级指南（0.49.0）
+### 当前版本升级指南（0.50.0）
 
 > **只 `git pull` 不等于升级完成。** 磁盘代码、运行中的服务进程、Chrome 里加载的扩展、`.local/config.json` 的新字段是四层独立状态；只更新第一层会出现「面板已连接、体检却跑在旧代码上」的假健康状态。
 
@@ -356,7 +358,7 @@ Chrome 面板应显示「已连接」、角标 `ON`。若 30 秒内未恢复，�
 }
 ```
 
-MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 141 个工具（0.49.0），`browser_screenshot` 返回 MCP 图片内容。
+MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 143 个工具（0.50.0），首批是 24 个核心工具，随后是其余全部工具；`browser_tool_search` 可在浏览器断开时检索全目录，`browser_screenshot` 返回 MCP 图片内容。
 
 ### Qoder 插件与全局连接器
 

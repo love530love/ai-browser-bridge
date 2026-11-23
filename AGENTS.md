@@ -82,6 +82,15 @@ Only two remediations are automated: restarting a service whose source build ide
 - Adapter orphan protection anchors on the first stable ancestor (pid + creation time) after skipping shells/launchers and session roots. `guard.mode:"active"` is protection; `"passive"` means no stable ancestor could be verified and no orphan decision will be made. Both are visible in `node src/cli.js processes`; passive is never described as protected.
 - `browser_extension_errors` carries `claims`. `cleanClaim:true` requires the chrome://extensions panel to be read as empty **and** no journal error in the window. Journal-only results always have `cleanClaim:false`; `none_recorded` is absence of evidence, never "the panel is clear". `journal_errors_panel_clean` means the panel is empty now but earlier errors were recorded.
 
+## Tool discovery (0.50.0)
+
+- `tools/list` returns every bridge tool, but its first batch is a core profile for daily work, not the whole catalogue. Absence from the first names you saw is not evidence that a capability is missing.
+- `browser_tool_search` searches the complete catalogue by plain-language goal and returns ranked names with a named `basis` (never a probability). `browser_tool_schema` returns one exact schema: required and optional arguments, description and annotations. Both are answered by the service with no browser connection.
+- `browser_tool_index` remains the compact group map, and `browser_capability_guide` remains the route/fallback guide for a stated goal.
+- An unknown tool name fails with `code:"UNKNOWN_TOOL"`, `suggestedTools` and a `browser_tool_search` `nextStep`. Follow it instead of guessing a second spelling.
+- `browser_health.toolSurface` and `bridge://capabilities` expose the live tool count, core profile, surface hash and staleness. A stale surface means restart the MCP client; do not re-derive the catalogue by hand.
+- These two tools are service-local by design and are not dispatched by the extension. The extension whitelist is unchanged.
+
 ## AI-Assisted Discovery
 
 When `nextStep.aiAssisted === true` (returned by `nextStepFor` after all deterministic rules fail), use `browser_local_judge({mode: 'discovery', ...})` to obtain AI-powered page understanding, tool recommendation, and action guidance.

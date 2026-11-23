@@ -28,6 +28,7 @@ const TOOL_CATEGORIES = {
       'browser_script_inventory', 'browser_source_map', 'browser_event_listeners',
       'browser_dom_snapshot', 'browser_framework_tree',
       'browser_ai_status', 'browser_capabilities', 'browser_tool_index',
+      'browser_tool_search', 'browser_tool_schema',
       'browser_queue_status', 'browser_agent_advice', 'browser_wait_until_ready', 'browser_capability_guide',
       'browser_hosts', 'browser_screenshot', 'browser_cookies',
       'browser_storage_read', 'browser_network_summary',

@@ -10,6 +10,15 @@ browser_tabs, and browser_observe on the relevant tab. If no matching tab exists
 use browser_open in that Chrome. Do not launch a fresh profile to solve a locator
 failure. Read browser_agent_guide when first connecting.
 
+TOOL DISCOVERY IS COMPLETE. tools/list returns every bridge tool; its first
+batch is a core profile for daily work, not the whole catalogue.
+browser_tool_search searches all of them by plain language with a named
+ranking basis, browser_tool_schema returns one exact schema, and
+browser_tool_index is a compact group map. An unknown name is answered with
+suggestedTools and a browser_tool_search nextStep. Never conclude a capability
+is missing because it was absent from the first names you saw: search first,
+then read the schema. bridge://capabilities is the machine-readable manifest.
+
 Before taking an action, check whether the requested result is already visible,
 including an open dialog. For example, an SSH connection dialog may already
 contain the requested command even when direct API navigation returned 406.
@@ -131,8 +140,9 @@ because one locator, API call, or optional model failed. Do not keep retrying
 without new evidence; preserve resumable progress if the client must end its turn.
 
 If the Bridge is disconnected or the needed tool is missing, diagnose with
-browser_health, browser_queue_status, browser_tool_index and
-browser_capability_guide. A failure is not permission to change channels: stop
+browser_health, browser_queue_status, browser_tool_search and
+browser_tool_schema, then browser_tool_index and browser_capability_guide. A
+failure is not permission to change channels: stop
 and ask before using a different browser, account, profile, external service or
 host-level route. Never copy/clone a Chrome profile or its Login Data, Cookies or
 Local State to regain access; never mine browser stores for credentials. Keep

@@ -422,12 +422,22 @@ export const TOOLS = [
     pageUrl: text(4000),
     agent
   }, ['url'], true),
-  tool('browser_tool_index', 'Read a compact intent index instead of the full tool catalogue. Listing every tool with its description costs about 68 KB, and a real session uses a dozen of them; names alone are not enough to choose. This returns eleven groups - read, act, overlay, network, tab, auth, capture, debug, desktop, recipe, maintenance - each with a one-line purpose and its tool names, in a few hundred bytes. Pass goal to narrow by keyword (Chinese or English) and group to get exactly one group; format:"json" returns the same data structured. Read this first, then read the schema of the one tool you picked, then call browser_capability_guide if the goal is unfamiliar.', {
+  tool('browser_tool_index', 'Read a compact intent index instead of the full tool catalogue. Listing every tool with its description costs tens of KB, and a real session uses a dozen of them; names alone are not enough to choose. This returns thirteen groups - read, act, overlay, network, tab, auth, capture, download, fleet, debug, desktop, recipe, maintenance - each with a one-line purpose and its tool names. Pass goal to narrow by keyword (Chinese or English) and group to get exactly one group; format:"json" returns the same data structured. Read this first, then call browser_tool_search for the full catalogue, browser_tool_schema for one exact schema, and browser_capability_guide when the goal is unfamiliar.', {
     goal: text(200),
-    group: { type: 'string', enum: ['read', 'act', 'overlay', 'network', 'tab', 'auth', 'capture', 'debug', 'desktop', 'recipe', 'maintenance'] },
+    group: { type: 'string', enum: ['read', 'act', 'overlay', 'network', 'tab', 'auth', 'capture', 'download', 'fleet', 'debug', 'desktop', 'recipe', 'maintenance'] },
     format: { type: 'string', enum: ['text', 'json'] },
     agent
   }, [], true),
+  tool('browser_tool_search', 'Search the complete bridge tool catalogue by plain-language goal. tools/list returns every tool, but the first batch is only a core profile; this search spans all of them, so a capability is never absent merely because it was not in the first twenty names. Results are ranked deterministically with a named basis and a one-line summary, not a probability. Use it before concluding that a tool does not exist, then call browser_tool_schema on the exact name. It is answered locally and never touches the browser.', {
+    query: text(500),
+    group: { type: 'string', enum: ['read', 'act', 'overlay', 'network', 'tab', 'auth', 'capture', 'download', 'fleet', 'debug', 'desktop', 'recipe', 'maintenance'] },
+    limit: { type: 'integer', minimum: 1, maximum: 20 },
+    agent
+  }, ['query'], true),
+  tool('browser_tool_schema', 'Return the exact schema of one bridge tool by name, including its description, required arguments, optional arguments and annotations. Call this after browser_tool_search when you know the tool name but not its arguments. An unknown name returns the best matching names and a search nextStep instead of a bare error. It is answered locally and never touches the browser.', {
+    name: text(120),
+    agent
+  }, ['name'], true),
   tool('browser_health', 'Layered health check for service/extension, permissions, Chrome tab.active, Chrome window.focused, document.visibilityState/hasFocus, viewport, page readiness, and tool version. These are separate states; use before coordinate input.', { tabId, agent }, [], true),
   tool('browser_capability_guide', 'Answer locally, without any model: for a stated goal, which primitive to use, whether it needs the foreground, what the fallback is, and which capabilities are genuinely not implemented. Use this instead of stalling when a tool is unfamiliar or refuses unexpectedly. It also states which reported states (tab.active, window.focused, document visibility/focus) are advisory only, because DOM and CDP primitives keep working in a backgrounded tab.', {
     goal: text(2000),
@@ -1060,6 +1070,49 @@ function closest(input, candidates) {
   return bestScore <= Math.max(2, Math.floor(input.length / 3)) ? best : null;
 }
 
+// A weak caller that guesses a name and gets one line back has no way to learn
+// that the real tool exists two hundred entries later in tools/list. Rank a few
+// plausible names from what it already typed; the caller still has to read a
+// schema before acting.
+export function suggestToolNames(input, limit = 5) {
+  const needle = String(input ?? '').trim().toLowerCase();
+  if (!needle) return [];
+  // Underscore is a separator, not a word character: "browser_upload_file"
+  // should contribute "upload" and "file", not one unmatchable token.
+  const tokens = needle.split(/[^a-z0-9\u4e00-\u9fff]+/).filter(token => token.length >= 2);
+  const scored = TOOLS.map(entry => {
+    const name = entry.name.toLowerCase();
+    let score = 0;
+    if (name === needle) score += 1000;
+    else if (name.includes(needle)) score += 600;
+    else if (needle.includes(name) && needle.length >= 8) score += 500;
+    const matchedTokens = tokens.filter(token => name.includes(token) || entry.description.toLowerCase().includes(token));
+    if (tokens.length && matchedTokens.length === tokens.length) score += 300;
+    else if (matchedTokens.length) score += matchedTokens.length * 40;
+    const distance = editDistance(needle, name);
+    if (distance <= Math.max(2, Math.floor(needle.length / 3))) score += Math.max(20, 160 - distance * 10);
+    return { name: entry.name, score };
+  }).filter(entry => entry.score > 0);
+  scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  return scored.slice(0, limit).map(entry => entry.name);
+}
+
+export function unknownToolError(name) {
+  const suggestions = suggestToolNames(name);
+  const error = new Error(`Unknown tool: ${name}. This bridge exposes ${TOOLS.length} tools; use browser_tool_search to find the right one instead of guessing.`);
+  error.code = 'UNKNOWN_TOOL';
+  error.reason = 'unknown_tool';
+  error.suggestedTools = suggestions;
+  error.toolSurface = { toolCount: TOOLS.length, search: 'browser_tool_search', schema: 'browser_tool_schema' };
+  error.nextStep = {
+    kind: 'plan',
+    tool: 'browser_tool_search',
+    arguments: { query: String(name ?? '').trim() || 'browser task' },
+    why: 'Search the complete catalogue by the requested capability, then read the exact schema with browser_tool_schema. The first tools/list batch is only a core profile.'
+  };
+  return error;
+}
+
 function argSummary(name, schema) {
   const keys = Object.keys(schema.properties);
   const optional = keys.filter(key => !schema.required.includes(key));
@@ -1147,10 +1200,7 @@ function constraints(property) {
 
 export function validateCall(name, args) {
   const t = TOOLS.find(t => t.name === name);
-  if (!t) {
-    const hint = closest(name, TOOLS.map(tool => tool.name));
-    throw new Error(`Unknown tool: ${name}.${hint ? ` Did you mean "${hint}"?` : ''} Run browser_agent_guide or node src/cli.js tools to list the ${TOOLS.length} available tools.`);
-  }
+  if (!t) throw unknownToolError(name);
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('arguments must be an object');
   // Renames aliases in place, before any check: see applyArgumentAliases.
   applyArgumentAliases(name, args);

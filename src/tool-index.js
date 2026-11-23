@@ -1,11 +1,12 @@
 // The intent index: a few hundred bytes that answer "which tool do I want",
-// where the full schema dump answers it in 68.6 KB.
+// where the full schema dump costs tens of KB.
 //
-// Measured on the previous release: listing 111 tools with descriptions cost
+// Measured on an earlier release: listing 111 tools with descriptions cost
 // 68.6 KB, and a real session used 11 of them. The two extremes were both
 // unusable - names alone are not enough to choose, and descriptions are too
 // expensive to read before every task. This sits in between and is ordered by
-// what a task actually starts with.
+// what a task actually starts with. The full catalogue stays reachable through
+// browser_tool_search, so a group list is never the end of discovery.
 //
 // It is data, not prose: every name here is checked against the real tool list
 // by test/tool-index.test.js, so the index cannot advertise a tool that was
@@ -59,7 +60,8 @@ export const TOOL_GROUPS = [
     'browser_health', 'browser_debug', 'browser_failure_help', 'browser_queue_status',
     'browser_agent_advice', 'browser_wait_until_ready', 'browser_capability_guide', 'browser_bridge_modes',
     'browser_execution_profile', 'browser_debugger', 'browser_ai_status',
-    'browser_local_judge', 'browser_agent_guide', 'browser_capabilities', 'browser_tool_index'
+    'browser_local_judge', 'browser_agent_guide', 'browser_capabilities', 'browser_tool_index',
+    'browser_tool_search', 'browser_tool_schema'
   ] },
   { id: 'desktop', purpose: '原生窗口与UIA(chrome://)', tools: [
     'browser_desktop_windows', 'browser_native_snapshot', 'browser_native_action',
@@ -113,6 +115,9 @@ function matches(goal) {
     return group.tools.some(name => needle === name || (needle.length >= 8 && needle.includes(name)));
   });
 }
+
+export const groupsForGoal = goal => matches(goal);
+export const TOOL_ALIASES = ALIASES;
 
 // Ordered by first use: read and act come first because almost every task
 // starts there, and the low-frequency browser-settings group is last on purpose.

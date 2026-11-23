@@ -39,6 +39,10 @@ import { buildErrorClaims } from './extension-error-claims.js';
 import { analyzeRequest, validateVerifySpec } from './request-risk.js';
 import { withNextStep, nextStepForError } from './next-step.js';
 import { toolIndex } from './tool-index.js';
+import {
+  listToolsOrdered, toolSurfaceMeta, capabilityManifest, searchTools, getToolSchema,
+  applySurfaceFields, errorSurfaceFields
+} from './tool-surface.js';
 import { buildAgentAdvice, mergeModelAdvice } from './agent-advice.js';
 import { localModelConfig, adviseWithLocalModel } from './local-model.js';
 import { filterTabs } from './tab-filter.js';
@@ -310,7 +314,34 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         neverAssumeSuccess: 'The non-verified variant is diagnostic only — it never proves what happened. Never replay an uncertain write.'
       }
     },
+    toolSurface: toolSurfaceMeta(),
+    discoveryProtocol: {
+      firstBatch: 'tools/list starts with a core profile of everyday tools, then lists every remaining tool in declaration order. The first batch is a front page, not the catalogue.',
+      index: 'browser_tool_index gives a compact group map in a few hundred bytes.',
+      search: 'browser_tool_search searches the complete catalogue by plain language and returns ranked names with a named basis.',
+      schema: 'browser_tool_schema returns the exact arguments for one name.',
+      capabilityGuide: 'browser_capability_guide explains the route, foreground requirement and fallbacks for a stated goal.',
+      unknownName: 'An unknown tool name returns suggestedTools plus a browser_tool_search nextStep. Follow it; do not guess another spelling.',
+      conclusionRule: 'Never report a capability as missing from the first tools/list batch. Search first, then read the schema.'
+    },
+    capabilityMap: capabilityManifest().groups,
+    recipes: [
+      { goal: 'connect and see where you are', steps: ['browser_health', 'browser_tabs', 'browser_at'] },
+      { goal: 'find a control before clicking it', steps: ['browser_locate', 'browser_find_element', 'browser_prepare_action'] },
+      { goal: 'submit or save something', steps: ['browser_prepare_action', 'browser_click_verified', 'browser_read'] },
+      { goal: 'fill a form', steps: ['browser_read', 'browser_fill_verified', 'browser_click_verified'] },
+      { goal: 'navigate to a known URL', steps: ['browser_open', 'browser_navigate_verified', 'browser_at'] },
+      { goal: 'download a file the page links to', steps: ['browser_read', 'browser_download_url', 'browser_download_wait'] },
+      { goal: 'recover a stuck or failed call', steps: ['browser_failure_help', 'browser_queue_status', 'browser_agent_advice'] }
+    ],
+    warningPolicy: {
+      default: 'Capabilities are not denied by category, URL prefix or guessed name. Warnings and handoff describe risk or a missing prerequisite and are advisory.',
+      capabilityBlocks: 'Kept to the minimum: the requested route is attempted or the exact unavailable adapters are reported.',
+      integrityStops: capabilityManifest().integrityStops,
+      handoff: 'handoff.needed=true means a human must answer a Chrome/OS prompt or make a decision. Relay it honestly; it does not revoke the rest of the tool surface.'
+    },
     firstSteps: [
+      'Treat tools/list as complete: the first batch is a core profile, not the whole catalogue. Call browser_tool_search with a plain-language goal, then browser_tool_schema on the returned name. An unknown name returns suggestedTools and a search nextStep; follow it instead of guessing another spelling.',
       'Call browser_queue_status to inspect connected/active/queued state.',
       'Under concurrency, call browser_agent_advice with your goal and intended toolName before queueing: it is local, read-only, never queued, and returns one decision (proceed/wait/switch/stop), estimatedWaitMs, blockers and a simpler candidate tool chain. Follow it instead of polling blindly. modelProvider:"chrome" or "auto" only prepares an advisory browser_local_judge mode:"triage" second opinion, and a model can add caution but never turn a wait into a proceed.',
       'Start with browser_at on any page you do not already know: it answers "where am I and what can I touch" in a fixed shape (short text head, at most 8 actionable elements, counts of what was left out) instead of a page dump you would have to truncate yourself. Use browser_read only when you need the full element set, and browser_find_text/browser_find_element for a targeted look.',
@@ -336,7 +367,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       'Verified write contract: every state-changing action MUST use its _verified variant (browser_click_verified, browser_fill_verified, browser_upload_verified, browser_navigate_verified, browser_select_verified, browser_choose_verified, browser_action_verified). The non-verified variant is diagnostic only — it never proves what happened. After dispatch, an unobserved outcome is uncertain and non-retryable; re-observe and verify before the next action. Never replay an uncertain write.'
     ],
     incidentRecoveryContract: {
-      discoveryOrder: ['browser_health', 'browser_queue_status', 'browser_tool_index', 'browser_capability_guide'],
+      discoveryOrder: ['browser_health', 'browser_queue_status', 'browser_tool_search', 'browser_tool_schema', 'browser_tool_index', 'browser_capability_guide'],
       bridgeUnavailableAction: 'stop_and_report_observed_failure',
       alternateChannelRequiresExplicitUserAuthorization: true,
       noImplicitCredentialFallback: true,
@@ -388,6 +419,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     }
   });
   const capabilities = () => ({
+    toolSurface: toolSurfaceMeta(),
     ordinaryPage: { status: 'available', channels: ['extension_dom', 'accessibility', 'debugger', 'screenshot', 'coordinate_fallback'], modelRequired: false },
     protectedUi: {
       status: desktopAdapter.available ? 'partial' : 'unavailable',
@@ -2026,10 +2058,16 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
   function call(name, args, owner = null, context = {}) {
     const out = callInner(name, args, owner, context);
     return Promise.resolve(out)
-      .then(value => withNextStep(name, args ?? {}, value))
+      .then(value => {
+        const stepped = withNextStep(name, args ?? {}, value);
+        if (name === 'browser_health' && stepped && typeof stepped === 'object' && !Array.isArray(stepped)) {
+          return applySurfaceFields({ ...stepped, toolSurface: toolSurfaceMeta() });
+        }
+        return applySurfaceFields(stepped);
+      })
       .catch(error => {
         const step = nextStepForError(name, args ?? {}, error?.message ?? '');
-        if (step) error.nextStep = step;
+        if (step && !error.nextStep) error.nextStep = step;
         throw error;
       });
   }
@@ -2038,6 +2076,8 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
     if (name === 'browser_agent_guide') return agentGuide();
     if (name === 'browser_capabilities') return capabilities();
     if (name === 'browser_tool_index') return toolIndex({ goal: args.goal, group: args.group, format: args.format });
+    if (name === 'browser_tool_search') return searchTools({ query: args.query, group: args.group, limit: args.limit });
+    if (name === 'browser_tool_schema') return getToolSchema(args.name);
     if (name === 'browser_prepare_request') return prepareRequestCall(args);
     if (name === 'browser_protected_ui_plan') return protectedUiPlan({
       ...args,
@@ -2365,7 +2405,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         });
         return;
       }
-      if (req.method === 'GET' && req.url === '/tools') return json(res, 200, TOOLS);
+      if (req.method === 'GET' && req.url === '/tools') return json(res, 200, listToolsOrdered());
       if (req.method === 'GET' && req.url === '/agent/status') return json(res, 200, tasks.status());
       if (req.method === 'POST' && ['/agent/start', '/agent/cancel'].includes(req.url)) {
         if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON required' });
@@ -2385,7 +2425,7 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
       // The next step for a thrown failure travels with it. Without this the
       // caller gets a 400 with a sentence and no machine-readable move, which is
       // exactly the state the guidance exists to end.
-      if (!res.destroyed) json(res, 400, { error: e.message, ...(e.nextStep ? { nextStep: e.nextStep } : {}) });
+      if (!res.destroyed) json(res, 400, { error: e.message, ...errorSurfaceFields(e) });
     }
   });
   server.requestTimeout = 10000;

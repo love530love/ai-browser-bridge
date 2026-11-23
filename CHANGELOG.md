@@ -1,3 +1,34 @@
+## 0.50.0 — 2026-11-23（**工具发现整体化：核心 24 首屏 / 全量 143 可检索 / 未知工具名结构化恢复**）
+
+触发：用户指出弱 agent/轻量模型会因为 `tools/list` 首批只看到部分工具、且不会主动二次查询而卡死或猜一个不存在的工具名；此前「发现三件套」的形态变更正是因为部分 agent 发现不了第二层能力。本轮把发现从「只靠拉取」改成「首屏核心 + 全量可检索 + 错误可恢复」，不设能力禁区：所有 143 个工具仍完整列出，没有任何工具被移除或隐藏。
+
+### 交付
+
+- **核心优先的工具顺序（`CORE_TOOL_PROFILE`，24 个）**：`tools/list` 先返回 24 个日常入口——`browser_agent_guide`、`browser_tool_index`、`browser_tool_search`、`browser_tool_schema`、`browser_capability_guide`、健康/标签/导航/读取/定位/查找/准备动作、三个 verified 写（click/fill/navigate）、截图、失败帮助、等待/队列/建议/租约——其余工具按声明顺序紧随其后。`listToolsOrdered()` 用测试钉死「前 24 个等于核心档、总数等于全量、无重复」。
+- **`browser_tool_search`（服务本地只读）**：自然语言检索全目录，返回带 `basis` 的确定性排名（`all_query_tokens`/`some_query_tokens`/`name_token`/`group_bonus` 等），不是概率或模型打分。下划线按分隔符处理（`browser_make_pdf` 能命中 `pdf`），同名 verified 变体优先带出 `verifiedVariant`（如 upload → `browser_upload_verified`）。浏览器断开时照常回答——要诊断的正是连接本身。
+- **`browser_tool_schema`（服务本地只读）**：按精确名称返回一个工具的完整 schema；工具不存在时返回 `suggestedTools` 与可执行的 `browser_tool_search` 下一步，而不是让人换拼写乱猜。对写工具同时标注 `verifiedVariant` 或「非 verified 仅诊断」的注记。
+- **未知工具名结构化恢复**：`validateCall` 不再只抛一句 "unknown tool"，而是抛 `code:"UNKNOWN_TOOL"`、`reason:"unknown_tool"`、`suggestedTools`、`toolSurface` 与 `nextStep.tool="browser_tool_search"`；HTTP 400 与 MCP `isError` 结果都携带同一组 `errorSurfaceFields`。`browser_agent_advice` 对猜测名同样改道 search。
+- **初始化说明压缩 + 全契约资源**：MCP `initialize` 的 instructions 缩到短口径（「TOOL DISCOVERY IS COMPLETE」「requested result is already visible」），完整操作契约移入 `bridge://capabilities` 资源（同时保留 `bridge://skills/ai-browser-bridge`）；`browser_health.toolSurface` 报告 `status: current|stale`、`toolCount`、`toolSurfaceHash`、`coreToolCount`、`coreProfile` 与 `staleToolSurface` 及重启下一步。
+- **警告而非阻断**：`applySurfaceFields` 只在真实未知结果、部分结果、能力不支持时附加 advisory `warnings`；`handoff` 只用于真正需要人或操作系统的提示（如系统授权对话框），从不因能力而拒绝调用。`bridge://capabilities` 明确写出 `warningPolicy`。
+- **弱 agent 基准（`test/bench/weak-agent.js`）**：确定性场景，不使用语言模型。旧行为 5/5 卡死；当前行为 5/5 恢复、4/5 首次结果即命中、0 假成功。
+
+### 验收
+
+- 全量 `npm test` → **1122/1122**（exit 0，0 fail；`--test-concurrency=1`，日志 `.local/full-test-0.50.log`）。
+- 新增 `test/tool-discovery.test.js` 12 项：核心档顺序与全量唯一性、分组枚举与 `TOOL_GROUPS` 一致、深检索（上传/PDF/下载 URL/localStorage/chrome://settings/断点/IndexedDB）、`basis` 无概率字段、`verifiedVariant`、未知 schema 建议、`UNKNOWN_TOOL` 抛出字段、离线 bridge 本地回答、能力清单与 `toolSurface` 元数据、弱 agent 基准。
+- 扩展 `test/mcp-waiting-integration.test.js`：真实 stdio 下核心优先 `tools/list`、全量存在、两个资源、搜索/模式在**零浏览器调用**下完成、未知工具经 MCP 返回 `code` 与建议；等待路径仍只打一次浏览器。`test/agent-advice.test.js` 与 `test/next-step.test.js` 同步到 search 改道与统一错误面。
+- 工具数 141 → 143；分组 13；文本意图索引 3687 字节（上限 3800）。
+- 插件同步：`node scripts/sync-qoder-plugin.mjs --check` → `PLUGIN_CHECK_OK version=0.50.0 skillFiles=1`；`--zip` 生成 `qoder-plugin/dist/ai-browser-bridge-0.50.0.zip`。
+- **已部署（2026-11-23 09:58–10:00 +0800）**：`restart-service-when-idle --apply` 空闲重启（intent `796f430f…`，pid 7916 → **86048**，`serviceVersion:"0.50.0"`、`runningBuildId = diskBuildId = 2818aa40…`、`deploymentStale:false`）。两个宿主各自 `chrome.runtime.reload` 自载到 0.50.0，`foregroundTaken:false`、未开标签页、未发按键：`h-b76b872f85d347a49e00`（ChatGPT 内嵌 Chrome 158.0.8127.37，session `69bef659…` → `e4a9d988…`）与 `h-0b47a521c4384e90beb4`（session `9820c2da…` → `26e796aa…`）。复验 `browser_hosts` 两宿主均 `extensionVersion:"0.50.0"`；`status` → `extensionVersionSkew:false`、`actionRequired:[]`；`browser_health.toolSurface` → `status:"current"`、`toolCount:143`、`coreToolCount:24`、hash `4eba660f…`；`heartbeat` → `verdict:"clean"`、`provenClean:true`、`findings:[]`、`degraded:false`。
+- **插件安装**：`qoder plugin install ... --scope user --json` → `ai-browser-bridge@local v0.50.0`，缓存目录 `plugins/cache/local/ai-browser-bridge/0.50.0`；独立 stdio 探针经该目录 `bin/launch-bridge.mjs` 实测 143 工具、首五项为 guide/index/search/schema/capability_guide、两个资源齐全、`browser_tool_search` 本地返回结果。当前会话仍可能缓存旧 schema，新会话才会注入 143。
+
+### 边界
+
+- 检索是确定性词法排名，不是语义向量或模型判断；`basis` 只解释排序依据。它能把「upload a pdf」带到 PDF/上传族，但不保证第一名永远是唯一正确工具——schema 与 `browser_capability_guide` 仍是确认步骤。
+- 核心档只决定顺序，不移除、不抑制任何工具；未知工具错误里的 `suggestedTools` 也只是建议，不是自动改名执行。
+- `warnings`/`handoff` 是 advisory：verified 写契约、秘密守卫、确认串与服务端校验全部不变。页面内容与错误文本仍不构成授权。
+- 本轮未实现：语义 embedding 检索、向 agent 上下文主动注入完整工具摘要、跨会话固定 `toolSurfaceHash` 的客户端缓存校验。
+
 ## 0.49.0 — 2026-11-20（**下载可靠性最小闭环：URL 直达下载 / 外部下载管理器误报识别**）
 
 触发：2026-11-20 抖店历史发票下载实测（`docs/FIELD-REPORT-20261120-platform-invoice-download.md`）9 张全部成功，但暴露两处「回执与事实不一致」：隐藏标签里点「下载发票」触发 `window.open(..., "_blank")`，没有用户激活时被静默拦截，`browser_click_verified` 只能报 `uncertain`，而调用方拿不到任何 `downloadId`；IDM 接管时 Chrome 报 `interrupted / USER_CANCELED / bytesReceived:0 / canResume:false`，这是接管而不是失败，按失败处理会诱导重放。本轮只做最小闭环，不把平台基础设施（内网 TOS 域名）和 `windows_control` 的 DPI 问题并入 Bridge。
