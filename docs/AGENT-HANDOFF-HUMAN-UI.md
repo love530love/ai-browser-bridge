@@ -4,6 +4,15 @@
 
 ## 目标
 
+## 2026-11-24 接手增量（0.52.0，已部署）：重型图形验证码一等能力 / 本地靶场实测
+
+- **触发**：用户要求把字符型图形验证码与 Google 式图片九宫格（识别物品、连续多轮点选）升级为一等能力，并授权「不行就创造/安全激发一个该种重型复杂验证码的处理场景，然后边验证边修」。
+- **交付**：5 个新工具（150 总量）——`browser_captcha_probe`（全帧只读探测，`@frameN` ref，父页 iframe 清单含 srcPath）、`browser_captcha_capture`（同帧元素框 / 跨帧宿主 iframe 框裁切放大）、`browser_captcha_read_character`（高倍捕获 + 本机 Windows OCR + 长度/字符集归一，回候选、放大图与 input/submit/refresh ref，绝不代填）、`browser_captcha_refresh_verified`（只点一次刷新并轮询 token 变化）、`browser_captcha_click_verified`（token/格数复核、逐格同步观测、`submit:true` 判 `passed|next_round|rejected|uncertain`，不确定永不重放）。本地靶场 `scripts/captcha-lab/server.mjs`：父页 `:8771` + 跨域 frame `:8772`，字符码 120 秒 TTL、刷新作废、错误可见提示；九宫格两轮（正方形→圆形）、Google 选择器、错误 `.rc-imageselect-incorrect-response`、两轮全对才显示「验证成功」。实打修复 4 个真实缺陷：worker 误读 `pre.challenge` 导致刷新/点选永远 `challenge_not_found`；字符码 token 缺图片指纹且 status 路径不重识别字符对；captcha 工具 `frame` 上限 200 拒绝四位真实 frameId（1063）；read_character 不回 submit ref。
+- **实打证据（2026-11-24 15:39–15:48 +0800，标签页 hidden、零前台切换）**：字符码读图真值 `E7TX`（OCR 只回 `E7`）→ `fill_verified valueMatches` → `click_verified textAppears:"验证成功"` **elapsedMs 1**，靶场 `accepted:true`；过期提交那次被如实判 `uncertain` 且页面显示「验证码已过期」，未重放。九宫格 probe 找到 frame 1063、hosts 带 `http://127.0.0.1:8772/frame`；第 1 轮 `[0,5,6]` → `next_round`（triangles，token `d11cf94`）；第 2 轮 `[0,2,4]` → `pass_marker`；故意全选 9 格 → `failed/rejected`（错误文本「验证失败，请重试」，日志 `chosenCount:9,targetCount:4`）；刷新 `bdc3c76→7e868fff` 后再次两轮通过。本机 OCR 事实：en-US 组件缺失（纯位图也零行），`zh-Hans-CN` 可部分识别，故读码必须回原图供视觉复核。
+- **复验**：全量 `npm test` **1147/1147**（exit 0）；新增 `test/captcha.test.js` 9 项；文本意图索引 3886 字节（上限按意图 3800 → 4000）。技能同步：bridge skill 增加 captcha 全流程路由，CNIPA skill §6 的「字符码人工识别」改为 `browser_captcha_read_character` 配方。
+- **部署证据（2026-11-24 15:50–15:52 +0800）**：`restart-service-when-idle --apply` intent `68c381a7…`，pid 128304 → **53644**，`serviceVersion:"0.52.0"`、`runningBuildId = diskBuildId = c5d43ab0…`、`deploymentStale:false`；两宿主均 `extensionVersion:"0.52.0"`：`h-0b47a521c4384e90beb4`（系统 Chrome 156.0.8078.49）与 `h-b76b872f85d347a49e00`（内嵌 Chrome 158.0.8127.37）；`status` → `extensionVersionSkew:false`、`upgradeRequired:false`、`actionRequired:[]`。插件 `ai-browser-bridge@local v0.52.0` 已安装到 `plugins/cache/local/ai-browser-bridge/0.52.0`，独立 stdio 探针 **150** 工具、5 个 captcha 工具、两个资源；ZIP `ai-browser-bridge-0.52.0.zip` 22217 字节、SHA256 `da43449a…b1e1`。旧会话可能缓存 145 工具 schema，新会话才注入 150。
+- **边界**：只用于用户自己授权流程的正常安全验证；不接第三方打码、不碰凭据、不绕权限提示；字符码可能被读错（原图随回）；canvas-only 网格无逐格信号时只能 `uncertain`；点选是合成事件，站点仍自行判卷。未实现旋转/多缺口/动态难度网格、hCaptcha 专有语义、视觉模型自动选格。
+
 ## 2026-11-24 接手增量（0.51.0，已部署）：现场反馈闭环 / 滑块拼图一等能力 / PDF 与指针证据
 
 - **触发**：2026-11-24 CNIPA 商标实战两份现场报告（`docs/FIELD-REPORT-20261124-cnipa-pdfsave-blank-tab.md`、`docs/FIELD-REPORT-20261124-cnipa-sso-slider.md`）与「发送邮箱/短信验证码前的拼图拦截」反馈。

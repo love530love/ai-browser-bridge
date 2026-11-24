@@ -27,6 +27,7 @@ import { capabilityGuide } from './capability-guide.js';
 import { resolveTarget } from './locator-resolver.js';
 import { createOcrAdapter } from './ocr-adapter.js';
 import { ocrTab } from './ocr-tool.js';
+import { captchaReadCharacter } from './captcha-tool.js';
 import { PERCEPTION_MATRIX } from './perception-contract.js';
 import { createLocalStore, LOCAL_STORE_EXCLUDED } from './local-store.js';
 import { BUILD_ID } from './build-identity.js';
@@ -2168,6 +2169,20 @@ export function createBridge(config, { audit = () => {}, timeoutMs = 20000, mode
         ...(typeof args.hostId === 'string' ? { hostId: args.hostId } : {})
       };
       return ocrTab({
+        args,
+        store: getLocalStore(),
+        adapter: getOcrAdapter(),
+        callTool: (toolName, toolArgs) => call(toolName, { ...toolArgs, ...routing }, owner, context)
+      });
+    }
+    // A character captcha is the same read shape: probe and capture are child
+    // reads, and the recognized code never reaches the ledger.
+    if (name === 'browser_captcha_read_character') {
+      const routing = {
+        ...(typeof args.agent === 'string' && args.agent.trim() ? { agent: args.agent } : {}),
+        ...(typeof args.hostId === 'string' ? { hostId: args.hostId } : {})
+      };
+      return captchaReadCharacter({
         args,
         store: getLocalStore(),
         adapter: getOcrAdapter(),

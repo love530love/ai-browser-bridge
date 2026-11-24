@@ -1,3 +1,34 @@
+## 0.52.0 — 2026-11-24（**重型图形验证码一等能力：字符码读图 / 九宫格跨域点选 / 本地靶场实测（150 工具）**）
+
+触发：用户要求把「字符型图形验证码」和「Google 式图片识别物品并连续点选」从零散经验升级为可替代资深工程师的一等能力，并明确「不行就创造/安全激发一个该种重型复杂验证码的处理场景，然后边验证边修」。仓库此前只有 0.20 前后一次四位扭曲码的人工读图记录，没有任何跨域九宫格求解证据；本轮自建本地靶场，用 Bridge 自己驱动，边打边修。
+
+### 交付
+
+- **5 个新工具（145 → 150）**：`browser_captcha_probe`（只读）一次 `chrome.scripting` 注入所有可访问 frame，返回每帧 `found/kind/provider/token/instruction/error/tileCount/selectedCount` 与逐格证据（index、ref、rect、selected、图片源指纹），父页返回 iframe 清单（`srcPath`、`title`、文档坐标 rect）；所有 ref 由 worker 加 `@frameN`，其余工具按后缀路由回原帧。`browser_captcha_capture`：同帧元素按元素框裁切，跨帧挑战按父文档里的宿主 iframe 框裁切（帧内量出的 rect 会裁错像素），隐藏标签走 screencast 预热。`browser_captcha_read_character`：探测 → 高倍捕获 → 本机 Windows.Media.Ocr → 按 `expectedLength`/`charset` 归一候选，**回图片、回 input/submit/refresh ref，绝不代填**。`browser_captcha_refresh_verified`：探测 token → 点一次站点刷新控件 → worker 定时器轮询新 token（隐藏标签不受页面定时器节流影响）。`browser_captcha_click_verified`：按 `expectedToken` 复核、在真正点击的页面调用里复核 `expectedTileCount`，逐格点选（每击先做同步选中/变更判定，无变化即 `uncertain`/`retryable:false` 停止），`submit:true` 后轮询判卷：`closed|passed` = 成功、`next_round` = 新指令/新一轮、`failed` = 站点可见报错、截止无信号 = `uncertain`，**任何不确定都不自动重放**。
+- **身份与判卷口径**：token = FNV-1a(provider|kind|instruction|逐格图片指纹|图片指纹|canvas 尺寸|复选框状态)，故意不含选中态；字符码状态/刷新路径重建报告时在 root 内重新识别字符对，否则同一控件在 probe 与 status 两条路线上哈希不同、每次刷新都误报新挑战。判卷阶段区分 `challenge_closed`、`next_round`、`rejected`、`captcha_outcome_not_observed`；过期引用导致的「已关闭」用一次重新发现读消歧。
+- **本地靶场（`scripts/captcha-lab/server.mjs`，仅 127.0.0.1）**：父页 `:8771`、跨域 frame `:8772`；字符码 4 位（去掉易混字符），SVG 逐字旋转/缩放/随机色 + 噪点线，TTL 120 秒，刷新作废旧码，答案服务端大写归一，日志只记 accepted/长度、**不记录明文码**；九宫格 2 轮（先正方形后圆形），9 格 `td.rc-imageselect-tile`，指令 `请选择所有包含X(xxx)的图片`，错误显示 `.rc-imageselect-incorrect-response`，刷新按钮重新出题，两轮全对才把 root 替换为「验证成功」。选择器刻意对齐 Google recaptcha，可复制到真实站点验证。
+- **本轮现场抓出并修复的 4 个真实缺陷**（单测原样通过、只有实打才暴露）：① worker 刷新/点选把页面级 probe 的回执误读成 `pre.challenge`（页面 probe 返回的就是报告本身，只有聚合回执才包一层 `challenge`），导致刷新/点选永远 `challenge_not_found`；② 字符码 token 取 `options.image.fingerprint`（该对象没有此字段）导致 token 恒定，且 status/refresh 从 root 重建报告时 kind 变 `unknown`，刷新永远误报「新挑战」、基线永不匹配——改为 root 内重新识别字符对并把共享 `imageFingerprint` 同时用于 token 与报告；③ captcha 工具的 `frame` 上限 200 拒绝了 probe 刚返回的四位真实 frameId（1063），跨帧捕获在 schema 层就被拒——五个工具统一改为 `minimum:0` 无上限；④ `browser_captcha_read_character` 不回传 submit ref，调用方要多花一次探测而码可能已过期——challenge 块补上 `submit:{ref,text}`。
+
+### 验收
+
+- 全量 `npm test` → **1147/1147**（exit 0，0 fail）。新增 `test/captcha.test.js` 9 项：注册/索引/别名/引导（`验证码挡住了` → `captcha-verification`，滑块目标仍走 `slider-verification`）、schema 边界（含四位 frameId 放行、-1 拒绝）、候选归一（charset 过滤、长度匹配、前缀候选、空候选）、字符读取只读回执（候选 + 图片 + input/submit/refresh ref，child 调用只有 probe+capture）、网格拒绝走点选路线、缺失/异常/OCR 不可用/空结果的诚实状态、页面侧证据（选择器、bareRef、token 组成、root 重识别、`tile_count_changed`、同步首判、`uncertain` 停止、刷新只点一次）、worker 编排（全帧注入、`@frameN`、host iframe、刷新/点选不确定不可重试、`pre?.found` 回归钉）、MCP 图片块与元数据去 base64。既有套件因 5 个新工具把文本意图索引推到 **3886 字节**，两处 3800 上限按意图（~4KB、本地回答）提到 4000。
+- **实打证据（2026-11-24 15:39–15:48 +0800，本地靶场，标签页全程 hidden、零前台切换）**：
+  - 字符码：`read_character(language:"zh-Hans-CN")` 返回候选 `E7`（`lengthMatched:false`）+ 放大图 + submit ref；看图真值 `E7TX`；`browser_fill_verified`（`valueMatches:true`、`persisted:true`）→ `browser_click_verified`（`expect.textAppears:"验证成功"`）→ **`condition_met`、elapsedMs 1**；靶场日志 `accepted:true, answerLength:4`。之前一次超时提交被如实判为 `uncertain`，页面显示「验证码已过期，请刷新后重试」，日志 `accepted:false, reason:"expired"`，未重放。
+  - 九宫格：probe 一次找到 2 帧（父页 checkbox、帧 1063 内 grid，`hosts[0].srcPath=http://127.0.0.1:8772/frame`）；capture 以 `host_iframe` 框出整块题面；第 1 轮 squares 选 `[0,5,6]` → `next_round`，新指令 triangles、token `d11cf94`；第 2 轮选 `[0,2,4]` → **`pass_marker`/`passed`**；日志两轮 `accepted:true`。
+  - 错误分支：第 1 轮故意全选 9 格 → **`failed/rejected`**，`verification.error.text="验证失败，请重试"`，日志 `accepted:false, chosenCount:9, targetCount:4`，未重放。
+  - 刷新：对同一格挑战 `browser_captcha_refresh_verified` → `new_challenge`，token `bdc3c76 → 7e868fff`；随后 squares `[1,4,5,6]` → `next_round`，triangles `[2,4,5,7]` → 再次 `pass_marker`。
+  - 本机 OCR 事实：en-US 组件对纯 System.Drawing 位图也返回零行；`zh-Hans-CN` 可识别但常只认出前两位（`E7`/`6Q`/`0P`）。这正是读码必须原图随回的原因；`unavailable` 时也附图片并明确「Windows OCR 不可用」。
+- **已部署（2026-11-24 15:50–15:52 +0800）**：`restart-service-when-idle --apply` intent `68c381a7…`，pid 128304 → **53644**，`serviceVersion:"0.52.0"`、`runningBuildId = diskBuildId = c5d43ab0…`、`deploymentStale:false`。两宿主均 `extensionVersion:"0.52.0"`：`h-0b47a521c4384e90beb4`（系统 Chrome 156.0.8078.49）与 `h-b76b872f85d347a49e00`（内嵌 Chrome 158.0.8127.37）。`status` → `extensionVersionSkew:false`、`upgradeRequired:false`、`actionRequired:[]`。
+- **插件**：`node scripts/sync-qoder-plugin.mjs --check` → `PLUGIN_CHECK_OK version=0.52.0 skillFiles=1`；`--zip` → `qoder-plugin/dist/ai-browser-bridge-0.52.0.zip`（**22217 字节**，SHA256 `da43449a6b7b535b8c8b9f9d0c01ea3c063a280e4484044adbc0bf42d5e4b1e1`）。`qoder plugin install <仓库>/qoder-plugin/ai-browser-bridge --scope user --json` → `ai-browser-bridge@local v0.52.0`（`plugins/cache/local/ai-browser-bridge/0.52.0`）；独立 stdio 探针经该目录 `bin/launch-bridge.mjs` 实测 **150** 工具、首五项 guide/index/search/schema/capability_guide、5 个 captcha 工具齐全、两个资源齐全。当前会话 MCP schema 仍可能缓存 145，新会话才注入 150。
+- **技能同步**：`skills/ai-browser-bridge/SKILL.md` 新增 captcha 路由（全帧 probe、`@frameN`、四位 frameId、字符码读图后立即填交、九宫格 host iframe 捕获与判卷四态）；`skills/cnipa-trademark-online/SKILL.md` §6 把「字符码人工识别」改为 `browser_captcha_read_character` 配方（含本机 OCR 限制与刷新不重用旧码），最短路径同步。
+
+### 边界
+
+- 只用于用户自己授权流程里的正常安全验证；不接第三方打码服务、不处理凭据、不绕过 Chrome/系统权限提示。站点仍可能拒绝一个看起来正确的答案，这会被如实报告为观测到的失败，绝不盲试。
+- 字符码 OCR 是本地证据而非答案：扭曲/噪点可能读错，`empty` 不等于图片不可读，原图始终随回供视觉复核；码有有效期，读后必须立刻填交。
+- 九宫格依赖逐格 DOM 选中态。canvas-only 或没有任何可观测选中信号的控件只能回 `uncertain`，这是诚实边界而不是成功；点选是合成事件（`trusted:false`），站点仍自行判卷。
+- 本轮未实现：旋转/多缺口/动态难度网格、hCaptcha 专有语义、基于视觉模型的自动选格、跨域 frame 内逐格元素级截图（当前以宿主 iframe 整框为最小可证范围）。
+
 ## 0.51.0 — 2026-11-24（**现场反馈闭环：PDF 打印完整性 / 指针按压必定释放 / 几何与属性期望 / 滑块拼图一等能力（145 工具）**）
 
 触发：2026-11-24 CNIPA 商标实战的两份现场报告（`docs/FIELD-REPORT-20261124-cnipa-pdfsave-blank-tab.md`、`docs/FIELD-REPORT-20261124-cnipa-sso-slider.md`）与用户补充反馈：发送邮件/短信验证码前会出现拼图滑块拦截，需要及时识别、按当前（可能已过期）图像正确拼合并让流程继续。本轮把四个「回执与事实不一致」的缺口改成显式证据，并把滑块/拼图从「手算坐标硬拖」升级为一等工具；145 个工具一个未删。

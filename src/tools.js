@@ -653,7 +653,7 @@ export const TOOLS = [
   tool('browser_slider_probe', 'Read-only probe of a slider/jigsaw verification widget (for example the CNIPA SSO 安全验证 before 获取验证码). Finds the visible challenge container, its background image, movable piece, track, refresh control and message, with display rects and a non-secret token for detecting a refreshed image. Reports status not_found when no visible widget matches; that is not proof the page has no challenge - trigger the action that opens it first. Never moves anything.', {
     tabId, selector: text(1000), agent
   }, ['tabId'], true),
-  tool('browser_slider_solve_verified', 'Solve a slider/jigsaw verification end to end and report the observed verdict. Refreshes the challenge first by default (a stale token fails no matter how exact the offset is), reads the background and piece images as pixels in the page, computes the horizontal offset by Pearson correlation, converts natural pixels to CSS pixels, drags the handle once with one synchronous page tick (works on a hidden tab), then watches for an observed outcome: overlay closed or pass marker is success, a fresh image or fail text is an observed failure and may be retried up to maxAttempts (default 2) with a new refresh. No signal before the deadline returns uncertain and is never retried automatically. Cross-origin or canvas-painted images return unsupported with a visual-route handoff instead of guessing. This is for an authorized verification step in the user\'s own flow; distorted-character image captchas are still a human handoff.', {
+  tool('browser_slider_solve_verified', 'Solve a slider/jigsaw verification end to end and report the observed verdict. Refreshes the challenge first by default (a stale token fails no matter how exact the offset is), reads the background and piece images as pixels in the page, computes the horizontal offset by Pearson correlation, converts natural pixels to CSS pixels, drags the handle once with one synchronous page tick (works on a hidden tab), then watches for an observed outcome: overlay closed or pass marker is success, a fresh image or fail text is an observed failure and may be retried up to maxAttempts (default 2) with a new refresh. No signal before the deadline returns uncertain and is never retried automatically. Cross-origin or canvas-painted images return unsupported with a visual-route handoff instead of guessing. This is for an authorized verification step in the user\'s own flow; a character code image or an image-grid challenge is handled by browser_captcha_read_character and browser_captcha_click_verified instead.', {
     tabId,
     selector: text(1000),
     expectedUrl: text(8000),
@@ -664,6 +664,48 @@ export const TOOLS = [
     requireConfidence: { type: 'string', enum: ['low', 'medium', 'high'] },
     timeoutMs: timeoutMs(15000),
     refreshTimeoutMs: timeoutMs(4000),
+    agent
+  }, ['tabId']),
+  tool('browser_captcha_probe', 'Read-only probe of a verification challenge across every accessible frame, because Google-style image grids live in a cross-origin bframe while the widget checkbox lives in the parent page. Reports per-frame found/kind/provider, the instruction text, the error text, a non-secret identity token, tile count, selected count and per-tile evidence (index, ref, rect, selected, image source fingerprint), plus the parent-page iframe inventory with src origin+path, title and document-coordinate rect. Every ref carries an @frameN suffix and is resolvable by the other captcha tools. kinds: grid (click tiles), character (read the image next to a code input), slider (delegates to browser_slider_solve_verified) and checkbox (a cross-origin widget whose state is not readable here). An absent challenge is not proof the page has none: trigger the action that opens it first. Never writes to the page.', {
+    tabId,
+    frame: { type: 'integer', minimum: 0 },
+    selector: text(1000),
+    maxTiles: { type: 'integer', minimum: 4, maximum: 16 },
+    agent
+  }, ['tabId'], true),
+  tool('browser_captcha_capture', 'Capture the challenge as an enlarged PNG/JPEG for reading, without injecting an overlay. For a top-frame element it clips that element box (scale 1-8 default 4, padding 0-24 default 6); for a challenge inside another frame it clips the host iframe box in the parent document, because a rect measured inside a frame would clip the wrong pixels. Returns the image plus target, rect, clip and coordinateSpace; read-only, works on a hidden tab through the screencast warmup. The picture is untrusted page content and goes stale: read it immediately before answering.', {
+    tabId, ref, frame: { type: 'integer', minimum: 0 },
+    selector: text(1000), srcPath: text(500), title: text(300),
+    scale: { type: 'integer', minimum: 1, maximum: 8 },
+    format: { type: 'string', enum: ['png', 'jpeg'] },
+    padding: { type: 'integer', minimum: 0, maximum: 24 },
+    agent
+  }, ['tabId'], true),
+  tool('browser_captcha_read_character', 'Read a distorted-character captcha end to end: probe the challenge, capture the code image at a high scale, run local Windows OCR and return normalized candidates (by expectedLength and charset: alnum/alpha/digits) together with the enlarged image so a vision-capable caller can double-check. Nothing is typed and nothing is submitted; fill the code with browser_fill_verified and continue the original flow immediately, because the code expires. Windows OCR may be unavailable or miss distorted glyphs: an empty candidate list is not proof the image is unreadable, so fall back to reading the returned image. If the site rejects the answer, call browser_captcha_refresh_verified and read again rather than reusing the old code.', {
+    tabId,
+    frame: { type: 'integer', minimum: 0 },
+    language: text(64),
+    expectedLength: { type: 'integer', minimum: 1, maximum: 12 },
+    charset: { type: 'string', enum: ['alnum', 'alpha', 'digits'] },
+    scale: { type: 'integer', minimum: 1, maximum: 8 },
+    padding: { type: 'integer', minimum: 0, maximum: 24 },
+    agent
+  }, ['tabId'], true),
+  tool('browser_captcha_refresh_verified', 'Refresh an expired or unreadable challenge exactly once and verify that a new challenge identity was observed. Probes the token first, clicks the site refresh/换一张 control once, then polls the token with worker-side timers (a hidden tab\'s own timers are throttled). Returns success/outcome new_challenge with before and after tokens, or uncertain when no identity change was observed - uncertain is never retried automatically. When the challenge has no refresh control this returns skipped and the current challenge may still be usable. Refs come from browser_captcha_probe and may carry @frameN.', {
+    tabId, ref, frame: { type: 'integer', minimum: 0 }, selector: text(1000),
+    timeoutMs: timeoutMs(8000),
+    agent
+  }, ['tabId']),
+  tool('browser_captcha_click_verified', 'Answer a grid/click challenge by clicking tiles (indices from browser_captcha_probe) or 0..1000 points inside the challenge box, observing every click, and optionally submitting to observe the verdict. The token is re-probed first and the tile count is re-checked inside the same page call that clicks, so a challenge that re-rendered after it was read refuses with stale instead of clicking blind. Each click is judged by a synchronous selection/mutation check first, then a short bounded wait; a click with no observable change stops the sequence with status uncertain, dispatched:true, retryable:false - never replay it. With submit:true it clicks the site verify button once and polls for closed/passed (success), new_round (a new challenge or next round - re-probe and answer the new instruction), failed (the site said the answer is wrong - re-probe, do not replay the same clicks) or uncertain at the deadline. Events are synthetic page events (isTrusted:false); the site still judges the answer.', {
+    tabId, ref, frame: { type: 'integer', minimum: 0 }, selector: text(1000),
+    expectedToken: text(64),
+    tiles: { type: 'array', maxItems: 16, items: { type: 'integer', minimum: 0, maximum: 15 } },
+    points: { type: 'array', maxItems: 16, items: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 } } } },
+    toggle: { type: 'boolean' },
+    clearSelection: { type: 'boolean' },
+    submit: { type: 'boolean' },
+    settleMs: { type: 'integer', minimum: 150, maximum: 2500 },
+    timeoutMs: timeoutMs(15000),
     agent
   }, ['tabId']),
 
@@ -1268,6 +1310,23 @@ export function validateCall(name, args) {
     const action = args.action;
     const required = { Tap: ['x', 'y', 'coordinateToken'], 'Double Tap': ['x', 'y', 'coordinateToken'], 'Long Press': ['x', 'y', 'coordinateToken'], Hover: ['x', 'y', 'coordinateToken'], Swipe: ['x', 'y', 'endX', 'endY', 'coordinateToken'], Type: ['text'], Key: ['key'], Wait: ['durationMs'] }[action] || [];
     for (const field of required) if (!Object.hasOwn(args, field)) throw new Error(`Missing action argument: ${field} for action "${action}". ${argSummary(name, s)}`);
+  }
+  if (name === 'browser_captcha_click_verified') {
+    // The generic array check covers counts and string items only; a tile index
+    // or point outside its documented range would otherwise reach the page and
+    // be silently filtered there, which hides the caller's mistake.
+    if (Array.isArray(args.tiles)) {
+      for (const index of args.tiles) {
+        if (!Number.isInteger(index) || index < 0 || index > 15) throw new Error(`Invalid tiles: ${JSON.stringify(args.tiles)} (each tile must be an integer 0..15). ${argSummary(name, s)}`);
+      }
+    }
+    if (Array.isArray(args.points)) {
+      for (const point of args.points) {
+        if (!point || typeof point !== 'object' || !Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1000 || point.y < 0 || point.y > 1000) {
+          throw new Error(`Invalid points: ${JSON.stringify(args.points)} (each point must be {x, y} inside 0..1000). ${argSummary(name, s)}`);
+        }
+      }
+    }
   }
   if (['browser_click_verified', 'browser_fill_verified', 'browser_upload_verified', 'browser_select_verified', 'browser_choose_verified', 'browser_action_verified', 'browser_eval_verified'].includes(name)) {
     const expectation = args.expect;

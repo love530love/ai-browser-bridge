@@ -115,6 +115,15 @@ export const PERCEPTION_MATRIX = {
     backgroundSafe: true,
     note: 'OCR reads painted pixels, including text in a canvas, image or video that the DOM cannot expose. It is evidence, not an address: a line has no ref, role or proof of clickability, so confirm its point with browser_prepare_coordinate and perform any write through browser_action_verified. Scrolled-off text is absent. The engine inserts spaces between Han glyphs; adjacent-Han spacing is compacted and other spacing is preserved.'
   },
+  captcha: {
+    status: 'available',
+    tools: ['browser_captcha_probe', 'browser_captcha_capture', 'browser_captcha_read_character', 'browser_captcha_click_verified', 'browser_captcha_refresh_verified', 'browser_slider_solve_verified'],
+    scope: 'per-frame challenge discovery with @frameN refs, enlarged capture (element box in the top document, host iframe box for a cross-origin challenge), local OCR for character codes, per-click selection observation for image grids, and observed refresh/verdict polling; orchestration timers run in the extension service worker, so a hidden tab works',
+    requires: 'host permission for the challenge frame; character reading additionally needs Windows OCR, and an unreadable code still falls back to reading the attached image',
+    privacy: 'capture is read-only and evidence only; recognized codes are returned and never written to the local ledger; the bridge never bypasses a permission prompt and never solves on a site that forbids automation',
+    backgroundSafe: true,
+    note: 'The site judges every answer; the bridge only reports what it observed (selection changes, new challenge identity, pass marker, rejection). A character code expires: read, type and submit immediately. A grid answer that lands on a re-rendered challenge is refused as stale instead of clicked blind.'
+  },
   canvas: {
     status: 'partial',
     tools: ['browser_screenshot', 'browser_ocr', 'browser_prepare_coordinate'],

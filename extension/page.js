@@ -151,6 +151,11 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (makeCurrent) globalThis.__aiBrowserBridge = state;
     return state;
   };
+  // A ref that crossed a frame boundary carries an @frameN suffix added by the
+  // worker. Inside the owning frame the registry key is the bare ref, so every
+  // lookup strips the suffix first; otherwise a decorated ref handed back to
+  // the captcha tools (probe -> click) would look like a stale element.
+  const bareRef = ref => typeof ref === 'string' ? ref.replace(/@frame\d+$/, '') : ref;
   const stateForRef = ref => {
     const snapshot = typeof ref === 'string' ? ref.split(':', 1)[0] : '';
     return globalThis.__aiBrowserBridgeSnapshots?.get(snapshot) || (globalThis.__aiBrowserBridge?.snapshot === snapshot ? globalThis.__aiBrowserBridge : null);
@@ -498,7 +503,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   };
   const refElement = ref => {
     const state = stateForRef(ref);
-    const entry = state?.refs.get(ref);
+    const entry = state?.refs.get(bareRef(ref));
     if (!entry || state.url !== location.href || !entry.el.isConnected) return null;
     return entry.el;
   };
@@ -817,9 +822,10 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   // the direct answer to "did the toggle flip", which a page-wide digest can
   // only imply.
   const watchState = ref => {
-    if (typeof ref !== 'string' || !ref.includes(':')) return null;
-    const state = stateForRef(ref);
-    const index = Number(ref.slice(ref.indexOf(':') + 1));
+    const bare = bareRef(ref);
+    if (typeof bare !== 'string' || !bare.includes(':')) return null;
+    const state = stateForRef(bare);
+    const index = Number(bare.slice(bare.indexOf(':') + 1));
     if (!Number.isSafeInteger(index) || index < 1 || !state?.refs) return { resolved: false };
     const entry = [...state.refs.values()][index - 1];
     const el = entry?.el;
@@ -2856,7 +2862,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       if (!step || typeof step !== 'object') { out.push({ index, ok: false, reason: 'step_not_an_object' }); continue; }
       if (typeof step.ref === 'string') {
         const state = stateForRef(step.ref);
-        const el = state?.refs.get(step.ref)?.el;
+        const el = state?.refs.get(bareRef(step.ref))?.el;
         if (!el) {
           out.push({ index, ok: false, reason: 'ref_not_in_a_live_snapshot',
             message: `Ref ${step.ref} is no longer in a live snapshot. Read the page again and save while the refs are fresh, or supply a target descriptor directly.` });
@@ -3390,6 +3396,595 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       note: confidence === 'low'
         ? 'Best correlation is weak. Inspect the current challenge with browser_screenshot before dragging; a wrong drag is counted by the site as a failed attempt.'
         : 'Offset was computed locally from the two images. Drag once, then judge the outcome with browser_slider_status; never assume success from dispatch alone.'
+    };
+  }
+  // ---- CAPTCHA challenges (0.52.0) ----------------------------------------
+  // A verification challenge is page content that changes under the caller:
+  // images refresh on a timer, a wrong answer turns into a new round, and a
+  // grid re-renders between the moment it is read and the moment it is
+  // clicked. These operations therefore report the identity of what is
+  // visible now (a non-secret token), and every interaction is judged by an
+  // observed change instead of by the dispatch returning.
+  const CAPTCHA_TILE_SELECTORS = 'td.rc-imageselect-tile,.rc-imageselect-tile,[class*="captcha-tile"],[class*="verify-tile"],[class*="click-item"],[class*="select-item"]';
+  const CAPTCHA_TEXT_HINT = /验证码|校验码|图形码|动态码|点选|点击|依次|顺序|选择|请输入/i;
+  const CAPTCHA_INPUT_HINT = /captcha|verify|vcode|validate|checkcode|authcode|验证码|校验码|图形码/i;
+  const CAPTCHA_SUBMIT_HINT = /^(verify|submit|next|confirm|验证|提交|确认|下一步|确定)$/i;
+  const CAPTCHA_REFRESH_HINT = /刷新|换一张|看不清|refresh|reload|change image/i;
+  const captchaVisible = el => Boolean(el && el.isConnected && visible(el, true));
+  const captchaTextOf = (el, max = 200) => squash(el?.textContent || '').slice(0, max);
+  const captchaProviderOf = el => {
+    const sig = `${typeof el?.className === 'string' ? el.className : ''} ${el?.id || ''} ${el?.getAttribute?.('src') || ''}`.toLowerCase();
+    if (/recaptcha|rc-imageselect|rc-anchor/.test(sig)) return 'recaptcha';
+    if (/hcaptcha/.test(sig)) return 'hcaptcha';
+    if (/geetest/.test(sig)) return 'geetest';
+    if (/yidun/.test(sig)) return 'yidun';
+    return 'generic';
+  };
+  const captchaSourceFingerprint = raw => !raw ? '' : hashToken(raw.length > 4096 ? `${raw.length}:${raw.slice(-256)}` : raw);
+  const captchaInstructionOf = root => {
+    for (const selector of [
+      '#rc-imageselect-desc strong', '#rc-imageselect-desc', '#rc-imageselect-desc-no-canonical', '.rc-imageselect-desc-wrapper',
+      '.prompt-text', '.challenge-prompt', '[class*="captcha-title"]', '[class*="captcha-tip"]', '[class*="verify-title"]', '[class*="instruction"]'
+    ]) {
+      const el = findFirstIn(root, selector);
+      if (el && captchaVisible(el)) {
+        const text = captchaTextOf(el, 300);
+        if (text) return { text, selector: shortSelector(el) };
+      }
+    }
+    const whole = squash(root.innerText || '').slice(0, 600);
+    const piece = whole.split(/(?<=[。！？!?])\s*/).find(part => CAPTCHA_TEXT_HINT.test(part) && part.length <= 200);
+    return piece ? { text: piece, selector: null } : null;
+  };
+  // A grid tile paints its picture in any of three ways depending on the
+  // provider: an <img> child, a background on the tile itself, or a background
+  // on an inner div (a sprite crop). All three produce the same identity source.
+  const captchaTileSourceOf = el => {
+    const candidates = [el, ...(el.querySelectorAll ? [...el.querySelectorAll('img,div,span')].slice(0, 12) : [])];
+    let raw = '';
+    for (const node of candidates) {
+      if (!node) continue;
+      if (node.tagName === 'IMG') { raw = node.currentSrc || node.src || node.getAttribute('src') || ''; if (raw) break; continue; }
+      const bg = typeof getComputedStyle === 'function' ? (getComputedStyle(node).backgroundImage || '') : '';
+      const match = /url\((['"]?)(.*?)\1\)/.exec(bg);
+      if (match && match[2]) { raw = match[2]; break; }
+    }
+    return { raw, shown: describeSliderUrl(raw) };
+  };
+  const captchaTileSelected = el => {
+    const cls = typeof el.className === 'string' ? el.className : '';
+    if (/selected|checked|chosen|active|toggled/i.test(cls)) return true;
+    for (const attr of ['aria-checked', 'aria-pressed', 'aria-selected', 'data-selected', 'data-checked']) {
+      if (el.getAttribute?.(attr) === 'true') return true;
+    }
+    const img = el.querySelector?.('img');
+    if (img && /checked|selected|tick|correct/i.test(`${img.className || ''} ${img.alt || ''}`)) return true;
+    return false;
+  };
+  const captchaTileSignature = el => {
+    const img = el.querySelector?.('img');
+    const src = img ? (img.currentSrc || img.src || '') : '';
+    return [
+      typeof el.className === 'string' ? el.className : '',
+      el.getAttribute?.('aria-checked') || '', el.getAttribute?.('aria-pressed') || '',
+      el.getAttribute?.('data-state') || '', src.length, src.slice(-48)
+    ].join('|');
+  };
+  const captchaTilesFor = root => {
+    let nodes = [];
+    try { nodes = [...root.querySelectorAll(CAPTCHA_TILE_SELECTORS)].filter(captchaVisible); } catch { nodes = []; }
+    if (nodes.length < 3) {
+      nodes = [...root.querySelectorAll('img,canvas')].filter(node => {
+        if (!captchaVisible(node)) return false;
+        const r = node.getBoundingClientRect();
+        return r.width >= 40 && r.height >= 40;
+      });
+    }
+    if (nodes.length < 3) {
+      nodes = [...root.querySelectorAll('div,span,li')].filter(node => {
+        if (!captchaVisible(node)) return false;
+        const r = node.getBoundingClientRect();
+        if (r.width < 30 || r.height < 30) return false;
+        return /url\(/.test(getComputedStyle(node).backgroundImage || '');
+      });
+    }
+    if (nodes.length < 3 || nodes.length > 36) return [];
+    return nodes.slice(0, 16);
+  };
+  const captchaCanvasFor = root => {
+    const canvas = [...root.querySelectorAll('canvas')].find(node => {
+      if (!captchaVisible(node)) return false;
+      const r = node.getBoundingClientRect();
+      return r.width >= 160 && r.height >= 100;
+    });
+    if (!canvas) return null;
+    return { el: canvas, rect: rectOf(canvas), intrinsic: { width: canvas.width, height: canvas.height } };
+  };
+  const captchaInputCandidates = (scope = document) => {
+    const scored = [];
+    for (const el of scope.querySelectorAll('input')) {
+      if (!captchaVisible(el) || el.disabled) continue;
+      if (!['text', 'tel', 'number', 'search'].includes(String(el.type || 'text').toLowerCase())) continue;
+      const sig = `${el.name || ''} ${el.id || ''} ${el.getAttribute('placeholder') || ''} ${el.getAttribute('aria-label') || ''} ${typeof el.className === 'string' ? el.className : ''}`;
+      let score = 0;
+      if (CAPTCHA_INPUT_HINT.test(sig)) score += 5;
+      if (CAPTCHA_TEXT_HINT.test(sig)) score += 3;
+      if (el.maxLength >= 4 && el.maxLength <= 10) score += 1;
+      if (score >= 3) scored.push({ el, score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.map(item => item.el);
+  };
+  const captchaImageCandidates = (scope = document) => {
+    const out = [];
+    for (const el of scope.querySelectorAll('img,canvas')) {
+      if (!captchaVisible(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 24 || r.height < 16) continue;
+      const sig = `${typeof el.className === 'string' ? el.className : ''} ${el.id || ''} ${el.getAttribute('alt') || ''}`;
+      const src = el.tagName === 'IMG' ? (el.currentSrc || el.src || '') : '';
+      let score = 0;
+      if (CAPTCHA_INPUT_HINT.test(sig)) score += 4;
+      if (/^data:/i.test(src)) score += 1;
+      if (el.tagName === 'CANVAS') score += 1;
+      out.push({ el, score, rect: rectOf(el), src });
+    }
+    for (const el of scope.querySelectorAll('div,span')) {
+      if (!captchaVisible(el)) continue;
+      if (!/url\(/.test(getComputedStyle(el).backgroundImage || '')) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 40 || r.height < 18) continue;
+      const sig = `${typeof el.className === 'string' ? el.className : ''} ${el.id || ''}`;
+      if (!CAPTCHA_INPUT_HINT.test(sig)) continue;
+      out.push({ el, score: 4, rect: rectOf(el), src: parseSliderUrl(el) || '' });
+    }
+    return out.sort((a, b) => b.score - a.score);
+  };
+  const captchaCharacterOf = (scope = document) => {
+    const inputs = captchaInputCandidates(scope);
+    if (!inputs.length) return null;
+    const images = captchaImageCandidates(scope);
+    if (!images.length) return null;
+    const input = inputs[0];
+    const inputRect = rectOf(input);
+    let best = null;
+    for (const image of images) {
+      if (!image.rect || !inputRect) continue;
+      if (image.el === input || image.el.contains(input) || input.contains(image.el)) continue;
+      const dx = Math.max(0, image.rect.x - (inputRect.x + inputRect.width), inputRect.x - (image.rect.x + image.rect.width));
+      const dy = Math.max(0, image.rect.y - (inputRect.y + inputRect.height), inputRect.y - (image.rect.y + image.rect.height));
+      const distance = Math.round(dx + dy);
+      if (distance > 400) continue;
+      const score = image.score * 100 - distance;
+      if (!best || score > best.score) best = { ...image, distance, score };
+    }
+    if (!best) return null;
+    let root = input;
+    while (root && root !== document.body && !root.contains(best.el)) root = root.parentElement;
+    if (!root || root === document.body) root = input.parentElement || input;
+    return { root, input, image: best };
+  };
+  const captchaSubmitControl = root => {
+    const explicit = findFirstIn(root, '#recaptcha-verify-button,.rc-button-default,button[type="submit"]');
+    if (explicit && captchaVisible(explicit)) return explicit;
+    return [...root.querySelectorAll('button,[role=button],a,input[type="button"],input[type="submit"],div[class*="btn"],span[class*="btn"]')]
+      .find(el => captchaVisible(el) && CAPTCHA_SUBMIT_HINT.test(captchaTextOf(el, 80).trim())) || null;
+  };
+  const captchaRefreshControl = root => {
+    const explicit = findFirstIn(root, '#recaptcha-reload-button,[class*="refresh"],[class*="reload"],[class*="change-img"]');
+    if (explicit && captchaVisible(explicit)) return explicit;
+    return [...root.querySelectorAll('button,[role=button],a,i,span,div')]
+      .find(el => captchaVisible(el) && CAPTCHA_REFRESH_HINT.test(`${captchaTextOf(el, 80)} ${el.getAttribute?.('title') || ''} ${el.getAttribute?.('aria-label') || ''}`)) || null;
+  };
+  const captchaErrorOf = root => {
+    const el = [...root.querySelectorAll('.rc-imageselect-error-select-more,.rc-imageselect-error-dynamic-more,.rc-imageselect-incorrect-response,[class*="error-msg"],[class*="error-message"],[class*="fail-msg"]')]
+      .find(node => captchaVisible(node) && captchaTextOf(node, 200));
+    return el ? { text: captchaTextOf(el, 200), selector: shortSelector(el) } : null;
+  };
+  const captchaHostList = () => {
+    if (window !== window.top) return null;
+    const hosts = [];
+    for (const el of document.querySelectorAll('iframe')) {
+      if (!captchaVisible(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 20 || r.height < 20) continue;
+      const src = el.getAttribute('src') || '';
+      let srcPath = null;
+      try { const u = new URL(src, location.href); srcPath = `${u.origin}${u.pathname}`; } catch { srcPath = null; }
+      hosts.push({
+        selector: shortSelector(el),
+        srcPath,
+        title: el.getAttribute('title') || '',
+        name: el.getAttribute('name') || '',
+        challengeLike: /recaptcha|hcaptcha|geetest|yidun|captcha|verify/i.test(src),
+        rect: { x: Math.round((r.left + window.scrollX) * 10) / 10, y: Math.round((r.top + window.scrollY) * 10) / 10, width: Math.round(r.width * 10) / 10, height: Math.round(r.height * 10) / 10 },
+        viewportRect: rectOf(el)
+      });
+    }
+    hosts.sort((a, b) => (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+    return hosts.slice(0, 8);
+  };
+  const captchaControlReport = (el, makeRef) => el ? {
+    selector: shortSelector(el), text: captchaTextOf(el, 80), rect: rectOf(el), ref: makeRef(el)
+  } : null;
+  const captchaReportFor = (root, refsState, options = {}) => {
+    const makeRef = el => { try { return el && el.isConnected ? refsState.makeRef(el) : null; } catch { return null; } };
+    const provider = options.provider || captchaProviderOf(root);
+    const tileNodes = options.tiles || captchaTilesFor(root);
+    const tiles = tileNodes.map((el, index) => {
+      const source = captchaTileSourceOf(el);
+      return {
+        index, ref: makeRef(el), selector: shortSelector(el), rect: rectOf(el),
+        selected: captchaTileSelected(el), source: source.shown,
+        sourceFingerprint: captchaSourceFingerprint(source.raw)
+      };
+    });
+    const canvas = options.canvas !== undefined ? options.canvas : captchaCanvasFor(root);
+    const instruction = options.instruction || captchaInstructionOf(root);
+    const error = captchaErrorOf(root);
+    let input = options.input || null;
+    let image = options.image || null;
+    const checkbox = options.checkbox || null;
+    // browser_captcha_status/refresh rebuild this report from the root alone.
+    // Without re-detecting the character pair inside the root, the same widget
+    // hashed as kind 'unknown' with no image fingerprint on one route and as
+    // 'character' with a fingerprint on the other, so identities never matched
+    // and a refresh looked successful even when nothing changed.
+    if (!input && !image && !checkbox && tiles.length < 3 && !canvas) {
+      const local = captchaCharacterOf(root);
+      if (local) { input = local.input; image = local.image; }
+    }
+    const imageFingerprint = image ? captchaSourceFingerprint(image.src) : '';
+    let kind = options.kind || null;
+    if (!kind) {
+      if (checkbox) kind = 'checkbox';
+      else if (input && image) kind = 'character';
+      else if (tiles.length >= 3) kind = 'grid';
+      else if (canvas) kind = 'grid';
+      else kind = 'unknown';
+    }
+    const token = hashToken(JSON.stringify([
+      provider, kind, instruction?.text || '',
+      tiles.map(tile => tile.sourceFingerprint).join(','),
+      imageFingerprint,
+      canvas ? `${canvas.intrinsic?.width || 0}x${canvas.intrinsic?.height || 0}` : '',
+      checkbox ? String(checkbox.checked) : ''
+    ]));
+    const report = {
+      status: 'success', found: true,
+      frame: { top: window === window.top, urlPath: `${location.origin}${location.pathname}`, viewport: { width: innerWidth, height: innerHeight } },
+      provider, kind, selector: shortSelector(root), ref: makeRef(root),
+      rootClasses: squash(String(root.className || '')).slice(0, 200),
+      instruction, error,
+      token,
+      mode: checkbox ? 'checkbox' : (canvas ? 'canvas' : 'tiles'),
+      tileCount: tiles.length,
+      selectedCount: tiles.filter(tile => tile.selected).length,
+      tiles,
+      canvas: canvas ? { selector: shortSelector(canvas.el), rect: canvas.rect, intrinsic: canvas.intrinsic } : null,
+      input: input ? { selector: shortSelector(input), ref: makeRef(input), rect: rectOf(input), maxLength: input.maxLength || null, valueLength: String(input.value || '').length, placeholder: (input.getAttribute('placeholder') || '').slice(0, 120) } : null,
+      image: image ? { selector: shortSelector(image.el), ref: makeRef(image.el), rect: image.rect, source: describeSliderUrl(image.src), fingerprint: imageFingerprint } : null,
+      checkbox,
+      refresh: captchaControlReport(options.refresh || captchaRefreshControl(root), makeRef),
+      submit: captchaControlReport(options.submit || captchaSubmitControl(root), makeRef),
+      ...(options.extra || {})
+    };
+    return report;
+  };
+  const captchaExplicitRoot = selector => {
+    if (typeof selector !== 'string' || !selector.trim()) return null;
+    try { return document.querySelector(selector.trim()); } catch { return null; }
+  };
+  const captchaDetect = (refsState, selector) => {
+    const explicit = captchaExplicitRoot(selector);
+    if (selector && selector.trim()) {
+      if (!explicit) return null;
+      return { root: explicit, report: captchaReportFor(explicit, refsState) };
+    }
+    const reports = [];
+    const push = (root, report) => { if (report && report.found) reports.push({ root, report }); };
+    // reCAPTCHA challenge frame (bframe): the grid lives here.
+    const recaptchaRoot = [...document.querySelectorAll('#rc-imageselect,.rc-imageselect')].find(captchaVisible);
+    if (recaptchaRoot) push(recaptchaRoot, captchaReportFor(recaptchaRoot, refsState, { provider: 'recaptcha' }));
+    // hCaptcha challenge: usually one large canvas plus a prompt.
+    const hcaptchaRoot = [...document.querySelectorAll('.challenge-container,#challenge-stage,.challenge-view')].find(captchaVisible);
+    if (hcaptchaRoot) push(hcaptchaRoot, captchaReportFor(hcaptchaRoot, refsState, { provider: 'hcaptcha' }));
+    // Geetest / Yidun click-text and grid challenges.
+    for (const root of [...document.querySelectorAll('.geetest_panel,.geetest_holder,[class*="yidun_popup"],[class*="yidun_panel"]')].filter(captchaVisible)) {
+      push(root, captchaReportFor(root, refsState, { provider: captchaProviderOf(root) }));
+    }
+    // Generic character captcha: a labelled code image next to a code input.
+    const character = captchaCharacterOf();
+    if (character) {
+      push(character.root, captchaReportFor(character.root, refsState, {
+        provider: captchaProviderOf(character.root), kind: 'character',
+        input: character.input, image: character.image, tiles: []
+      }));
+    }
+    // Generic grid / canvas challenges inside a captcha-looking container.
+    for (const root of [...document.querySelectorAll('[class*="captcha"],[id*="captcha"],[class*="verify-box"],[class*="verifybox"],[class*="verify-code"],[class*="vcode"]')].filter(captchaVisible)) {
+      const tiles = captchaTilesFor(root);
+      const canvas = captchaCanvasFor(root);
+      const instruction = captchaInstructionOf(root);
+      if (tiles.length >= 3 || (canvas && (instruction || /点选|点击|选择/.test(squash(root.innerText || ''))))) {
+        if (!reports.some(item => item.root === root)) {
+          push(root, captchaReportFor(root, refsState, { provider: captchaProviderOf(root) }));
+        }
+      }
+    }
+    // reCAPTCHA / hCaptcha widget in the parent page: cross-origin checkbox.
+    for (const el of document.querySelectorAll('iframe[src*="recaptcha/api2/anchor"],iframe[src*="hcaptcha.com"],iframe[title*="reCAPTCHA"],iframe[title*="hCaptcha"]')) {
+      if (!captchaVisible(el)) continue;
+      const provider = captchaProviderOf(el);
+      push(el, captchaReportFor(el, refsState, {
+        provider, kind: 'checkbox', tiles: [], canvas: null, instruction: null,
+        checkbox: { selector: shortSelector(el), ref: (() => { try { return refsState.makeRef(el); } catch { return null; } })(), rect: rectOf(el), checked: null, host: 'iframe' },
+        extra: { note: 'The widget is a cross-origin iframe. Its checkbox state is not readable from this frame; click it with browser_click_verified to open the challenge, then probe again.' }
+      }));
+    }
+    // Slider / jigsaw: report it here so one probe answers "what is blocking me".
+    const slider = sliderRootFor(null);
+    if (slider) {
+      const parts = sliderPartsOf(slider);
+      push(slider, captchaReportFor(slider, refsState, {
+        provider: captchaProviderOf(slider), kind: 'slider', tiles: [],
+        instruction: null,
+        extra: {
+          slider: { piece: parts.piece ? shortSelector(parts.piece) : null, background: parts.background ? shortSelector(parts.background) : null },
+          note: 'This is a slider/jigsaw challenge. Use browser_slider_solve_verified; it refreshes, solves and judges the outcome in one verified call.'
+        }
+      }));
+    }
+    const rank = { grid: 0, character: 1, slider: 2, checkbox: 3, unknown: 4 };
+    reports.sort((a, b) => (rank[a.report.kind] ?? 5) - (rank[b.report.kind] ?? 5) || (b.report.selectedCount - a.report.selectedCount));
+    return reports[0] || null;
+  };
+  const captchaTargetOf = (args, refsState) => {
+    if (typeof args.ref === 'string') {
+      const byRef = refElement(args.ref);
+      if (byRef && captchaVisible(byRef)) return byRef;
+      if (!args.selector || !String(args.selector).trim()) return null;
+    }
+    const bySelector = captchaExplicitRoot(args.selector);
+    if (bySelector && captchaVisible(bySelector)) return bySelector;
+    if (typeof args.selector === 'string' && args.selector.trim()) return null;
+    const detection = captchaDetect(refsState, null);
+    return detection ? detection.root : null;
+  };
+  if (name === 'browser_captcha_probe') {
+    const refsState = newRefState({ makeCurrent: false });
+    const refTarget = typeof args.ref === 'string' ? refElement(args.ref) : null;
+    const detection = refTarget
+      ? (captchaVisible(refTarget) ? { root: refTarget, report: captchaReportFor(refTarget, refsState) } : null)
+      : captchaDetect(refsState, args.selector);
+    const hosts = captchaHostList();
+    const maxTiles = Math.min(16, Math.max(4, Number.isInteger(args.maxTiles) ? args.maxTiles : 16));
+    const frame = { top: window === window.top, urlPath: `${location.origin}${location.pathname}`, viewport: { width: innerWidth, height: innerHeight } };
+    if (!detection) {
+      return {
+        status: 'success', found: false, frame,
+        ...(hosts ? { hosts } : {}),
+        note: 'No visible verification challenge matched in this frame. An absent widget is not proof the page has none: trigger the action that opens it first, then probe again.'
+      };
+    }
+    const report = detection.report;
+    if (Array.isArray(report.tiles) && report.tiles.length > maxTiles) {
+      report.tiles = report.tiles.slice(0, maxTiles);
+      report.tilesTruncated = true;
+    }
+    return { ...report, ...(hosts ? { hosts } : {}) };
+  }
+  if (name === 'browser_captcha_status') {
+    const refsState = newRefState({ makeCurrent: false });
+    const root = captchaTargetOf(args, refsState);
+    if (!root || !captchaVisible(root)) {
+      return { status: 'success', phase: 'closed', present: false, token: null, selectedCount: 0 };
+    }
+    const report = captchaReportFor(root, refsState);
+    const passed = /验证成功|通过验证|验证通过|success|verified/i.test(squash(root.innerText || '').slice(0, 400));
+    let phase = report.error ? 'failed' : (passed || (report.kind === 'checkbox' && report.checkbox?.checked) ? 'passed' : 'pending');
+    if (phase === 'pending' && typeof args.baselineToken === 'string' && args.baselineToken) {
+      if (report.token !== args.baselineToken) phase = 'new_round';
+      else if (Number.isInteger(args.baselineSelectedCount) && args.baselineSelectedCount > 0 && report.selectedCount === 0) phase = 'new_round';
+    }
+    return {
+      status: 'success', phase, present: true, token: report.token,
+      kind: report.kind, instruction: report.instruction?.text ?? null,
+      selectedCount: report.selectedCount, error: report.error, checkbox: report.checkbox
+    };
+  }
+  // The refresh click is dispatched here and judged by the worker, whose
+  // timers keep running while this frame is hidden; a page-side wait would
+  // silently stretch under background-tab throttling.
+  if (name === 'browser_captcha_refresh') {
+    const refsState = newRefState({ makeCurrent: false });
+    const root = captchaTargetOf(args, refsState);
+    if (!root) return { status: 'not_found', found: false, dispatched: false, reason: 'challenge_not_found' };
+    const before = captchaReportFor(root, refsState);
+    const control = captchaRefreshControl(root);
+    if (!control) return { status: 'skipped', found: true, dispatched: false, reason: 'refresh_control_not_found', token: before.token,
+      note: 'No refresh control was found. The current challenge may still be usable; capture and read it now.' };
+    control.click();
+    return {
+      status: 'dispatched', found: true, dispatched: true,
+      selector: shortSelector(control), text: captchaTextOf(control, 80),
+      beforeToken: before.token,
+      note: 'Refresh was clicked once. The challenge identity is unknown until a follow-up status or a fresh capture is compared.'
+    };
+  }
+  if (name === 'browser_captcha_click') {
+    const refsState = newRefState({ makeCurrent: false });
+    const root = captchaTargetOf(args, refsState);
+    if (!root) return { status: 'not_found', found: false, dispatched: false, reason: 'challenge_not_found' };
+    const tiles = captchaTilesFor(root);
+    const expectedCount = Number.isInteger(args.expectedTileCount) ? args.expectedTileCount : null;
+    if (expectedCount !== null && tiles.length !== expectedCount) {
+      return { status: 'stale', found: true, dispatched: false, reason: 'tile_count_changed', expectedCount, actualCount: tiles.length,
+        note: 'The challenge re-rendered between probe and click. Probe and capture it again before clicking; nothing was clicked.' };
+    }
+    const canvas = captchaCanvasFor(root);
+    const pointBase = (canvas ? canvas.el : root).getBoundingClientRect();
+    const indexList = Array.isArray(args.tiles) ? args.tiles.filter(Number.isInteger) : [];
+    const pointList = Array.isArray(args.points) ? args.points.filter(p => p && Number.isFinite(p.x) && Number.isFinite(p.y)) : [];
+    if (!indexList.length && !pointList.length) {
+      return { status: 'skipped', found: true, dispatched: false, reason: 'nothing_to_click' };
+    }
+    let mutations = 0;
+    const observer = new MutationObserver(list => { mutations += list.length; });
+    observer.observe(root, { subtree: true, childList: true, attributes: true, characterData: true });
+    const clickTimeout = Math.min(2500, Math.max(150, Number(args.settleMs) || 700));
+    const press = (el, x, y) => {
+      const base = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, view: window };
+      try { el.dispatchEvent(new PointerEvent('pointerdown', { ...base, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true })); } catch { /* pointer events unavailable */ }
+      el.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 }));
+      try { el.dispatchEvent(new PointerEvent('pointerup', { ...base, buttons: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true })); } catch { /* pointer events unavailable */ }
+      el.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
+      el.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 }));
+    };
+    const centerOf = el => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; };
+    // Check synchronously first: widget handlers usually toggle the
+    // selection class inside the dispatched click, and that answer stays
+    // valid even when this frame is hidden and its timers are throttled.
+    const waitTileChange = async (el, beforeSignature, beforeMutations) => {
+      if (captchaTileSignature(el) !== beforeSignature) return { changed: true, by: 'tile_state', synchronous: true };
+      if (mutations > beforeMutations) return { changed: true, by: 'dom_mutation', synchronous: true };
+      const deadline = Date.now() + clickTimeout;
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 80));
+        if (captchaTileSignature(el) !== beforeSignature) return { changed: true, by: 'tile_state' };
+        if (mutations > beforeMutations) return { changed: true, by: 'dom_mutation' };
+      }
+      return { changed: false, by: null };
+    };
+    const clicks = [];
+    let stopped = null;
+    try {
+      if (args.clearSelection === true) {
+        for (let index = 0; index < tiles.length; index++) {
+          if (!captchaTileSelected(tiles[index])) continue;
+          const beforeSignature = captchaTileSignature(tiles[index]);
+          const beforeMutations = mutations;
+          const point = centerOf(tiles[index]);
+          press(tiles[index], point.x, point.y);
+          const observed = await waitTileChange(tiles[index], beforeSignature, beforeMutations);
+          clicks.push({ kind: 'tile', index, action: 'deselect', point, ...observed });
+          if (!observed.changed) { stopped = { index, action: 'deselect', reason: 'click_not_observed' }; break; }
+        }
+      }
+      if (!stopped) {
+        for (const index of indexList) {
+          const tile = tiles[index];
+          if (!tile) { stopped = { index, reason: 'tile_index_out_of_range' }; break; }
+          if (captchaTileSelected(tile) && args.toggle !== true) {
+            clicks.push({ kind: 'tile', index, action: 'already_selected', changed: false, skipped: true });
+            continue;
+          }
+          const beforeSignature = captchaTileSignature(tile);
+          const beforeMutations = mutations;
+          const point = centerOf(tile);
+          press(tile, point.x, point.y);
+          const observed = await waitTileChange(tile, beforeSignature, beforeMutations);
+          clicks.push({ kind: 'tile', index, action: 'select', point, ...observed, selectedAfter: captchaTileSelected(tile) });
+          if (!observed.changed) { stopped = { index, reason: 'click_not_observed' }; break; }
+        }
+      }
+      if (!stopped) {
+        for (const point of pointList) {
+          const x = Math.round(pointBase.left + Math.min(1000, Math.max(0, point.x)) / 1000 * pointBase.width);
+          const y = Math.round(pointBase.top + Math.min(1000, Math.max(0, point.y)) / 1000 * pointBase.height);
+          const hit = document.elementFromPoint(x, y) || canvas?.el || root;
+          const beforeMutations = mutations;
+          press(hit, x, y);
+          await new Promise(resolve => setTimeout(resolve, Math.min(350, clickTimeout)));
+          const changed = mutations > beforeMutations;
+          clicks.push({ kind: 'point', point: { x: point.x, y: point.y }, client: { x, y }, changed, by: changed ? 'dom_mutation' : null });
+        }
+      }
+    } finally {
+      observer.disconnect();
+    }
+    const after = captchaReportFor(root, refsState);
+    const selectionChanges = clicks.filter(click => click.changed === true && click.by === 'tile_state').length;
+    const tileClicks = clicks.filter(click => click.kind === 'tile' && !click.skipped);
+    return {
+      status: stopped ? 'uncertain' : 'clicked',
+      found: true, dispatched: clicks.filter(click => !click.skipped).length > 0,
+      mode: canvas ? 'canvas' : 'tiles',
+      clicks, stopped, selectionChanges,
+      perClickObservation: tileClicks.length ? 'tile_state_or_mutation' : 'not_observable',
+      token: after.token, selectedCount: after.selectedCount,
+      note: stopped
+        ? 'A click produced no observable state change, so the sequence stopped there. Do not replay it: re-probe and inspect a fresh capture first.'
+        : 'Clicks were dispatched with synthetic page events (isTrusted:false). Selection state is observed per click; the site still judges the answer when you submit.'
+    };
+  }
+  if (name === 'browser_captcha_submit') {
+    const refsState = newRefState({ makeCurrent: false });
+    const root = captchaTargetOf(args, refsState);
+    if (!root) return { status: 'not_found', found: false, dispatched: false, reason: 'challenge_not_found' };
+    const control = captchaSubmitControl(root);
+    if (!control) return { status: 'skipped', found: true, dispatched: false, reason: 'submit_not_found',
+      note: 'No submit control was found. If the challenge has no submit (some click captchas submit on the last click), read the page for the form button; do not guess coordinates.' };
+    const before = captchaReportFor(root, refsState);
+    const r = control.getBoundingClientRect();
+    const x = Math.round(r.left + r.width / 2);
+    const y = Math.round(r.top + r.height / 2);
+    const base = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, view: window };
+    control.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 }));
+    control.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
+    control.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 }));
+    return {
+      status: 'dispatched', found: true, dispatched: true,
+      selector: shortSelector(control), text: captchaTextOf(control, 80),
+      beforeToken: before.token, beforeSelectedCount: before.selectedCount,
+      note: 'Submit was clicked once. The verdict is not known until the challenge closes, changes to a new round or shows an error.'
+    };
+  }
+  if (name === 'browser_captcha_host') {
+    if (window !== window.top) return { status: 'not_found', found: false, reason: 'not_top_frame' };
+    const wanted = typeof args.srcPath === 'string' ? args.srcPath : '';
+    const wantedTitle = typeof args.title === 'string' ? args.title : '';
+    const candidates = [];
+    for (const el of document.querySelectorAll('iframe')) {
+      if (!captchaVisible(el)) continue;
+      const src = el.getAttribute('src') || '';
+      let srcPath = null;
+      try { const u = new URL(src, location.href); srcPath = `${u.origin}${u.pathname}`; } catch { srcPath = null; }
+      candidates.push({ el, srcPath, title: el.getAttribute('title') || '', name: el.getAttribute('name') || '' });
+    }
+    let match = wanted ? candidates.find(item => item.srcPath === wanted) : null;
+    if (!match && wantedTitle) match = candidates.find(item => item.title === wantedTitle);
+    if (!match && wanted) match = candidates.find(item => item.srcPath && (item.srcPath.startsWith(wanted) || wanted.startsWith(item.srcPath)));
+    if (!match) {
+      return { status: 'not_found', found: false, reason: 'host_iframe_not_found', wantedSrcPath: wanted || null, wantedTitle: wantedTitle || null,
+        candidates: candidates.slice(0, 8).map(item => ({ selector: shortSelector(item.el), srcPath: item.srcPath, title: item.title, name: item.name })),
+        note: 'No visible iframe matched that frame. Read the parent page and use the iframe element ref with browser_captcha_capture instead of guessing.' };
+    }
+    const el = match.el;
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    const rect = el.getBoundingClientRect();
+    return {
+      status: 'success', found: true, selector: shortSelector(el),
+      rect: { x: Math.round((rect.left + window.scrollX) * 10) / 10, y: Math.round((rect.top + window.scrollY) * 10) / 10, width: Math.round(rect.width * 10) / 10, height: Math.round(rect.height * 10) / 10 },
+      viewport: { width: innerWidth, height: innerHeight, scrollX: window.scrollX, scrollY: window.scrollY },
+      devicePixelRatio: window.devicePixelRatio || 1,
+      visibilityState: document.visibilityState,
+      note: 'The clip is the iframe box in the parent document, which is the only correct coordinate space for a cross-origin challenge frame.'
+    };
+  }
+  if (name === 'browser_captcha_box') {
+    const el = (typeof args.ref === 'string' ? refElement(args.ref) : null) || captchaExplicitRoot(args.selector);
+    if (!el) return { status: 'not_found', found: false, reason: 'target_not_found',
+      note: 'Pass the ref returned by browser_captcha_probe or a selector for this frame. A ref from another frame cannot be resolved here.' };
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    const rect = el.getBoundingClientRect();
+    if (!(rect.width >= 1 && rect.height >= 1)) return { status: 'failed', found: true, reason: 'no_layout_box' };
+    return {
+      status: 'success', found: true, selector: shortSelector(el),
+      rect: { x: Math.round((rect.left + window.scrollX) * 10) / 10, y: Math.round((rect.top + window.scrollY) * 10) / 10, width: Math.round(rect.width * 10) / 10, height: Math.round(rect.height * 10) / 10 },
+      viewport: { width: innerWidth, height: innerHeight, scrollX: window.scrollX, scrollY: window.scrollY },
+      devicePixelRatio: window.devicePixelRatio || 1,
+      visibilityState: document.visibilityState
     };
   }
   if (name === 'browser_expect') {

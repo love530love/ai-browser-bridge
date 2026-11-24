@@ -25,7 +25,9 @@ export const TOOL_GROUPS = [
     'browser_choose_verified', 'browser_pick', 'browser_key', 'browser_hover', 'browser_scroll',
     'browser_scroll_element', 'browser_action', 'browser_action_verified',
     'browser_prepare_coordinate', 'browser_drag', 'browser_upload', 'browser_upload_verified',
-    'browser_slider_probe', 'browser_slider_solve_verified', 'browser_dialog', 'browser_wait'
+    'browser_slider_probe', 'browser_slider_solve_verified', 'browser_captcha_probe',
+    'browser_captcha_capture', 'browser_captcha_read_character', 'browser_captcha_click_verified',
+    'browser_captcha_refresh_verified', 'browser_dialog', 'browser_wait'
   ] },
   { id: 'overlay', purpose: '遮挡层、浮层、toast、tooltip', tools: [
     'browser_scan_overlays', 'browser_dismiss_overlay', 'browser_transient', 'browser_popup'
@@ -86,7 +88,8 @@ export const TOOL_GROUPS = [
 const ALIASES = {
   network: ['api', '接口', 'post', 'get', 'http', '请求', '回读', 'verify', '写操作', 'fetch', 'header', 'headers', '请求头', 'authorization'],
   act: ['点击', '输入', '填写', '上传', '附件', 'click', 'fill', 'type', 'upload', 'attach file', '提交', 'submit',
-    '滑块', '拼图', '验证码', '安全验证', 'slider', 'slide verify', 'jigsaw', 'captcha', 'puzzle'],
+    '滑块', '拼图', '验证码', '安全验证', 'slider', 'slide verify', 'jigsaw', 'captcha', 'puzzle',
+    '图片验证码', '字符验证码', '点选', '方格', '图形码', 'image captcha', 'grid captcha', 'click captcha', 'recaptcha'],
   read: ['读', '文本', '元素', 'text', 'dom', '内容', 'js', 'eval', 'evaluate', '脚本', 'script', 'expression', '执行', 'ocr', '识别文字', '图片文字', '画布文字', '源码', 'source map', 'sourcemap', 'f12', '脚本清单', '脚本列表', '事件监听', 'listener', '监听器', '组件树', 'react', 'vue', 'angular', 'svelte', 'component tree', 'dom快照', 'dom 快照', '框架', 'css', '样式', '层叠', 'cascade'],
   overlay: ['遮挡', '弹窗', '蒙层', 'covered', 'popup', 'toast'],
   tab: ['标签页', '窗口', 'tab', 'navigate', '打开'],

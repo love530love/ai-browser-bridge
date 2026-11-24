@@ -27,9 +27,9 @@ test('the whole index stays small enough to read before a task', () => {
   assert.equal(result.groups.length, TOOL_GROUPS.length);
   const bytes = Buffer.byteLength(result.index, 'utf8');
   // 0.47.0 added browser_eval_verified and browser_capture_element; 0.48.0
-  // added five more names. The ceiling moves by the names, not by an order of
-  // magnitude.
-  assert.ok(bytes < 3800, `the index must stay a fraction of the 68.6 KB catalogue, got ${bytes} bytes`);
+  // added five more names; 0.52.0 added the five captcha tools. The ceiling
+  // moves by the names, not by an order of magnitude.
+  assert.ok(bytes < 4000, `the index must stay a fraction of the 68.6 KB catalogue, got ${bytes} bytes`);
   for (const group of TOOL_GROUPS) assert.ok(result.index.includes(group.id), `${group.id} must be in the text index`);
 });
 

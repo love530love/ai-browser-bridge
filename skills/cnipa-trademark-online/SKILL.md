@@ -119,7 +119,8 @@ CNIPA 的 antd Upload 把 `input[type=file]` 设为 `display:none`。分三种�
 3. **判成功**：只认观测结果 `outcome: overlay_closed | pass_marker`；相关系数只是置信度，不是成功。`status:'uncertain'`（`slider_outcome_not_observed`）时重新观察页面，**不要重放拖拽**；`confidence_below_requirement` 表示未拖拽，先看 `confidence`/`margin`/`images` 再决定是否放宽。
 4. **收尾**：验证过后若验证码并未真正发出，回到页面再点一次「获取验证码」，用页面文本/`browser_login_state` 确认，再走 `browser_otp_fetch` 读码（核对 sender）。滑块若再次弹出，重新 probe 即可。
 
-注意区分：登录页的**字符型图形验证码**（扭曲字母数字）不在此能力范围，仍是人工或 `browser_capture_element` 放大后人工识别；本工具只解决拼图/滑块类。
+注意区分：登录页的**字符型图形验证码**（扭曲字母数字）用 0.52.0 起的一等能力，不要人工死等：
+`browser_captcha_probe`（全帧探测）→ `browser_captcha_read_character`（放大截图 + 本机 OCR，回 `candidates` 与图片，**不代填**）→ 看清/核对后 `browser_fill_verified`（`expect.valueMatches`）→ `browser_click_verified`（`expect.textAppears:"验证成功"` 或页面登入变化）。OCR 结果可能偏短（本机 en-US OCR 组件缺失时中文环境用 `language:"zh-Hans-CN"`，实测仍可能只认出前两位），**以返回的放大图片为准**；码有有效期，读后立刻填交，被拒就 `browser_captcha_refresh_verified` 换一张重读，**绝不复用旧码**。拼图/滑块类仍走本节。
 
 ---
 
@@ -141,7 +142,7 @@ CNIPA 的 antd Upload 把 `input[type=file]` 设为 `display:none`。分三种�
 
 M4 完成标准：新会话按 README 可在 30 分钟内复现 94896138 同类申请。最短路径沿用现场报告 §五「本次成功的完整路径（可复现）」的骨架，替换为注册申请模块入口与差异项（§七、外部 `runbooks/01_注册申请.md`）：
 
-1. `browser_open` 显式固定 `hostId` → `https://sso.cnipa.gov.cn` 法人登录（三要素；字符图形验证码人工识别；出现滑块/拼图先按 §6 解掉）→ 自动跳 toas。
+1. `browser_open` 显式固定 `hostId` → `https://sso.cnipa.gov.cn` 法人登录（三要素；字符图形验证码按 §6「注意区分」用 `browser_captcha_read_character` 读图填入；出现滑块/拼图先按 §6 解掉）→ 自动跳 toas。
 2. 直接访问注册入口 `.../onlineApplication/applyRegister/registerApply?code=toas_00501`（不要从菜单一层层点）。
 3. 步骤1 申请人信息：名称/信用代码自动带出；**地址补全到门牌号**且以「省+市+县/区」开头；受控组件用 `snippets/antd-input.js` 的原生 setter。
 4. 商标声明 + 图样：`#form_item_imageAttJson` 只收 JPG，400–1500 px、< 2 MB；「商标说明」必填；共同申请一般选「否」。

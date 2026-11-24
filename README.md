@@ -4,7 +4,9 @@
 
 **Agent 操作契约**：新 MCP 连接的初始化说明自动包含 [操作 Skill](skills/ai-browser-bridge/SKILL.md)，也可通过 MCP 资源 `bridge://skills/ai-browser-bridge` 读取同一份内容。已有客户端需要重新连接。初始化会传递说明，但客户端是否展示、模型是否遵守取决于客户端；这不代替服务端租约、权限和动作验证。无需重新加载 Chrome 扩展。
 
-一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.51.0**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+一个可自行修改、运行的 Chrome Manifest V3 扩展，将网页提供给支持 MCP、HTTP 或命令行的 AI。当前源码版本 **0.52.0**，默认允许所有 HTTP / HTTPS 网站，也可切换为指定网站列表。
+
+0.52.0 把两类重型图形验证码做成一等能力：**字符型图形码**与**Google 式九宫格图片点选**。新增 5 个工具（150 个工具总量）：`browser_captcha_probe` 在一个只读调用里探测所有可访问 frame（跨域 bframe 里的网格与父页的复选框各归其位），给每个 ref 加 `@frameN`、返回父页 iframe 清单（srcPath/title/rect）与非秘密 token；`browser_captcha_capture` 对同帧元素按元素框、对跨帧挑战按父文档中的宿主 iframe 框裁切放大（帧内量出的 rect 会裁错像素）；`browser_captcha_read_character` 端到端读字符码：放大捕获 + 本机 Windows OCR + 按 expectedLength/charset 归一候选，**返回图片且绝不代填**；`browser_captcha_refresh_verified` 只刷新一次并观测 token 变化；`browser_captcha_click_verified` 按 token 与格数复核后逐格点选（每击先做同步选中/变更判定，无变化即 `uncertain` 且不重放），`submit:true` 后区分 `passed`（关闭/通过标记）、`next_round`（新 token 或重新发现的挑战）、`rejected`（站点可见报错）与 `uncertain`（截止无信号）。标签页隐藏时轮询定时器跑在扩展 service worker，所以后台标签可完成整套判卷。用自建本地靶场（`scripts/captcha-lab/`，字符码 120 秒过期 + 跨域 iframe 两轮九宫格，含错误可见提示与刷新）实测：字符码读图→填写→提交→`验证成功` 且服务端 `accepted:true`；九宫格两轮点选均被接受，故意全选被拒时回 `failed/rejected` 并带出站点错误文本，刷新后 token 轮换、再答一次通过。工具数 150；全量测试 1147/1147。本轮现场抓出并修复四个缺陷：worker 把页面级 probe 的回执误读成 `.challenge` 导致刷新/点选永远 `challenge_not_found`；字符码 token 不含图片指纹且状态路径重建报告时不重识别字符对，导致刷新误报新挑战、基线永不匹配；captcha 工具的 `frame` 上限 200 拒绝了探测刚返回的四位真实 frameId；`browser_captcha_read_character` 不回传 submit ref，逼调用方多花一次探测而码可能已过期。
 
 0.51.0 来自 2026-11-24 CNIPA 商标实战的两份现场报告和「发验证码前的拼图拦截」反馈。`browser_pdf_save` 打印前探测打开浮层并自动切换打印媒体，源标签被打印管线置空时回 `tabBlanked`/恢复指令，下载记录不可见时不再暗示成功；指针路径在按下后必定释放（看门狗 + 页面级 `mouseup` 回退），回执带 `release:{reason,method,released,x,y}`；`anyChange` 增加内联样式/class 签名，新增 `elementGeometryChange` 与 `anyAttributeChange` 两个基线绑定匹配器；新增 `browser_slider_probe` 与 `browser_slider_solve_verified`——刷新优先、页面内像素相关求解、同步拖拽（隐藏标签可用）、只认 `overlay_closed|pass_marker` 为成功，未观测到结果回 `uncertain` 且绝不重放。工具数 145；字符型图形验证码仍交人工。全量测试 1138/1138。发版面已同步：服务 0.51.0（pid 47940，buildId `88bb837b…`）、两个扩展宿主均为 0.51.0（重载未抢前台）、插件 0.51.0（stdio 探针 145 工具）、`status` 零陈旧/零版本偏移，GitHub Release `v0.51.0` 的插件包已回读并核对 SHA256（部署与发布证据见 [CHANGELOG](CHANGELOG.md)）。
 
@@ -116,7 +118,7 @@ AI Browser Bridge 是一个本机优先的浏览器操控编排层，服务与�
 - 版本号必须同时更新 `package.json`、`package-lock.json` 的两个版本字段、`extension/manifest.json` 和 `CHANGELOG.md`；插件 Skill 副本与 ZIP 也要同步，再创建同名 Git tag 与 GitHub Release。
 - Release 必须包含变更、验证结果、升级步骤和已知限制；只有“已实现并有测试或实测证据”的能力才可列入已完成清单。
 
-### 当前版本升级指南（0.51.0）
+### 当前版本升级指南（0.52.0）
 
 > **只 `git pull` 不等于升级完成。** 磁盘代码、运行中的服务进程、Chrome 里加载的扩展、`.local/config.json` 的新字段是四层独立状态；只更新第一层会出现「面板已连接、体检却跑在旧代码上」的假健康状态。
 
@@ -360,7 +362,7 @@ Chrome 面板应显示「已连接」、角标 `ON`。若 30 秒内未恢复，�
 }
 ```
 
-MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 145 个工具（0.51.0），首批是 24 个核心工具，随后是其余全部工具；`browser_tool_search` 可在浏览器断开时检索全目录，`browser_screenshot` 返回 MCP 图片内容。
+MCP 入口不会启动云模型。客户端自己决定下一步调用哪个工具。`tools/list` 暴露 150 个工具（0.52.0），首批是 24 个核心工具，随后是其余全部工具；`browser_tool_search` 可在浏览器断开时检索全目录，`browser_screenshot` 返回 MCP 图片内容。
 
 ### Qoder 插件与全局连接器
 

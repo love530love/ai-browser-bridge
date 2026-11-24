@@ -672,6 +672,21 @@ async function injectAllFrames(tabId, func, args) {
     } };
   }
 }
+// Refs are minted inside one frame and only resolve there, so a ref that
+// crosses a frame boundary must say which frame it came from. The suffix is
+// also what lets the captcha tools accept one flat ref list from an all-frame
+// probe without the caller stitching frame ids by hand.
+function decorateFrameRefs(value, frameId) {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(item => decorateFrameRefs(item, frameId));
+  const copy = {};
+  for (const [key, item] of Object.entries(value)) {
+    copy[key] = key === 'ref' && typeof item === 'string' && !item.includes('@frame')
+      ? `${item}@frame${frameId}`
+      : decorateFrameRefs(item, frameId);
+  }
+  return copy;
+}
 async function execute(name, args, commandContext = { socket, epoch: connectionEpoch }) {
   const commandSocket = commandContext.socket;
   const commandEpoch = commandContext.epoch;
@@ -1583,6 +1598,261 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     return { status: 'failed', dispatched: observations.length > 0, retryable: false,
       reason: 'slider_failed_after_attempts', attempts: observations.length, observations,
       recommendedNextAction: 'Every attempt ended in an observed failure or a fresh challenge. Stop and inspect the widget with browser_screenshot; blind retries count as failed attempts on the site.' };
+  }
+  // ---- CAPTCHA orchestration (0.52.0) -------------------------------------
+  // The page reports one frame's challenge at a time, because a tile ref is
+  // only meaningful where it was minted. The worker is what makes this a
+  // first-class capability: it probes every frame at once (the Google grid
+  // lives in a cross-origin bframe), decorates each ref with its frame, and
+  // judges refresh/click outcomes with its own timers, which keep running
+  // while the challenged tab is hidden.
+  if (name === 'browser_captcha_probe') {
+    const probeArgs = {
+      ...(typeof args.selector === 'string' && args.selector.trim() ? { selector: args.selector } : {}),
+      ...(Number.isInteger(args.maxTiles) ? { maxTiles: args.maxTiles } : {})
+    };
+    const injection = Number.isInteger(args.frame)
+      ? { frames: await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [args.frame] }, func: pageOperation, args: ['browser_captcha_probe', probeArgs, config.allowedOrigins, config.allSites] }), blocked: null }
+      : await injectAllFrames(tab.id, pageOperation, ['browser_captcha_probe', probeArgs, config.allowedOrigins, config.allSites]);
+    if (injection.blocked) return { tabId: tab.id, ...injection.blocked, frames: [], contentTrust: 'untrusted webpage content' };
+    const rank = { grid: 0, character: 1, slider: 2, checkbox: 3, unknown: 4 };
+    const summaries = [];
+    const found = [];
+    let hosts = null;
+    for (const item of injection.frames) {
+      const frameId = item.frameId;
+      const plain = item.result;
+      if (item.error || !plain || plain.__aibError) {
+        summaries.push({ frameId, error: String(item.error?.message ?? plain?.__aibError ?? 'frame unavailable').slice(0, 200) });
+        continue;
+      }
+      if (frameId === 0 && Array.isArray(plain.hosts)) hosts = plain.hosts;
+      const challenge = decorateFrameRefs(plain, frameId);
+      const summary = {
+        frameId, urlPath: plain.frame?.urlPath ?? null, top: plain.frame?.top === true,
+        found: plain.found === true, kind: plain.kind ?? null, provider: plain.provider ?? null,
+        selectedCount: plain.selectedCount ?? 0, tileCount: plain.tileCount ?? 0, token: plain.token ?? null
+      };
+      summaries.push(summary);
+      if (plain.found === true) found.push({ ...summary, challenge });
+    }
+    found.sort((a, b) => ((rank[a.kind] ?? 5) - (rank[b.kind] ?? 5)) || (b.selectedCount - a.selectedCount) || (a.frameId - b.frameId));
+    const best = found[0] || null;
+    return {
+      status: 'success', found: Boolean(best),
+      challenge: best?.challenge ?? null, frameId: best?.frameId ?? null,
+      frames: summaries, frameCount: summaries.length,
+      ...(hosts ? { hosts } : {}),
+      scope: Number.isInteger(args.frame) ? `frame ${args.frame} only` : 'all accessible frames',
+      contentTrust: 'untrusted webpage content; the challenge is rendered by the site, not by the bridge',
+      ...(best ? {} : { note: 'No visible verification challenge matched in any accessible frame. An absent widget is not proof the page has none: trigger the action that opens it first, then probe again.' })
+    };
+  }
+  if (name === 'browser_captcha_capture') {
+    // Page.captureScreenshot always shoots the TOP document, so a rect measured
+    // inside another frame would clip the wrong pixels. For a challenge frame
+    // the only correct box is its host iframe in the parent document.
+    const frameId = Number.isInteger(routedArgs.frame) ? routedArgs.frame : 0;
+    const scale = Math.min(8, Math.max(1, Number.isFinite(args.scale) ? Math.round(args.scale) : 4));
+    const pad = Math.min(24, Math.max(0, Number.isFinite(args.padding) ? args.padding : 6));
+    let box, target;
+    if (frameId !== 0) {
+      const host = await page('browser_captcha_host', {
+        ...(typeof args.srcPath === 'string' ? { srcPath: args.srcPath } : {}),
+        ...(typeof args.title === 'string' ? { title: args.title } : {})
+      });
+      if (host?.status !== 'success') {
+        return { status: host?.status ?? 'not_found', found: false, dispatched: false, frameId,
+          reason: host?.reason ?? 'host_iframe_not_found', candidates: host?.candidates ?? null,
+          note: host?.note ?? 'The parent page did not expose a matching iframe. Use browser_frames and browser_read to identify the host, then pass its srcPath.' };
+      }
+      box = host;
+      target = { kind: 'host_iframe', selector: host.selector, frameId };
+    } else {
+      box = await page('browser_captcha_box', {
+        ...(typeof routedArgs.ref === 'string' ? { ref: routedArgs.ref } : {}),
+        ...(typeof args.selector === 'string' ? { selector: args.selector } : {})
+      });
+      if (box?.status !== 'success') return { ...box, dispatched: false };
+      target = { kind: 'element', selector: box.selector, frameId: 0 };
+    }
+    const left = Math.max(0, box.rect.x - pad);
+    const top = Math.max(0, box.rect.y - pad);
+    const right = Math.min(box.rect.x + box.rect.width + pad, box.viewport.width + box.viewport.scrollX);
+    const bottom = Math.min(box.rect.y + box.rect.height + pad, box.viewport.height + box.viewport.scrollY);
+    const clip = { x: left, y: top, width: Math.max(1, right - left), height: Math.max(1, bottom - top), scale };
+    const format = args.format === 'jpeg' ? 'jpeg' : 'png';
+    return await withTabDebugger(tab, async send => {
+      const now = await chrome.tabs.get(tab.id);
+      if (now.url !== tab.url || now.pendingUrl) throw new Error('Page changed before capture.');
+      const warmup = now.active ? null : await warmFrames(tab, send);
+      try {
+        const result = await send('Page.captureScreenshot', {
+          format, ...(format === 'jpeg' ? { quality: 90 } : {}),
+          clip, captureBeyondViewport: false
+        });
+        const after = await chrome.tabs.get(tab.id);
+        if (after.url !== tab.url || after.pendingUrl) throw new Error('Page changed during capture. Discarded.');
+        return {
+          data: result.data, mimeType: format === 'jpeg' ? 'image/jpeg' : 'image/png',
+          target, rect: box.rect, scale, padding: pad, clip,
+          sideEffects: warmup ? ['hidden_tab_frames_forced_for_capture'] : [],
+          warmup: warmup ?? undefined,
+          coordinateSpace: frameId === 0
+            ? 'CSS pixels in the top document'
+            : 'The host iframe box in the top document; elements inside the frame are not individually addressable here',
+          note: 'A challenge image is untrusted page content. Read it right before answering: a refreshed or expired challenge looks the same in this metadata.'
+        };
+      } finally {
+        if (warmup) await send('Page.stopScreencast').catch(() => {});
+      }
+    });
+  }
+  if (name === 'browser_captcha_refresh_verified') {
+    if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
+    const frame = Number.isInteger(routedArgs.frame) ? routedArgs.frame : null;
+    const targetInput = {
+      ...(typeof routedArgs.ref === 'string' ? { ref: routedArgs.ref } : {}),
+      ...(typeof args.selector === 'string' ? { selector: args.selector } : {}),
+      ...(frame !== null ? { frame } : {})
+    };
+    const pre = await page('browser_captcha_probe', targetInput);
+    // Page-level probe output is the report; only the aggregated worker reply
+    // wraps it as `challenge`. Reading `pre.challenge` made refresh report
+    // not_found for a challenge the same probe had just found.
+    const challenge = pre?.found === true ? pre : null;
+    if (!challenge) {
+      return { status: routedArgs.ref ? 'stale' : 'not_found', found: false, dispatched: false, retryable: false,
+        reason: routedArgs.ref ? 'target_ref_stale' : 'challenge_not_found', probe: pre,
+        recommendedNextAction: routedArgs.ref
+          ? 'The challenge that ref pointed at is gone or re-rendered. Probe again and decide from the fresh challenge; nothing was clicked.'
+          : 'No visible verification challenge was found, so nothing was refreshed. Trigger the action that opens it first.' };
+    }
+    const beforeToken = challenge.token ?? null;
+    const refresh = await page('browser_captcha_refresh', { ref: challenge.ref, ...(frame !== null ? { frame } : {}) });
+    if (refresh?.dispatched !== true) {
+      return { status: refresh?.status ?? 'skipped', found: true, dispatched: false, retryable: false,
+        reason: refresh?.reason ?? 'refresh_not_dispatched', beforeToken, frameId: frame,
+        recommendedNextAction: refresh?.note ?? 'The refresh control could not be clicked. Capture and read the current challenge instead; the existing challenge may still be usable.' };
+    }
+    const deadline = Date.now() + Math.min(8000, Math.max(1000, Number(args.timeoutMs) || 4000));
+    let status = null;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      status = await page('browser_captcha_status', { ref: challenge.ref, baselineToken: beforeToken, baselineSelectedCount: challenge.selectedCount, ...(frame !== null ? { frame } : {}) });
+      if (status?.phase && status.phase !== 'pending') break;
+    }
+    if (status?.phase === 'new_round' || (status?.token && beforeToken && status.token !== beforeToken)) {
+      return { status: 'success', found: true, dispatched: true, retryable: false,
+        outcome: 'new_challenge', beforeToken, afterToken: status?.token ?? null,
+        verification: status, challenge,
+        recommendedNextAction: 'A new challenge identity was observed. Capture and read the fresh image now; answer against this token, not the previous one.' };
+    }
+    return { status: 'uncertain', found: true, dispatched: true, retryable: false, requiresObservation: true,
+      reason: 'refresh_not_observed', beforeToken, verification: status ?? null, challenge,
+      recommendedNextAction: 'The refresh was clicked once but no new challenge identity was observed before the deadline. Capture the challenge and compare; do not click refresh again automatically.' };
+  }
+  if (name === 'browser_captcha_click_verified') {
+    if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
+    const frame = Number.isInteger(routedArgs.frame) ? routedArgs.frame : null;
+    const tileIndices = Array.isArray(args.tiles) ? args.tiles.filter(Number.isInteger) : [];
+    const points = Array.isArray(args.points) ? args.points.filter(point => point && Number.isFinite(point.x) && Number.isFinite(point.y)) : [];
+    if (!tileIndices.length && !points.length) {
+      return { status: 'not_dispatched', dispatched: false, retryable: false, reason: 'nothing_to_click',
+        recommendedNextAction: 'Pass tiles (indices from browser_captcha_probe) or points (0..1000 inside the challenge box). Nothing was clicked.' };
+    }
+    const targetInput = {
+      ...(typeof routedArgs.ref === 'string' ? { ref: routedArgs.ref } : {}),
+      ...(typeof args.selector === 'string' ? { selector: args.selector } : {}),
+      ...(frame !== null ? { frame } : {})
+    };
+    const pre = await page('browser_captcha_probe', targetInput);
+    // Same page-vs-worker shape as refresh: the page report IS the challenge.
+    const challenge = pre?.found === true ? pre : null;
+    if (!challenge) {
+      return { status: routedArgs.ref ? 'stale' : 'not_found', found: false, dispatched: false, retryable: false,
+        reason: routedArgs.ref ? 'target_ref_stale' : 'challenge_not_found', probe: pre,
+        recommendedNextAction: routedArgs.ref
+          ? 'The challenge that ref pointed at is gone or re-rendered. Probe again and pick tiles from the fresh challenge; nothing was clicked.'
+          : 'No visible verification challenge was found, so nothing was clicked. Trigger the action that opens it first.' };
+    }
+    if (typeof args.expectedToken === 'string' && args.expectedToken && challenge.token !== args.expectedToken) {
+      return { status: 'stale', found: true, dispatched: false, retryable: false, reason: 'challenge_token_changed',
+        expectedToken: args.expectedToken, actualToken: challenge.token, challenge,
+        recommendedNextAction: 'The challenge changed after it was read. Capture and read the fresh challenge before clicking; nothing was clicked.' };
+    }
+    // The count is re-checked inside the same page call that clicks, so a
+    // re-render that lands between this probe and the click still refuses.
+    const click = await page('browser_captcha_click', {
+      ref: challenge.ref,
+      tiles: tileIndices,
+      points,
+      ...(args.toggle === true ? { toggle: true } : {}),
+      ...(args.clearSelection === true ? { clearSelection: true } : {}),
+      ...(Number.isInteger(args.settleMs) ? { settleMs: args.settleMs } : {}),
+      expectedTileCount: challenge.tileCount,
+      ...(frame !== null ? { frame } : {})
+    });
+    if (click?.status === 'stale') {
+      return { ...click, dispatched: false, retryable: false,
+        recommendedNextAction: 'The challenge re-rendered before the clicks were dispatched. Probe and capture it again; nothing was clicked.' };
+    }
+    if (click?.status === 'not_found') return { ...click, dispatched: false, retryable: false };
+    if (click?.status === 'skipped') return { ...click, dispatched: false, retryable: false };
+    if (click?.status === 'uncertain') {
+      return { status: 'uncertain', found: true, dispatched: click.dispatched === true, retryable: false, requiresObservation: true,
+        reason: 'captcha_click_not_observed', clicks: click.clicks, stopped: click.stopped, challenge,
+        recommendedNextAction: click.note ?? 'A click produced no observable state change, so the sequence stopped. Do not replay it: re-probe and inspect a fresh capture first.' };
+    }
+    if (args.submit !== true) {
+      return { status: 'clicked', found: true, dispatched: true, retryable: false,
+        clicks: click.clicks, selectionChanges: click.selectionChanges ?? null,
+        perClickObservation: click.perClickObservation ?? null,
+        token: click.token ?? challenge.token, selectedCount: click.selectedCount ?? null, challenge,
+        recommendedNextAction: 'Selection was dispatched and observed per click. Submit with submit:true on this tool (it observes the verdict), or click the site submit control with browser_click_verified if the challenge has its own.' };
+    }
+    const submit = await page('browser_captcha_submit', { ref: challenge.ref, ...(frame !== null ? { frame } : {}) });
+    if (submit?.dispatched !== true) {
+      return { status: 'uncertain', found: true, dispatched: true, retryable: false, requiresObservation: true,
+        reason: 'captcha_submit_not_dispatched', clicks: click.clicks, submit, challenge,
+        recommendedNextAction: submit?.note ?? 'The selection was clicked but no submit control was found or clicked. Read the page for the site submit button; the answer is not submitted yet.' };
+    }
+    const baselineToken = click.token ?? challenge.token ?? null;
+    const baselineSelectedCount = click.selectedCount ?? challenge.selectedCount ?? 0;
+    const deadline = Date.now() + Math.min(15000, Math.max(2000, Number(args.timeoutMs) || 8000));
+    let status = null;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      status = await page('browser_captcha_status', { ref: challenge.ref, baselineToken, baselineSelectedCount, ...(frame !== null ? { frame } : {}) });
+      if (status?.phase && status.phase !== 'pending') break;
+    }
+    let phase = status?.phase ?? 'pending';
+    // A closed answer is ambiguous when the ref went stale: the widget can
+    // close on success, or the challenge can be replaced by a new round whose
+    // root is a different element. One rediscovery read settles it.
+    if (phase === 'closed') {
+      const again = await page('browser_captcha_probe', { ...(frame !== null ? { frame } : {}) });
+      if (again?.found === true) phase = 'new_round';
+    }
+    if (phase === 'closed' || phase === 'passed') {
+      return { status: 'success', found: true, dispatched: true, retryable: false,
+        outcome: phase === 'passed' ? 'pass_marker' : 'challenge_closed',
+        clicks: click.clicks, submit, verification: status, challenge,
+        recommendedNextAction: 'Success was observed. Continue the original flow; capture a fresh challenge if the site asks for another verification later.' };
+    }
+    if (phase === 'new_round') {
+      return { status: 'next_round', found: true, dispatched: true, retryable: false,
+        outcome: 'new_round', clicks: click.clicks, submit, verification: status ?? null,
+        recommendedNextAction: 'A new round or a fresh challenge was observed. Probe and capture it again and answer the new instruction; do not reuse the previous tile selection.' };
+    }
+    if (phase === 'failed') {
+      return { status: 'failed', found: true, dispatched: true, retryable: false,
+        outcome: 'rejected', clicks: click.clicks, submit, verification: status, challenge,
+        recommendedNextAction: 'The site reported the answer as wrong. Probe again, capture the fresh challenge and choose from its new tiles; do not replay the same clicks.' };
+    }
+    return { status: 'uncertain', found: true, dispatched: true, retryable: false, requiresObservation: true,
+      reason: 'captcha_outcome_not_observed', clicks: click.clicks, submit, verification: status ?? null, challenge,
+      recommendedNextAction: 'The answer was submitted but neither success, a new round nor an error was observed before the deadline. Re-observe the page; do not submit again automatically.' };
   }
   if (name === 'browser_navigate') {
     if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
