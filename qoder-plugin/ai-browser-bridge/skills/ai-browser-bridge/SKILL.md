@@ -152,7 +152,7 @@ it: tell the user to revoke/rotate it and do not claim cleanup unless verified.
 
 Verified write contract: every state-changing action MUST use its `_verified` variant — `browser_click_verified`, `browser_fill_verified`, `browser_upload_verified`, `browser_navigate_verified`, `browser_select_verified`, `browser_choose_verified`, `browser_action_verified`, `browser_eval_verified`. The non-verified variant is diagnostic only — it never proves what happened. After dispatch, an unobserved outcome is uncertain and non-retryable; re-observe and verify before the next action. Never replay an uncertain write.
 
-Describe a submit by its possible outcomes, not by one phrase: expect accepts anyOf (up to six alternatives such as urlContains, textAppears, elementLabelAppears), anyChange (any URL/text/DOM/network change from the pre-dispatch baseline; never true before dispatch) and stableForMs (the matched alternative must hold continuously, so a leftover toast cannot satisfy it; a branch may carry its own window). On success the reply carries outcome navigated|dom_changed|condition_met; on failure it carries validationErrors only when inline errors are visibly painted, otherwise outcome validation_error or no_change. A not_dispatched answer carries matchedIn (selector, visible, isTransient): when the match is a toast, change the condition instead of retrying. A commandId identifies one exact command; reusing it with different arguments returns command_id_params_mismatch plus suggestedCommandId and dispatches nothing - the recorded outcome is not replayed. When no ref can address the control (a hidden native input such as Element Plus .el-radio__original, or a javascript:void(0) SPA link), use browser_eval_verified with an expect and keep the result in the ledger; plain browser_eval stays a read probe. For a small captcha image use browser_capture_element(ref, scale) instead of injecting an overlay.
+Describe a submit by its possible outcomes, not by one phrase: expect accepts anyOf (up to six alternatives such as urlContains, textAppears, elementLabelAppears), anyChange (any URL/text/DOM/network change from the pre-dispatch baseline, where DOM covers node count, inline style and class signatures, never true before dispatch) and stableForMs (the matched alternative must hold continuously, so a leftover toast cannot satisfy it; a branch may carry its own window). Two matchers observe changes a text check cannot see: elementGeometryChange {selector, tolerancePx 0..100, default 1} is satisfied only when the element's rect moved or resized by more than tolerancePx, and anyAttributeChange {selector, attribute?} compares one attribute (or every common one) against its pre-dispatch value. Both are baseline-bound: the pre-dispatch probe returns targetBaseline, the worker carries it into the post-dispatch check, and the pre-dispatch evaluation never receives it, so neither can produce a false not_dispatched. On success the reply carries outcome navigated|dom_changed|condition_met; on failure it carries validationErrors only when inline errors are visibly painted, otherwise outcome validation_error or no_change. A not_dispatched answer carries matchedIn (selector, visible, isTransient): when the match is a toast, change the condition instead of retrying. A commandId identifies one exact command; reusing it with different arguments returns command_id_params_mismatch plus suggestedCommandId and dispatches nothing - the recorded outcome is not replayed. When no ref can address the control (a hidden native input such as Element Plus .el-radio__original, or a javascript:void(0) SPA link), use browser_eval_verified with an expect and keep the result in the ledger; plain browser_eval stays a read probe. For a small captcha image use browser_capture_element(ref, scale) instead of injecting an overlay.
 
 For breakpoint debugging use browser_debugger: open a session on the tab, find the script URL with action:"scripts" plus urlFilter (an unfiltered list is a tail and can hide the page's own script), set a 1-based breakpoint, then trigger it asynchronously (evaluate "setTimeout(fn, N)") because a synchronous trigger pauses inside the call that made it and that call never returns. Poll action:"status" until paused, inspect with action:"frames", evaluate on a frame, then step or resume, and always finish with action:"close". While the tab is paused every other page tool returns status:"waiting" with reason:"tab_paused_by_debugger" instead of hanging; browser_health still answers and reports the pause. The session shows a debugging banner on that tab and blocks a manually opened DevTools from attaching meanwhile; a paused session nobody touches is resumed automatically after session.paused.autoResumeInMs, but close it explicitly when done. A logpoint is a breakpoint that records without pausing: action:"set_logpoint" requires logExpression, its condition logs and returns false, and action:"list_logpoints" lists the ones this session created. browser_devtools_capture now keeps bounded stackFrames on console, exception and log events instead of only the message line.
 
@@ -352,13 +352,43 @@ when you are done with it.
   dragstart/dragenter/dragover/drop/dragend, and reports accepted:true when a
   drop listener called preventDefault. The reply always says which path ran, and
   verified is always false - confirm the visible result.
+- browser_slider_probe, browser_slider_refresh and browser_slider_status read a
+  jigsaw/slider challenge without touching it; browser_slider_solve_verified
+  solves and verifies one. Recognition reads the two visible images: the piece is
+  alpha-masked and matched against the gap by luminance correlation. A canvas
+  challenge, a cross-origin image without CORS, or one too small to measure
+  answers unreadable or unsupported with retryable:false - never a guessed
+  offset. The token is short-lived (about two minutes on CNIPA), so
+  refreshFirst:true - the default - requests a fresh image before every attempt
+  instead of reusing a stale one; a failed attempt (overlay still open, new
+  image, failure text) refreshes and retries up to maxAttempts. The drag is
+  dispatched as synchronous page events, which is what lets it work in a hidden
+  tab where requestAnimationFrame never fires, and the reply says trusted:false.
+  Success is observed, not inferred: the overlay closed or the widget painted its
+  own pass marker (outcome overlay_closed|pass_marker); a correlation score alone
+  is not success. If the deadline passes with the widget still pending the answer
+  is uncertain, retryable:false, reason slider_outcome_not_observed - re-observe
+  the page and never replay the drag. requireConfidence refuses to drag when the
+  match is weaker than asked; read confidence, margin, images and observations
+  before lowering it. Use probe first to check found/piece/background; if the
+  container is visible but the pair cannot be resolved, switch to
+  browser_screenshot and the visual/coordinate route.
 - browser_pdf_save prints through Page.printToPDF, the same engine as
   Print > Save as PDF, and hands the file to the download manager. The bytes
   travel as a data URL because a service worker has no URL.createObjectURL, and
   Chrome does not always keep the requested name, so filename is the path it
-  actually used and requestedFilename is what was asked for. Read
-  browser_downloads to confirm. A page that is still loading prints only what has
-  been laid out.
+  actually used and requestedFilename is what was asked for. Before printing it
+  probes for an open dialog (dialog[open], [role=dialog], [aria-modal=true],
+  .ant-modal-wrap, .ant-modal-root, .el-dialog__wrapper, .el-overlay,
+  .verify-wrap): when one is open the emulated media is switched to screen so the
+  dialog is included, and media/mediaReason say which choice was made. Chrome's
+  print pipeline can load the print document IN the source tab, which leaves it
+  on about:blank; tabBlanked and tabAfterUrl report that, together with a
+  recovery instruction. The download record is not always visible to the
+  extension, so download and downloadRecordVisible report what was found instead
+  of implying success. Read the warnings literally - overlay_not_in_print_media
+  means the dialog was deliberately left out. Read browser_downloads to confirm.
+  A page that is still loading prints only what has been laid out.
 - browser_init_script adds, lists and removes scripts that run before the
   document's own scripts. A script added now applies from the NEXT navigation,
   not to the document already loaded, so reload to see it. Chrome cannot

@@ -1,3 +1,39 @@
+## 0.51.0 — 2026-11-24（**现场反馈闭环：PDF 打印完整性 / 指针按压必定释放 / 几何与属性期望 / 滑块拼图一等能力（145 工具）**）
+
+触发：2026-11-24 CNIPA 商标实战的两份现场报告（`docs/FIELD-REPORT-20261124-cnipa-pdfsave-blank-tab.md`、`docs/FIELD-REPORT-20261124-cnipa-sso-slider.md`）与用户补充反馈：发送邮件/短信验证码前会出现拼图滑块拦截，需要及时识别、按当前（可能已过期）图像正确拼合并让流程继续。本轮把四个「回执与事实不一致」的缺口改成显式证据，并把滑块/拼图从「手算坐标硬拖」升级为一等工具；145 个工具一个未删。
+
+### 交付
+
+- **`browser_pdf_save` 打印完整性**：打印前探测打开的浮层（`dialog[open]`、`[role=dialog]`、`[aria-modal=true]`、`.ant-modal-wrap`、`.ant-modal-root`、`.el-dialog__wrapper`、`.el-overlay`、`.verify-wrap`）。默认 `media:"auto"`：有浮层时 `Emulation.setEmulatedMedia` 切到 `screen` 把弹窗打进 PDF，打完恢复 `""`；无浮层按 `print`。回执新增 `media`、`mediaReason`（`open_overlay|default_print|caller_choice`）与 `overlay`。Chrome 打印管线可能把打印文档加载进源标签，导致源标签停在 `about:blank`：新增 `tabBlanked`、`tabAfterUrl` 与恢复指令，并给出 `source_tab_blanked` 警告。下载记录不总对扩展可见：新增 `download`、`downloadRecordVisible` 与 `download_record_not_visible` 警告，不再暗示「一定已入库」。调用方显式要求 `media:"print"` 而页面有浮层时，回 `overlay_not_in_print_media` 警告而不是静默丢内容。
+- **指针按压必定释放**：`extension/cdp.js` 的指针路径在按下后启动释放看门狗（默认 6000ms，最少 1000ms），到点在最后坐标派发 `mouseReleased`；CDP 释放失败时回退到页面级 `mouseup`/`pointerup`/`pointercancel`（`Runtime.evaluate`），不再依赖页面自己在隐藏标签里触发 rAF。回执新增 `release:{reason,method,released,x,y}`：正常结束是 `gesture_end`，异常/看门狗是 `gesture_failed|watchdog`，`method` 区分 `cdp|page`。修复 catch 分支在 finally 释放前构造返回值、导致 `released` 永远为 false 的缺陷；现场报告里「超时后页面仍处于按压态」由此可观测、可判断。
+- **期望表达式扩展**：`anyChange` 现在同时比较 URL、可见文本、DOM 节点数、同源资源数、内联样式签名（`style`，前 200 字符）与 class 签名（前 300 字符）——滑块偏移、通过/失败标记这类只改样式不改文本的变化第一次可见。新增两个精确匹配器：`elementGeometryChange {selector, tolerancePx 0–100，默认 1}` 只在元素矩形位移或尺寸变化**超过**容差时成立；`anyAttributeChange {selector, attribute?}` 比较指定属性（或一组常用属性）与派发前的值。两者都是基线绑定：派发前探针返回 `targetBaseline`，worker 负责带入派发后校验，而**派发前求值从不接收基线**，因此不会制造假 `not_dispatched`。
+- **滑块/拼图一等能力（新工具 2 个）**：`browser_slider_probe`（只读）识别 `.verify-wrap` 等容器、`piece`/`background` 图对、轨道、刷新控件与提示文本，返回矩形与**非秘密** token（用于判断图片是否已刷新）；`browser_slider_refresh`、`browser_slider_status` 作为页面级读操作；`browser_slider_solve_verified` 端到端求解：默认 `refreshFirst:true`，每次尝试先刷新再解（CNIPA token 约 2 分钟过期，旧图再准也必失败）；页面内读像素，alpha 掩码后按亮度 Pearson 相关求水平偏移，自然像素换算到 CSS 像素；用**一个同步页面 tick**完成按下-移动-抬起（隐藏标签的 rAF 不触发也能落点），回执 `trusted:false`；成功只认观测到的 `overlay_closed|pass_marker`，观测到失败（换图/失败文案/浮层仍在）刷新后重试，`maxAttempts` 默认 2、上限 3；截止仍无信号回 `uncertain`、`retryable:false`、`reason:"slider_outcome_not_observed"`，**绝不自动重放**。`requireConfidence` 可在相关性不足时拒绝拖拽；canvas、无 CORS 跨域或尺寸过小回 `unsupported/unreadable` 并转视觉/坐标路线，不猜偏移。
+- **隐藏标签 eval 超时归因**：`browser_eval`/`browser_eval_verified` 超时证据带 `timerThrottling:{visibilityState,why}`，只读提示改用单个同步表达式，写路径明确「不确定、不可重放」，不再把定时器节流误判成页面失败。
+- **注册与索引**：两个滑块工具进入 `act` 组与别名（滑块/拼图/验证码/安全验证/slider/jigsaw/captcha），能力引导新增 `slider-verification` 意图（`focusRequired:false`），agent 提示允许在用户自己的授权流程内解拼图，字符型图形验证码仍交人工。工具数 143 → **145**；文本索引仍在 3800 字节上限内。
+
+### 验收
+
+- 全量 `npm test` → **1138/1138**（exit 0，0 fail）。
+- 新增 `test/slider-verification.test.js` 7 项：工具注册/索引/别名/引导、schema 边界（`maxAttempts:4`、`steps:1`、`requireConfidence:"certain"`、缺 tabId 均拒绝）、`elementGeometryChange`/`anyAttributeChange` 校验与 worker 基线契约、`anyChange` 样式/class 签名、页面滑块证据（选择器、not_found、刷新 token、URL 去 query、Pearson、置信度、canvas unsupported、phase 判定）、worker 编排（求解先于 Unknown command、refreshFirst 默认、maxAttempts 上限、置信度门控不派发、pieceSelector 拖拽、closed/passed 成功、uncertain/exhausted 不可重试、同步事件、看门狗）、隐藏 eval 超时提示。
+- `test/cdp-advanced.test.js` 新增 6 项 PDF 用例：浮层→`screen` 并恢复、无浮层→`print` 且零 `setEmulatedMedia`、显式 `print`+浮层→`caller_choice` 警告、源标签变 `about:blank`→`tabBlanked` 与恢复指令、下载记录不可见→`downloadRecordVisible:false`。`test/error-journal.test.js` 新增 3 项指针释放用例（CDP 失败回退页面级、drag 结束坐标、源码契约）。`test/error-codes.test.js` 注入并验证定时器/绘制依赖集合。`test/host-status-e2e.test.js` 修复偶发「bad port」：探测并重绑最多 5 次。
+- 插件同步：`node scripts/sync-qoder-plugin.mjs --check` → `PLUGIN_CHECK_OK version=0.51.0 skillFiles=1`；`--zip` 生成 `qoder-plugin/dist/ai-browser-bridge-0.51.0.zip`。
+- 工具数 143 → 145；文本意图索引 **3740 字节**（上限 3800）。
+- **已部署（2026-11-24 13:27–13:28 +0800）**：`restart-service-when-idle --apply` 空闲重启（intent `2bd31c66…`，pid 86048 → **47940**，`serviceVersion:"0.51.0"`、`runningBuildId = diskBuildId = 88bb837b…`、`deploymentStale:false`）。两个宿主各自 `chrome.runtime.reload` 自载到 0.51.0，`foregroundTaken:false`、未开标签页、未发按键，`errorJournal.state:"none_recorded"`：`h-0b47a521c4384e90beb4`（系统 Chrome 156.0.8078.49，session `f9fd3e7b…` → `907bc4f0…`）与 `h-b76b872f85d347a49e00`（ChatGPT 内嵌 Chrome 158.0.8127.37，session `f9fd3e7b…` → `5f5db713…`）。复验 `browser_hosts` 两宿主均 `extensionVersion:"0.51.0"`；`status` → `extensionVersionSkew:false`、`deploymentStale:false`、`upgradeRequired:false`、`actionRequired:[]`；`browser_health.toolSurface` → `status:"current"`、`toolCount:145`、`coreToolCount:24`、hash `dc2c652d…`、`staleToolSurface:false`；`heartbeat` → `verdict:"clean"`、`provenClean:true`、`findings:[]`、`degraded:false`。
+- **插件安装**：`qoder plugin install <仓库>/qoder-plugin/ai-browser-bridge --scope user --json` → `ai-browser-bridge@local v0.51.0`，缓存目录 `plugins/cache/local/ai-browser-bridge/0.51.0`；独立 stdio 探针经该目录 `bin/launch-bridge.mjs` 实测 **145** 工具、首五项 guide/index/search/schema/capability_guide、`browser_slider_probe` 与 `browser_slider_solve_verified` 均存在、两个资源齐全。当前会话 MCP schema 仍可能缓存 143，新会话才注入 145。
+- **远端发布（GitHub Release `v0.51.0`）**：`qoder-plugin/dist/ai-browser-bridge-0.51.0.zip`（**21553 字节**，SHA256 `a455d0ed2fd2d250fe5776e47e00396f72278f0421c60d4cbf1be61c4082e9f3`）作为 Release asset 上传，独立下载副本摘要与本地一致；Release 地址 https://github.com/love530love/ai-browser-bridge/releases/tag/v0.51.0 ，安装命令 `qoder plugin install https://github.com/love530love/ai-browser-bridge/releases/download/v0.51.0/ai-browser-bridge-0.51.0.zip --scope user`。
+- 技能同步：`skills/ai-browser-bridge/SKILL.md` 增加滑块/拼图路由、PDF 浮层与 `tabBlanked` 口径、`elementGeometryChange`/`anyAttributeChange` 与 `anyChange` 样式/class 说明；`skills/cnipa-trademark-online/SKILL.md` 新增 §6「发送验证码前的滑块/拼图拦截」实测配方，最短路径第 1 步挂接。
+
+### 边界
+
+- 滑块求解只用于用户自己授权流程中的正常安全验证；字符型（扭曲字母数字）图形验证码仍是人工或放大后人工识别。盲试会累计站点侧失败次数，`maxAttempts` 上限 3 是有意限制；求解成功不等于验证码已发出，需回页面确认后再读码。
+- 图像读取受同源/CORS/canvas 限制；`unsupported` 是诚实的能力边界，不是「页面没有验证」。token 有效期由站点决定，`refreshFirst` 只是降低过期概率。
+- `anyChange` 的样式/class 签名是有界字符串比较，不是视觉 diff；`elementGeometryChange` 只观察一个元素矩形，基线只在派发后生效。
+- PDF 的 `screen` 媒体只保证浮层进入可打印树，不保证站点打印样式完全一致；源标签置空是 Chrome 打印管线的行为，本轮只做检测、恢复提示与证据，不做拦截。
+- 指针看门狗是安全释放，不证明页面收到了完整手势；`uncertain` 仍不可重放。
+- 本轮未实现：旋转/多缺口拼图、字符验证码识别、基于视觉模型的偏移求解、PDF 打印前等待网络空闲。
+
+
+
 ## 0.50.0 — 2026-11-23（**工具发现整体化：核心 24 首屏 / 全量 143 可检索 / 未知工具名结构化恢复**）
 
 触发：用户指出弱 agent/轻量模型会因为 `tools/list` 首批只看到部分工具、且不会主动二次查询而卡死或猜一个不存在的工具名；此前「发现三件套」的形态变更正是因为部分 agent 发现不了第二层能力。本轮把发现从「只靠拉取」改成「首屏核心 + 全量可检索 + 错误可恢复」，不设能力禁区：所有 143 个工具仍完整列出，没有任何工具被移除或隐藏。

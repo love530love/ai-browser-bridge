@@ -85,3 +85,9 @@
 
 ## 5. 本次绕开 iframe 的可行手段（记录）
 在浏览器内**右键 iframe → 在新标签打开框架**，或复制该 frame 的直链交给 bridge `browser_open` 作为**顶层标签**打开；此时主框架可读，`browser_fill`/`browser_upload` 方能作用。根因还是 1.1——若工具原生支持 frame 选择，就不需要这一步人工绕道。
+
+---
+
+## 6. 状态注记（2026-11-24，0.51.0）
+
+本清单是 0.4.19 时期的历史快照，其中的框架/参数/超时结论请以当前 README、CHANGELOG 与 `browser_capabilities` 为准。2026-11-24 的两份新现场报告已单独归档，并已在 0.51.0 修复/落证据：PDF 打印浮层与源标签置空（`FIELD-REPORT-20261124-cnipa-pdfsave-blank-tab.md`）、隐藏标签指针残留按压与 `anyChange` 盲区（`FIELD-REPORT-20261124-cnipa-sso-slider.md`）。发送验证码前的滑块/拼图拦截已升级为 `browser_slider_probe` / `browser_slider_solve_verified` 一等能力（见 `skills/cnipa-trademark-online/SKILL.md` §6）。

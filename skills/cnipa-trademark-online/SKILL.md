@@ -110,7 +110,20 @@ CNIPA 的 antd Upload 把 `input[type=file]` 设为 `display:none`。分三种�
 
 ---
 
-## 6. 站点侧坑（非 Bridge 缺陷，但会误导自动化）
+## 6. 发送验证码前的滑块/拼图拦截（Vue2Verify，实测）
+
+点「获取验证码」（邮箱/短信）或部分登录节点时，站点可能先弹拼图滑块（`.verify-wrap`，含 `.verify-move-block` / `.verify-img-panel` / `.verify-bar-area` / `.verify-refresh`）。**不要**用 `browser_action` 的 Swipe 或手算坐标硬拖：验证码 token 约 2 分钟过期，手算偏移经常在过期图上白拖，且历史版本在隐藏 tab 上有残留按压态问题。用 0.51.0 起的一等能力：
+
+1. **探测**：`browser_slider_probe({ selector? })`（只读）。看 `found`、`piece`、`background`、`token`、`phase`。容器在但取不到图对 → 直接转 `browser_screenshot` + 视觉/坐标路线，别猜偏移。
+2. **求解**：`browser_slider_solve_verified({ tabId, maxAttempts: 2, requireConfidence: 'medium' })`。默认 `refreshFirst:true`，每次尝试先刷新出新图再解，避开过期 token；失败（overlay 未关 / 换图 / 失败文案）会自动刷新重试。合成拖拽是同步页面事件，隐藏 tab 也能落点，回执 `trusted:false` 是预期的。
+3. **判成功**：只认观测结果 `outcome: overlay_closed | pass_marker`；相关系数只是置信度，不是成功。`status:'uncertain'`（`slider_outcome_not_observed`）时重新观察页面，**不要重放拖拽**；`confidence_below_requirement` 表示未拖拽，先看 `confidence`/`margin`/`images` 再决定是否放宽。
+4. **收尾**：验证过后若验证码并未真正发出，回到页面再点一次「获取验证码」，用页面文本/`browser_login_state` 确认，再走 `browser_otp_fetch` 读码（核对 sender）。滑块若再次弹出，重新 probe 即可。
+
+注意区分：登录页的**字符型图形验证码**（扭曲字母数字）不在此能力范围，仍是人工或 `browser_capture_element` 放大后人工识别；本工具只解决拼图/滑块类。
+
+---
+
+## 7. 站点侧坑（非 Bridge 缺陷，但会误导自动化）
 
 1. **「阐述事实与理由」200 字硬上限**，无 `maxlength` 属性，超限静默截断或报错；长文走 PDF，别写网页文本框。
 2. **联系地址只自动填充到县/区级**，门牌号需手工补全；校验要求以「省 + 市 + 县/区」开头，否则报「所填国内省份必须在如下值集表中」；预览页会显示截断，需回步骤1 修改再预览。
@@ -124,11 +137,11 @@ CNIPA 的 antd Upload 把 `input[type=file]` 设为 `display:none`。分三种�
 
 ---
 
-## 7. 最短路径清单：复现 94896138 同类申请（M4 验收口径）
+## 8. 最短路径清单：复现 94896138 同类申请（M4 验收口径）
 
 M4 完成标准：新会话按 README 可在 30 分钟内复现 94896138 同类申请。最短路径沿用现场报告 §五「本次成功的完整路径（可复现）」的骨架，替换为注册申请模块入口与差异项（§七、外部 `runbooks/01_注册申请.md`）：
 
-1. `browser_open` 显式固定 `hostId` → `https://sso.cnipa.gov.cn` 法人登录（三要素）→ 自动跳 toas。
+1. `browser_open` 显式固定 `hostId` → `https://sso.cnipa.gov.cn` 法人登录（三要素；字符图形验证码人工识别；出现滑块/拼图先按 §6 解掉）→ 自动跳 toas。
 2. 直接访问注册入口 `.../onlineApplication/applyRegister/registerApply?code=toas_00501`（不要从菜单一层层点）。
 3. 步骤1 申请人信息：名称/信用代码自动带出；**地址补全到门牌号**且以「省+市+县/区」开头；受控组件用 `snippets/antd-input.js` 的原生 setter。
 4. 商标声明 + 图样：`#form_item_imageAttJson` 只收 JPG，400–1500 px、< 2 MB；「商标说明」必填；共同申请一般选「否」。

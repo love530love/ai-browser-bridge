@@ -405,6 +405,67 @@ test('a PDF the download manager refuses is reported as such, not as a print fai
   assert.match(result.hint, /data URL/);
 });
 
+test('an open overlay is printed in screen media and auto says why', async () => {
+  const { advanced, env } = await load();
+  env.on('Runtime.evaluate', () => ({ result: { value: { count: 1, kinds: ['.verify-wrap'] } } }));
+  env.on('Page.printToPDF', () => ({ data: Buffer.from('%PDF-1.4 test').toString('base64') }));
+  const result = await advanced.run('browser_pdf_save', {}, ctx());
+  assert.equal(result.status, 'success');
+  assert.equal(result.media, 'screen');
+  assert.equal(result.mediaReason, 'open_overlay');
+  const mediaCalls = env.sent.filter(item => item.method === 'Emulation.setEmulatedMedia');
+  // Screen media is applied for the print and then restored, so the tab is not
+  // left emulating a screen forever.
+  assert.deepEqual(mediaCalls.map(item => item.params.media), ['screen', '']);
+});
+
+test('print media is the default when no overlay is open', async () => {
+  const { advanced, env } = await load();
+  env.on('Runtime.evaluate', () => ({ result: { value: { count: 0, kinds: [] } } }));
+  env.on('Page.printToPDF', () => ({ data: Buffer.from('%PDF-1.4 test').toString('base64') }));
+  const result = await advanced.run('browser_pdf_save', {}, ctx());
+  assert.equal(result.media, 'print');
+  assert.equal(result.mediaReason, 'default_print');
+  assert.equal(env.sent.filter(item => item.method === 'Emulation.setEmulatedMedia').length, 0);
+});
+
+test('an explicit print media is obeyed and the overlay risk is stated', async () => {
+  const { advanced, env } = await load();
+  env.on('Runtime.evaluate', () => ({ result: { value: { count: 1, kinds: ['[role="dialog"]'] } } }));
+  env.on('Page.printToPDF', () => ({ data: Buffer.from('%PDF-1.4 test').toString('base64') }));
+  const result = await advanced.run('browser_pdf_save', { media: 'print' }, ctx());
+  assert.equal(result.media, 'print');
+  assert.equal(result.mediaReason, 'caller_choice');
+  assert.ok(result.warnings.some(item => item.code === 'overlay_not_in_print_media'));
+});
+
+test('a source tab that becomes about:blank after printing is reported with recovery', async () => {
+  const { advanced, env } = await load();
+  env.on('Runtime.evaluate', () => ({ result: { value: { count: 0, kinds: [] } } }));
+  env.on('Page.printToPDF', () => ({ data: Buffer.from('%PDF-1.4 test').toString('base64') }));
+  let reads = 0;
+  env.chrome.tabs = { get: async () => (++reads === 1 ? { id: 5, url: 'https://example.com/form' } : { id: 5, url: 'about:blank' }) };
+  const result = await advanced.run('browser_pdf_save', {}, ctx());
+  assert.equal(result.status, 'success');
+  assert.equal(result.tabBlanked, true);
+  assert.equal(result.tabAfterUrl, 'about:blank');
+  assert.match(result.recovery, /Navigate this tab back/);
+  assert.ok(result.warnings.some(item => item.code === 'source_tab_blanked'));
+});
+
+test('a missing download row is reported as missing evidence, not as a lost file', async () => {
+  const { advanced, env } = await load();
+  env.on('Runtime.evaluate', () => ({ result: { value: { count: 0, kinds: [] } } }));
+  env.on('Page.printToPDF', () => ({ data: Buffer.from('%PDF-1.4 test').toString('base64') }));
+  env.chrome.downloads.search = async () => [];
+  const result = await advanced.run('browser_pdf_save', { filename: 'report.pdf' }, ctx());
+  assert.equal(result.status, 'success');
+  assert.equal(result.downloadRecordVisible, false);
+  assert.equal(result.download, null);
+  assert.ok(result.warnings.some(item => item.code === 'download_record_not_visible'));
+  assert.match(result.note, /read browser_downloads/);
+});
+
 test('a drag reports which path ran and never claims the page accepted it', async () => {
   const { advanced } = await load();
   const result = await advanced.run('browser_drag', { fromRef: 'r1', toX: 200, toY: 300, mode: 'mouse' }, ctx());

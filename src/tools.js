@@ -28,7 +28,17 @@ const expectationModifiers = {
   },
   anyChange: {
     type: 'boolean',
-    description: 'Succeeds when the URL, visible text, DOM node count or same-origin resource count differs from the pre-dispatch baseline the tool captured. Never satisfied before dispatch, so it never causes not_dispatched.'
+    description: 'Succeeds when the URL, visible text, DOM node count, same-origin resource count, inline-style signature or class-attribute signature differs from the pre-dispatch baseline the tool captured. Never satisfied before dispatch, so it never causes not_dispatched. Style/class signatures make slider offsets and pass/fail markers visible; if a signal can be named exactly, prefer elementGeometryChange or anyAttributeChange.'
+  },
+  elementGeometryChange: {
+    type: 'object', minProperties: 1, additionalProperties: false,
+    properties: { selector: text(1000), tolerancePx: { type: 'number', minimum: 0, maximum: 100 } },
+    description: 'Succeeds when the first element matching selector moved or resized by more than tolerancePx (default 1) versus the pre-dispatch baseline the tool captured. Use for slider handles, drawers, panels and any UI that changes position without changing text. Evidence carries baseline/current rects and deltaPx.'
+  },
+  anyAttributeChange: {
+    type: 'object', minProperties: 1, additionalProperties: false,
+    properties: { selector: text(1000), attribute: text(200) },
+    description: 'Succeeds when the first element matching selector carries a different attribute value versus the pre-dispatch baseline. With attribute it checks only that attribute (aria-*, data-state, disabled); without it any added, removed or changed attribute counts. Evidence carries baselineValue/currentValue.'
   },
   stableForMs: {
     type: 'integer', minimum: 0, maximum: 5000,
@@ -624,20 +634,38 @@ export const TOOLS = [
   tool('browser_prepare_coordinate', 'Read-only coordinate preflight after inspecting a fresh screenshot. Works on a backgrounded tab: the token is bound to the DOM element under the coordinate and re-hit-tested at dispatch, so foreground is not required. Set requireForeground to keep the old foreground-only behaviour. Returns `target.hitRef` for the exact DOM hit, and `clickRef` when it can promote that hit to a topmost semantic control or cursor:pointer card; `clickRefEvidence` explains the target and confidence. Prefer browser_click with clickRef when it matches intent: it removes coordinate translation and returns the normal action receipt. Use the one-shot coordinate token only when pointer-coordinate semantics are required. If no verified clickRef is possible, do not infer clickability from hitRef. Geometry includes `target.rect`, `target.path`, `target.textLength`, `target.childCount`, `offsetFromCenter` and `targetLooksLikeContainer`. The coordinate token lives 120 seconds by default; pass ttlMs to change it. Refuse reasons distinguish expired, consumed and never issued. Coordinates use 0..1000 viewport units. Repeat preparation after layout changes.', {
     tabId, x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 }, requireForeground: { type: 'boolean' }, ttlMs: { type: 'integer', minimum: 5000, maximum: 300000 }, agent
   }, ['tabId', 'x', 'y'], true),
-  tool('browser_action', 'Open-AutoGLM-style browser actions. Pointer actions work on a backgrounded tab: the coordinate token is bound to the DOM element and re-hit-tested before movement and press, and a changed hit target fails closed with expected-vs-actual diagnostics. Set requireForeground to refuse unless the tab and window are in front. Coordinates are normalized 0..1000 in current viewport. Supply expectedUrl from latest observation. Observe after every action.', {
+  tool('browser_action', 'Open-AutoGLM-style browser actions. Pointer actions work on a backgrounded tab: the coordinate token is bound to the DOM element and re-hit-tested before movement and press, and a changed hit target fails closed with expected-vs-actual diagnostics. Set requireForeground to refuse unless the tab and window are in front. Coordinates are normalized 0..1000 in current viewport. Supply expectedUrl from latest observation. Observe after every action. Swipe moves in steps (2-24, default 8) and releases at the last reached coordinate even if the gesture is interrupted. Set synthetic:true for Swipe to dispatch the whole mousedown/mousemove/mouseup sequence synchronously inside the page, which is the reliable route on a hidden tab and for slider puzzles; such events have isTrusted:false.', {
     tabId, action: { type: 'string', enum: ['Tap', 'Double Tap', 'Long Press', 'Hover', 'Swipe', 'Type', 'Key', 'Back', 'Wait'] },
     expectedUrl: text(8000), coordinateToken: text(100), x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 },
     endX: { type: 'number', minimum: 0, maximum: 1000 }, endY: { type: 'number', minimum: 0, maximum: 1000 },
+    steps: { type: 'integer', minimum: 2, maximum: 24 }, synthetic: { type: 'boolean' },
     text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }, requireForeground: { type: 'boolean' }, agent
   }, ['tabId', 'action', 'expectedUrl']),
-  tool('browser_action_verified', 'Dispatch one browser action, then verify the expected outcome. Returns success/uncertain/failed; never assumes action succeeded without observing the new state. Never retries. If the tab is leased, pass the matching agent.', {
+  tool('browser_action_verified', 'Dispatch one browser action, then verify the expected outcome. Returns success/uncertain/failed; never assumes action succeeded without observing the new state. Never retries. Swipe supports steps (2-24) and synthetic:true, which dispatches the full mouse sequence in one page tick and is preferred on hidden tabs and slider puzzles. If the tab is leased, pass the matching agent.', {
     tabId, action: { type: 'string', enum: ['Tap', 'Double Tap', 'Long Press', 'Hover', 'Swipe', 'Type', 'Key', 'Back', 'Wait'] },
     expectedUrl: text(8000), coordinateToken: text(100), x: { type: 'number', minimum: 0, maximum: 1000 }, y: { type: 'number', minimum: 0, maximum: 1000 },
     endX: { type: 'number', minimum: 0, maximum: 1000 }, endY: { type: 'number', minimum: 0, maximum: 1000 },
+    steps: { type: 'integer', minimum: 2, maximum: 24 }, synthetic: { type: 'boolean' },
     text: { type: 'string', maxLength: 20000 }, key: text(80), durationMs: { type: 'integer', minimum: 0, maximum: 5000 }, requireForeground: { type: 'boolean' },
     expect: clickExpectation,
     timeoutMs: timeoutMs(10000), agent
   }, ['tabId', 'action', 'expectedUrl', 'expect']),
+  tool('browser_slider_probe', 'Read-only probe of a slider/jigsaw verification widget (for example the CNIPA SSO 安全验证 before 获取验证码). Finds the visible challenge container, its background image, movable piece, track, refresh control and message, with display rects and a non-secret token for detecting a refreshed image. Reports status not_found when no visible widget matches; that is not proof the page has no challenge - trigger the action that opens it first. Never moves anything.', {
+    tabId, selector: text(1000), agent
+  }, ['tabId'], true),
+  tool('browser_slider_solve_verified', 'Solve a slider/jigsaw verification end to end and report the observed verdict. Refreshes the challenge first by default (a stale token fails no matter how exact the offset is), reads the background and piece images as pixels in the page, computes the horizontal offset by Pearson correlation, converts natural pixels to CSS pixels, drags the handle once with one synchronous page tick (works on a hidden tab), then watches for an observed outcome: overlay closed or pass marker is success, a fresh image or fail text is an observed failure and may be retried up to maxAttempts (default 2) with a new refresh. No signal before the deadline returns uncertain and is never retried automatically. Cross-origin or canvas-painted images return unsupported with a visual-route handoff instead of guessing. This is for an authorized verification step in the user\'s own flow; distorted-character image captchas are still a human handoff.', {
+    tabId,
+    selector: text(1000),
+    expectedUrl: text(8000),
+    refreshFirst: { type: 'boolean' },
+    maxAttempts: { type: 'integer', minimum: 1, maximum: 3 },
+    steps: { type: 'integer', minimum: 2, maximum: 24 },
+    startInsetPx: { type: 'number', minimum: 0, maximum: 200 },
+    requireConfidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+    timeoutMs: timeoutMs(15000),
+    refreshTimeoutMs: timeoutMs(4000),
+    agent
+  }, ['tabId']),
 
   // --- DevTools parity: the CDP surfaces chrome-devtools-mcp and playwright-mcp
   // are built on. Every one of these runs on a long-lived debugger session,
@@ -761,7 +789,7 @@ export const TOOLS = [
     steps: { type: 'integer', minimum: 2, maximum: 60 },
     agent
   }, ['tabId', 'fromRef']),
-  tool('browser_pdf_save', 'Print the page to PDF through Page.printToPDF - the same engine as Print > Save as PDF, without the print dialog. The file goes to disk through the download manager instead of through the socket, because a printed page is routinely a megabyte of base64; read browser_downloads to find where it landed. printBackground defaults to true, because a printed page without backgrounds is usually not what the caller meant. A page that is still loading prints only what has been laid out so far.', {
+  tool('browser_pdf_save', 'Print the page to PDF through Page.printToPDF - the same engine as Print > Save as PDF, without the print dialog. The file goes to disk through the download manager instead of through the socket, because a printed page is routinely a megabyte of base64; read browser_downloads to find where it landed. printBackground defaults to true, because a printed page without backgrounds is usually not what the caller meant. media defaults to auto: print media normally, but screen media when a visible dialog/overlay is open, so an open antd/Element modal is not silently omitted; pass "print" or "screen" to force one. The reply reports sourceUrl, the media actually used, visible overlays, whether the source tab was blanked to an about: page (tabBlanked), and the download-manager row (state, filename, bytesReceived) when search returns it. A page that is still loading prints only what has been laid out so far.', {
     tabId,
     filename: { type: 'string', maxLength: 300 },
     printBackground: { type: 'boolean' },
@@ -770,6 +798,7 @@ export const TOOLS = [
     paperWidth: { type: 'number', minimum: 1, maximum: 100 },
     paperHeight: { type: 'number', minimum: 1, maximum: 100 },
     preferCSSPageSize: { type: 'boolean' },
+    media: { type: 'string', enum: ['auto', 'print', 'screen'] },
     agent
   }, ['tabId']),
   tool('browser_init_script', 'Manage scripts that run before the document\'s own scripts on every navigation - the DevTools snippet / userscript shape. action:"add" returns an identifier and the script applies from the NEXT navigation, not to the document that is already loaded, so reload to see the effect. action:"remove" needs that identifier. action:"list" reports only what was added through this tool during the current debugger session, because Chrome cannot enumerate injected scripts; a script whose session ended is already gone. The script lives as long as the session, so it survives navigation but not a session close.', {
@@ -1293,13 +1322,36 @@ export function validateCall(name, args) {
         }
         continue;
       }
+      if (key === 'elementGeometryChange' || key === 'anyAttributeChange') {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          throw new Error(`Invalid expect condition: ${key} must be an object with a selector`);
+        }
+        const allowed = Object.keys(field.properties ?? {});
+        for (const [subKey, subValue] of Object.entries(value)) {
+          if (!allowed.includes(subKey)) throw new Error(`Invalid expect condition: ${key}.${subKey}`);
+          if (subKey === 'tolerancePx') {
+            if (typeof subValue !== 'number' || !Number.isFinite(subValue) || subValue < 0 || subValue > 100) {
+              throw new Error(`Invalid expect condition: ${key}.tolerancePx must be a number from 0 to 100`);
+            }
+            continue;
+          }
+          if (typeof subValue !== 'string' || !subValue.trim() || subValue.length > (field.properties[subKey].maxLength ?? 1000)) {
+            throw new Error(`Invalid expect condition: ${key}.${subKey}`);
+          }
+        }
+        if (typeof value.selector !== 'string' || !value.selector.trim()) {
+          throw new Error(`Invalid expect condition: ${key}.selector is required`);
+        }
+        conditions += 1;
+        continue;
+      }
       if (typeof value !== 'string' || value.length > field.maxLength || value.length < (field.minLength ?? 0) || (key !== 'valueMatches' && !value.trim())) {
         throw new Error(`Invalid expect condition: ${key}`);
       }
       conditions += 1;
     }
     if (conditions === 0) {
-      throw new Error('expect needs at least one observable condition (textAppears, urlContains, elementLabelAppears, anyOf or anyChange); stableForMs alone cannot be observed');
+      throw new Error('expect needs at least one observable condition (textAppears, urlContains, elementLabelAppears, anyOf, anyChange, elementGeometryChange or anyAttributeChange); stableForMs alone cannot be observed');
     }
   }
   if (name === 'browser_native_action') {

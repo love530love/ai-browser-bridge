@@ -20,10 +20,25 @@ const CHROME_VERSION = '156.0.8078.49';
 const AUTH = { Authorization: `Bearer ${config.agentToken}` };
 
 async function setup(t) {
-  const b = createBridge(config, { leaseStateFile: null });
-  const address = await b.listen();
-  t.after(() => b.close());
-  return { b, base: `http://127.0.0.1:${address.port}`, wsUrl: `ws://127.0.0.1:${address.port}/extension` };
+  // fetch() refuses a documented set of ports (6000, 6665-6669, 10080, ...).
+  // On a machine whose ephemeral range starts below 1024 a random bind can land
+  // on one, which showed up as an unrelated "bad port" failure under load.
+  // Probe and rebind instead of assuming any ephemeral port is fetchable.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const b = createBridge(config, { leaseStateFile: null });
+    const address = await b.listen();
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      await fetch(`${base}/status`, { headers: AUTH });
+    } catch (error) {
+      await b.close();
+      if (/bad port/i.test(String(error?.cause?.message ?? error?.message))) continue;
+      throw error;
+    }
+    t.after(() => b.close());
+    return { b, base, wsUrl: `ws://127.0.0.1:${address.port}/extension` };
+  }
+  assert.fail('could not bind to a fetch-safe ephemeral port');
 }
 
 // 与 test/multi-host.test.js 的 connectHost 同构：真实 WebSocket 握手。

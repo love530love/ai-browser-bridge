@@ -49,3 +49,15 @@
 1. `browser_open` 任意 http 页面 → `browser_pdf_save`；
 2. 观察该 tab 是否 `about://blank`；
 3. 打开一个 antd 弹窗后再打印，检查 PDF 文本是否含弹窗字段。
+
+---
+
+## Bridge 复核与修复（2026-11-24，0.51.0）
+
+三条现象都已在 0.51.0 落成显式证据，不再是静默：
+
+1. **源标签置空**：打印前后各读一次标签 URL；`tabBlanked:true`、`tabAfterUrl` 与恢复指令出现在回执，并附 `source_tab_blanked` 警告。这是 Chrome 打印管线的行为，本版只检测与提示，不拦截。
+2. **弹窗不在 PDF**：打印前探测 `dialog[open]`、`[role=dialog]`、`[aria-modal=true]`、`.ant-modal-wrap`、`.ant-modal-root`、`.el-dialog__wrapper`、`.el-overlay`、`.verify-wrap`；默认 `media:"auto"` 有浮层时切到 `screen` 媒体再打印，回执 `media`/`mediaReason:"open_overlay"`/`overlay` 说明选择。调用方显式 `media:"print"` 且存在浮层时回 `overlay_not_in_print_media` 警告，不再静默丢内容。
+3. **下载记录不可见**：回执新增 `download`、`downloadRecordVisible` 与 `download_record_not_visible`，并提示改用 `browser_downloads` 观察；本版不声称「一定已入库」。
+
+回归：`test/cdp-advanced.test.js` 新增 6 项（浮层→`screen` 并恢复、无浮层→`print`、显式 `print`+浮层警告、`tabBlanked`、下载记录不可见）。全量 `npm test` 1138/1138。

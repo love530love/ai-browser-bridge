@@ -42,14 +42,16 @@ function extractFunction(source, name) {
   throw new Error(`could not find the end of ${name}`);
 }
 
-// The paint-dependent set lives next to the classifier, so the test extracts
-// the real declaration instead of restating it.
+// The paint-dependent and timer-dependent sets live next to the classifier, so
+// the test extracts the real declarations instead of restating them.
 const paintSetSource = workerSource.match(/const PAINT_DEPENDENT_TOOLS = new Set\(\[[^\]]*\]\);/)?.[0];
 assert.ok(paintSetSource, 'worker must declare PAINT_DEPENDENT_TOOLS');
+const timerSetSource = workerSource.match(/const TIMER_OR_PAINT_DEPENDENT_EVAL = new Set\(\[[^\]]*\]\);/)?.[0];
+assert.ok(timerSetSource, 'worker must declare TIMER_OR_PAINT_DEPENDENT_EVAL');
 const classifySource = extractFunction(workerSource, 'classifyCommandTimeout');
 const context = {};
 vm.createContext(context);
-vm.runInContext(`${paintSetSource}\n${classifySource}\nthis.classifyCommandTimeout = classifyCommandTimeout;`, context);
+vm.runInContext(`${paintSetSource}\n${timerSetSource}\n${classifySource}\nthis.classifyCommandTimeout = classifyCommandTimeout;`, context);
 const classify = context.classifyCommandTimeout;
 
 const visibleProbe = { available: true, tabActive: true, tabStatus: 'complete', discarded: false, pendingUrl: null, windowId: 1, windowFocused: true, windowState: 'normal', windowError: null };
@@ -111,6 +113,18 @@ test('a background-safe read that times out hidden stays TIMEOUT_UNKNOWN, with t
   assert.equal(out.code, ERROR_CODES.TIMEOUT_UNKNOWN);
   assert.equal(out.evidence.occlusion.hidden, true);
   assert.match(out.recommendedNextAction, /smaller budgets/);
+});
+
+test('a hidden-tab eval timeout names timer throttling instead of guessing the page failed', () => {
+  const readOut = classify({ name: 'browser_eval', readOnly: true, probe: hiddenProbe, debuggerPaused: null, budgetMs: 20000, elapsedMs: 18400 });
+  assert.equal(readOut.status, 'waiting');
+  assert.equal(readOut.evidence.timerThrottling.visibilityState, 'hidden');
+  assert.match(readOut.recommendedNextAction, /one synchronous expression/);
+  const writeOut = classify({ name: 'browser_eval_verified', readOnly: false, probe: hiddenProbe, debuggerPaused: null, budgetMs: 20000, elapsedMs: 18400 });
+  assert.equal(writeOut.status, 'uncertain');
+  assert.equal(writeOut.retryable, false);
+  assert.equal(writeOut.evidence.timerThrottling.visibilityState, 'hidden');
+  assert.match(writeOut.recommendedNextAction, /never replay it automatically/);
 });
 
 test('a missing tab is TARGET_GONE; an unavailable probe never invents tab state', () => {

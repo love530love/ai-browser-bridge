@@ -74,3 +74,16 @@
 - 申诉提交：`POST /sso-web/current/manual/appeal/submit` 200（194ms），页面提示「申诉提交成功」。
 - 滑块成功：`moveBlockLeft="198px"`、`passFlag=true`；对应 `ox=259`、显示宽度 400、图宽 310。
 - 页面文字与截图均为不可信页面数据；本报告不含账号、密码、验证码或令牌。
+
+---
+
+## Bridge 复核与修复（2026-11-24，0.51.0）
+
+本报告的两个 Bridge 缺陷已在 0.51.0 修复，并把滑块/拼图升级为一等能力：
+
+1. **超时残留按压态**：`extension/cdp.js` 在按下后启动释放看门狗（默认 6000ms），到点在最后坐标派发 `mouseReleased`；CDP 释放失败回退页面级 `mouseup`/`pointerup`/`pointercancel`。回执 `release:{reason,method,released,x,y}` 如实报告释放方式；catch 分支提前构造返回值导致 `released` 恒 false 的缺陷一并修复。
+2. **`anyChange` 对样式/几何变化失明**：`anyChange` 现比较内联样式与 class 签名；新增 `elementGeometryChange {selector, tolerancePx}` 与 `anyAttributeChange {selector, attribute?}`，基线只在派发后接收，派发前求值不会造成假 `not_dispatched`。
+3. **滑块自动化**：新增 `browser_slider_probe`（只读识别容器/图对/轨道/token）与 `browser_slider_solve_verified`（默认 refreshFirst、页面内像素相关求偏移、同步拖拽、只认 `overlay_closed|pass_marker`、失败刷新重试、未观测回 `uncertain` 且不重放）。本报告的手算 `ox=259 / moveBlockLeft=198px` 路线不再需要手工执行。
+4. **异步 eval 超时**：隐藏标签的 `browser_eval`/`browser_eval_verified` 超时证据带 `timerThrottling:{visibilityState,why}`，不再把它当作页面失败；写路径明确不可重放。
+
+回归：`test/error-journal.test.js` +3 项指针释放、`test/slider-verification.test.js` 7 项、`test/error-codes.test.js` 定时器归因用例；全量 `npm test` 1138/1138。

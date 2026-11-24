@@ -4,6 +4,16 @@
 
 ## 目标
 
+## 2026-11-24 接手增量（0.51.0，已部署）：现场反馈闭环 / 滑块拼图一等能力 / PDF 与指针证据
+
+- **触发**：2026-11-24 CNIPA 商标实战两份现场报告（`docs/FIELD-REPORT-20261124-cnipa-pdfsave-blank-tab.md`、`docs/FIELD-REPORT-20261124-cnipa-sso-slider.md`）与「发送邮箱/短信验证码前的拼图拦截」反馈。
+- **交付**：`browser_pdf_save` 打印前探测浮层并自动切换 `screen` 媒体（回执 `media`/`mediaReason`/`overlay`），源标签被打印管线置空时回 `tabBlanked`/`tabAfterUrl` 与恢复指令（警告 `source_tab_blanked`），下载记录不可见时回 `downloadRecordVisible:false`（警告 `download_record_not_visible`）；指针路径按下后必定释放（看门狗 + 页面级 `mouseup` 回退），回执 `release:{reason,method,released,x,y}`，修复 catch 分支提前构造导致 `released` 恒 false；`anyChange` 增加内联样式/class 签名，新增 `elementGeometryChange {selector,tolerancePx}` 与 `anyAttributeChange {selector,attribute?}`，两者只在派发后接收 `targetBaseline`；新增 `browser_slider_probe` 与 `browser_slider_solve_verified`（refreshFirst 默认开、同步拖拽隐藏标签可用、只认 `overlay_closed|pass_marker`、未观测回 `uncertain` 且不重放），工具数 143 → **145**；隐藏标签 eval 超时证据带 `timerThrottling`。
+- **复验**：全量 `npm test` **1138/1138**（exit 0）；新增 `test/slider-verification.test.js` 7 项，`test/cdp-advanced.test.js` +6 项 PDF，`test/error-journal.test.js` +3 项指针释放；`test/host-status-e2e.test.js` 修复偶发 bad-port 重绑。技能同步：bridge skill 增加滑块路由与期望匹配器口径，CNIPA skill 新增 §6 发码前滑块配方。
+- **部署证据（2026-11-24 13:27–13:28 +0800）**：`restart-service-when-idle --apply` intent `2bd31c66…`，pid 86048 → **47940**，`serviceVersion:"0.51.0"`、`runningBuildId = diskBuildId = 88bb837b…`、`deploymentStale:false`。两个宿主各自 `chrome.runtime.reload` 到扩展 0.51.0（`foregroundTaken:false`、`errorJournal.state:"none_recorded"`）：`h-0b47a521c4384e90beb4`（系统 Chrome 156.0.8078.49，session `f9fd3e7b…` → `907bc4f0…`）与 `h-b76b872f85d347a49e00`（ChatGPT 内嵌 Chrome 158.0.8127.37，session → `5f5db713…`）。插件 `ai-browser-bridge@local v0.51.0` 已安装到 `plugins/cache/local/ai-browser-bridge/0.51.0`，其 `bin/launch-bridge.mjs` 独立 stdio 探针得到 **145** 工具（含两个滑块工具）与两个资源。
+- **复验状态**：`status` → `deploymentStale:false`、`extensionVersionSkew:false`、`upgradeRequired:false`、`actionRequired:[]`；`browser_hosts` 两宿主均 `extensionVersion:"0.51.0"`；`browser_health.toolSurface` → `status:"current"`、`toolCount:145`、`coreToolCount:24`、hash `dc2c652d…`；`heartbeat` → `verdict:"clean"`、`provenClean:true`、`findings:[]`、`degraded:false`；文本意图索引 3740 字节（上限 3800）。
+- **发布**：发版提交附 annotated tag `v0.51.0` 并推送 `origin`；GitHub Release `v0.51.0` 携带 `ai-browser-bridge-0.51.0.zip`（21553 字节，SHA256 `a455d0ed…e9f3`），远程安装命令 `qoder plugin install https://github.com/love530love/ai-browser-bridge/releases/download/v0.51.0/ai-browser-bridge-0.51.0.zip --scope user`。旧会话可能缓存 143 工具 schema，新会话才注入 145。
+- **边界**：字符型图形验证码仍交人工；canvas/无 CORS 图片 `unsupported`；求解成功不等于验证码已发出；PDF `screen` 媒体只保证浮层进入可打印树；指针看门狗是安全释放而非完整手势证明。未实现旋转/多缺口拼图、视觉模型求偏移、打印前等待网络空闲。
+
 ## 2026-11-23 接手增量（0.50.0，已部署）：工具发现整体化 / 弱 agent 不再卡在首批
 
 - **交付**：`tools/list` 改为核心 24 个日常工具优先、全量 143 个工具紧随其后（不删、不隐藏）；新增服务本地只读 `browser_tool_search`（确定性 `basis` 排名，下划线分词，写工具带 `verifiedVariant`）与 `browser_tool_schema`（精确 schema，未知名给建议与搜索下一步）；未知工具名统一返回 `code:"UNKNOWN_TOOL"` + `suggestedTools` + `nextStep`（HTTP 400 与 MCP `isError` 同构）；MCP initialize 说明压缩，全契约移入 `bridge://capabilities`（与 skill 资源并存）；`browser_health.toolSurface` 报告 current/stale、`toolCount`、hash、 `coreToolCount`；warnings/handoff 仅 advisory，不阻断能力。弱 agent 基准：旧行为 5/5 卡死，当前 5/5 恢复、4/5 首结果命中、0 假成功。

@@ -1457,12 +1457,29 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       }
     };
   };
+  const attributeSignature = (attribute, limit) => {
+    const parts = [];
+    let nodes;
+    try { nodes = document.querySelectorAll(`[${attribute}]`); } catch { return ''; }
+    for (const el of nodes) {
+      if (parts.length >= limit) break;
+      const raw = el.getAttribute(attribute) || '';
+      if (!raw) continue;
+      parts.push(`${shortSelector(el)}=${raw.replace(/\s+/g, ' ').slice(0, 120)}`);
+    }
+    return parts.join('|');
+  };
   const changeSnapshot = () => ({
     url: location.href,
     text: pageText(),
     domNodes: typeof document.getElementsByTagName === 'function' ? document.getElementsByTagName('*').length : null,
     resources: typeof performance !== 'undefined' && typeof performance.getEntriesByType === 'function'
-      ? performance.getEntriesByType('resource').length : null
+      ? performance.getEntriesByType('resource').length : null,
+    // Inline style and class are where sliders, progress bars and framework
+    // flags move without touching text, node count or network. Bounded so this
+    // stays a change signal, not a second page dump.
+    style: attributeSignature('style', 200),
+    classes: attributeSignature('class', 300)
   });
   const classifyChange = (baseline, current) => {
     if (!baseline || !current) return { changed: false, changes: [] };
@@ -1471,7 +1488,44 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (baseline.text !== current.text) changes.push('text');
     if (baseline.domNodes !== null && current.domNodes !== null && baseline.domNodes !== current.domNodes) changes.push('dom');
     if (baseline.resources !== null && current.resources !== null && baseline.resources !== current.resources) changes.push('network');
+    if (baseline.style !== undefined && current.style !== undefined && baseline.style !== current.style) changes.push('style');
+    if (baseline.classes !== undefined && current.classes !== undefined && baseline.classes !== current.classes) changes.push('class');
     return { changed: changes.length > 0, changes };
+  };
+  const geometrySpec = value => {
+    const raw = typeof value === 'string' ? { selector: value } : (value && typeof value === 'object' ? value : null);
+    if (!raw || typeof raw.selector !== 'string' || !raw.selector.trim()) return null;
+    return { selector: raw.selector.trim(), tolerancePx: Number.isFinite(raw.tolerancePx) ? Math.min(100, Math.max(0, raw.tolerancePx)) : 1 };
+  };
+  const attributeSpec = value => {
+    const raw = typeof value === 'string' ? { selector: value } : (value && typeof value === 'object' ? value : null);
+    if (!raw || typeof raw.selector !== 'string' || !raw.selector.trim()) return null;
+    return { selector: raw.selector.trim(), attribute: typeof raw.attribute === 'string' && raw.attribute ? raw.attribute : null };
+  };
+  const rectSnapshot = selector => {
+    let el;
+    try { el = document.querySelector(selector); } catch { return { invalidSelector: true, rect: null }; }
+    if (!el) return { invalidSelector: false, rect: null };
+    const r = el.getBoundingClientRect();
+    const round = value => Math.round(value * 10) / 10;
+    return { invalidSelector: false, rect: { x: round(r.left), y: round(r.top), width: round(r.width), height: round(r.height) } };
+  };
+  const attributeValue = (el, attribute) => {
+    if (!el) return null;
+    if (attribute) return el.getAttribute(attribute);
+    return [...el.attributes].map(item => `${item.name}=${item.value}`).join('|').slice(0, 2000);
+  };
+  const targetBaselineFor = (expect = {}) => {
+    const out = {};
+    const geometry = geometrySpec(expect.elementGeometryChange);
+    if (geometry) out.geometry = { selector: geometry.selector, tolerancePx: geometry.tolerancePx, snapshot: rectSnapshot(geometry.selector) };
+    const attributes = attributeSpec(expect.anyAttributeChange);
+    if (attributes) {
+      let el = null;
+      try { el = document.querySelector(attributes.selector); } catch { el = null; }
+      out.attributes = { selector: attributes.selector, attribute: attributes.attribute, value: attributeValue(el, attributes.attribute) };
+    }
+    return Object.keys(out).length ? out : null;
   };
   // Inline form errors are the other half of a submit's outcome: a click that
   // changed nothing and painted a red sentence is not "no change", it is a
@@ -1511,8 +1565,48 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     }
     if (typeof expect.valueMatches === 'string') checks.valueMatches = (typeof context.getValue === 'function' ? context.getValue() : context.value) === expect.valueMatches;
     if (typeof expect.fileNameAppears === 'string') checks.fileNameAppears = pageText().includes(expect.fileNameAppears) || context.fileName === expect.fileNameAppears;
+    let geometry = null;
+    if (expect.elementGeometryChange !== undefined) {
+      const spec = geometrySpec(expect.elementGeometryChange);
+      const current = spec ? rectSnapshot(spec.selector) : { invalidSelector: true, rect: null };
+      const baseline = context.targetBaseline?.geometry;
+      const deltas = baseline?.snapshot?.rect && current.rect ? {
+        x: Math.abs(current.rect.x - baseline.snapshot.rect.x),
+        y: Math.abs(current.rect.y - baseline.snapshot.rect.y),
+        width: Math.abs(current.rect.width - baseline.snapshot.rect.width),
+        height: Math.abs(current.rect.height - baseline.snapshot.rect.height)
+      } : null;
+      const deltaPx = deltas ? Math.max(deltas.x, deltas.y, deltas.width, deltas.height) : null;
+      const tolerancePx = baseline?.tolerancePx ?? spec?.tolerancePx ?? 1;
+      const changed = Boolean(spec && baseline && baseline.selector === spec.selector && deltas && deltaPx > tolerancePx);
+      checks.elementGeometryChange = changed;
+      geometry = {
+        selector: spec?.selector ?? null, tolerancePx,
+        baseline: baseline?.snapshot?.rect ?? null,
+        current: current.rect,
+        deltaPx: deltaPx === null ? null : Math.round(deltaPx * 10) / 10,
+        ...(current.invalidSelector ? { invalidSelector: true } : {}),
+        ...(baseline?.snapshot?.invalidSelector ? { baselineInvalidSelector: true } : {}),
+        changed
+      };
+    }
+    let attributes = null;
+    if (expect.anyAttributeChange !== undefined) {
+      const spec = attributeSpec(expect.anyAttributeChange);
+      let currentEl = null;
+      try { currentEl = spec ? document.querySelector(spec.selector) : null; } catch { currentEl = null; }
+      const currentValue = spec ? attributeValue(currentEl, spec.attribute) : null;
+      const baseline = context.targetBaseline?.attributes;
+      const changed = Boolean(spec && baseline && baseline.selector === spec.selector && baseline.attribute === spec.attribute &&
+        baseline.value !== null && currentValue !== null && baseline.value !== currentValue);
+      checks.anyAttributeChange = changed;
+      attributes = {
+        selector: spec?.selector ?? null, attribute: spec?.attribute ?? null,
+        baselineValue: baseline?.value ?? null, currentValue, changed
+      };
+    }
     const specified = Object.keys(checks).length > 0;
-    return { checks, matchedIn, specified, satisfied: specified && Object.values(checks).every(Boolean), diagnostics: { textScanPartial } };
+    return { checks, matchedIn, specified, satisfied: specified && Object.values(checks).every(Boolean), diagnostics: { textScanPartial }, ...(geometry ? { geometry } : {}), ...(attributes ? { attributes } : {}) };
   };
   const expectationState = (expect = {}, context = {}) => {
     let state;
@@ -1570,6 +1664,8 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
       matchedIn: state.matchedIn || {},
       ...(state.anyOf ? { anyOf: state.anyOf } : {}),
       ...(state.change ? { change: state.change } : {}),
+      ...(state.geometry ? { geometry: state.geometry } : {}),
+      ...(state.attributes ? { attributes: state.attributes } : {}),
       ...(state.diagnostics?.textScanPartial ? { textScanPartial: true } : {}),
       ...(Object.values(state.matchedIn || {}).some(m => m?.isTransient)
         ? { transient: true, transientNote: 'The matched evidence is inside a toast/notice container. It may disappear before the transaction settles; prefer urlContains or a stable element, or raise stableForMs.' }
@@ -2990,12 +3086,318 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   // Ref-less expectation evaluation, used by browser_eval_verified: the eval
   // itself runs in the page's MAIN world, but the expectation must be judged by
   // the same code path as every ref-based write, or the two would drift.
+  if (name === 'browser_synthetic_swipe') {
+    const x = Number(args.x), y = Number(args.y), endX = Number(args.endX), endY = Number(args.endY);
+    if (![x, y, endX, endY].every(Number.isFinite)) throw new Error('browser_synthetic_swipe needs finite x/y/endX/endY in CSS pixels');
+    const steps = Math.min(24, Math.max(2, Math.trunc(Number(args.steps)) || 8));
+    let explicit = null;
+    if (typeof args.selector === 'string' && args.selector.trim()) {
+      try { explicit = document.querySelector(args.selector.trim()); } catch { throw new Error(`Invalid slider element selector: ${args.selector}`); }
+      if (!explicit) return { dispatched: false, reason: 'target_not_found', selector: args.selector.trim(), start: { x, y }, steps };
+    }
+    const hit = document.elementFromPoint(x, y);
+    if (!hit && !explicit) return { dispatched: false, reason: 'start_unresolved', start: { x, y }, steps };
+    const target = explicit || hit.closest?.('.verify-move-block, [class*="move-block"], [class*="slider"], [class*="slide-verify"]') || hit;
+    const base = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, buttons: 1, view: window };
+    // One synchronous tick is the point: hidden documents throttle setTimeout
+    // and never paint, so a sleep-based drag can stop halfway through.
+    target.dispatchEvent(new MouseEvent('mousedown', base));
+    for (let i = 1; i <= steps; i++) {
+      const cx = Math.round(x + (endX - x) * i / steps);
+      const cy = Math.round(y + (endY - y) * i / steps);
+      target.dispatchEvent(new MouseEvent('mousemove', { ...base, clientX: cx, clientY: cy }));
+    }
+    target.dispatchEvent(new MouseEvent('mouseup', { ...base, clientX: endX, clientY: endY, buttons: 0 }));
+    return {
+      dispatched: true, mechanism: 'synthetic_page_events', trusted: false, synchronous: true, steps,
+      start: { x, y }, end: { x: endX, y: endY },
+      target: { tag: target.tagName?.toLowerCase() ?? null, selector: shortSelector(target) }
+    };
+  }
+  // Slider / jigsaw verification: the CNIPA SSO flow put a puzzle before every
+  // email-code send, and the working recipe lived only in a hand-written skill.
+  // These operations make the same work observable evidence: probe the widget,
+  // refresh a stale challenge, solve the offset locally from the two images,
+  // then judge the outcome instead of assuming the drag worked.
+  const SLIDER_ROOT_SELECTORS = '.verify-wrap,[class*="verify-wrap"],[class*="slide-verify"],[class*="slider-verify"],[class*="verify-slider"],[class*="verifybox"],[class*="verify-box"],.yidun_popup,.geetest_panel,[class*="captcha-container"],[class*="captcha_container"]';
+  const SLIDER_PIECE_SELECTORS = '.verify-move-block,[class*="move-block"],[class*="slider-btn"],[class*="slide-btn"],[class*="slider-button"],.geetest_slider_button,[class*="slider-move"],[class*="slide-block"],[class*="puzzle-piece"]';
+  const SLIDER_BG_SELECTORS = 'img.verify-img-panel,.verify-img-panel,[class*="verify-img"],[class*="verify-bg"],img[class*="verify"],.geetest_canvas_bg,canvas[class*="verify"]';
+  const findFirstIn = (root, selector) => {
+    if (!root) return null;
+    try { return root.querySelector(selector); } catch { return null; }
+  };
+  const parseSliderUrl = el => {
+    if (!el) return null;
+    if (el.tagName === 'IMG') return el.currentSrc || el.src || el.getAttribute('src') || null;
+    const bg = getComputedStyle(el).backgroundImage || '';
+    const match = /url\((['"]?)(.*?)\1\)/.exec(bg);
+    return match ? match[2] : null;
+  };
+  // URLs are page content and can carry a session token in the query string:
+  // report only origin+path, never the full url and never a data: payload.
+  const describeSliderUrl = url => {
+    if (!url) return null;
+    if (/^data:/i.test(url)) return { kind: 'data_url', length: url.length };
+    return { kind: 'url', url: url.split('?')[0].slice(0, 240) };
+  };
+  const hashToken = text => {
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+    return (hash >>> 0).toString(16);
+  };
+  const sliderPartsOf = root => {
+    const piece = findFirstIn(root, SLIDER_PIECE_SELECTORS);
+    const background = findFirstIn(root, SLIDER_BG_SELECTORS);
+    const bar = findFirstIn(root, '.verify-bar-area,[class*="slider-track"],[class*="slide-track"],[class*="bar-area"]');
+    const refresh = findFirstIn(root, '.verify-refresh,[class*="refresh"],[class*="reload"],[class*="change-img"]');
+    const message = findFirstIn(root, '.verify-msg,[class*="verify-msg"],[class*="error-msg"],[class*="fail-msg"]');
+    return { root, piece, background, bar, refresh, message };
+  };
+  const sliderRootFor = selector => {
+    if (typeof selector === 'string' && selector.trim()) {
+      let chosen;
+      try { chosen = document.querySelector(selector.trim()); } catch { throw new Error(`Invalid slider selector: ${selector}`); }
+      if (!chosen) return null;
+      try { return chosen.matches(SLIDER_ROOT_SELECTORS) ? chosen : (chosen.closest(SLIDER_ROOT_SELECTORS) || chosen); } catch { return chosen; }
+    }
+    let nodes;
+    try { nodes = [...document.querySelectorAll(SLIDER_ROOT_SELECTORS)]; } catch { return null; }
+    for (const node of nodes) {
+      if (!visible(node, true)) continue;
+      if (findFirstIn(node, SLIDER_PIECE_SELECTORS) && findFirstIn(node, SLIDER_BG_SELECTORS)) return node;
+    }
+    return null;
+  };
+  const rectOf = el => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const round = value => Math.round(value * 10) / 10;
+    return { x: round(r.left), y: round(r.top), width: round(r.width), height: round(r.height) };
+  };
+  const sliderTokenOf = parts => hashToken([
+    parseSliderUrl(parts.background) || '',
+    parts.background?.naturalWidth || 0,
+    parts.background?.naturalHeight || 0,
+    parseSliderUrl(parts.piece) || ''
+  ].join('|'));
+  const sliderPhaseOf = (root, baselineToken = null) => {
+    const parts = sliderPartsOf(root);
+    const rootVisible = Boolean(root?.isConnected && visible(root, true));
+    const message = squash(parts.message?.textContent || (root ? '' : '')).slice(0, 200);
+    const token = sliderTokenOf(parts);
+    const imageChanged = Boolean(baselineToken && token && token !== baselineToken);
+    const failText = /失败|不正确|不通过|重试|拖动滑块|error|fail|try again/i.test(message) || /fail|error/i.test(String(root?.className ?? ''));
+    const passText = /成功|通过|验证通过|success|verified/i.test(message);
+    const resend = [...document.querySelectorAll('button,[role=button],a')]
+      .some(el => visible(el, true) && /重新获取|重新发送|resend/i.test(squash(el.textContent)));
+    const phase = !rootVisible ? 'closed' : (passText ? 'passed' : (failText || imageChanged ? 'failed' : 'pending'));
+    return {
+      phase, present: rootVisible, token, imageChanged,
+      message: message || null, resendVisible: resend,
+      classes: root ? squash(String(root.className ?? '')).slice(0, 200) : null
+    };
+  };
+  const sliderProbeReport = (root, extra = {}) => {
+    const parts = sliderPartsOf(root);
+    const bgRect = rectOf(parts.background);
+    return {
+      status: 'success', found: true,
+      selector: shortSelector(root),
+      classes: squash(String(root.className ?? '')).slice(0, 200),
+      state: sliderPhaseOf(root),
+      background: parts.background ? {
+        selector: shortSelector(parts.background),
+        kind: parts.background.tagName === 'CANVAS' ? 'canvas' : 'image',
+        source: describeSliderUrl(parseSliderUrl(parts.background)),
+        natural: parts.background.tagName === 'IMG'
+          ? { width: parts.background.naturalWidth || null, height: parts.background.naturalHeight || null }
+          : null,
+        rect: bgRect
+      } : null,
+      piece: parts.piece ? { selector: shortSelector(parts.piece), rect: rectOf(parts.piece), source: describeSliderUrl(parseSliderUrl(parts.piece)) } : null,
+      bar: parts.bar ? { selector: shortSelector(parts.bar), rect: rectOf(parts.bar) } : null,
+      refresh: parts.refresh ? { selector: shortSelector(parts.refresh), text: squash(parts.refresh.textContent).slice(0, 80), rect: rectOf(parts.refresh) } : null,
+      message: parts.message ? { selector: shortSelector(parts.message), text: squash(parts.message.textContent).slice(0, 200) } : null,
+      ...extra
+    };
+  };
+  if (name === 'browser_slider_probe') {
+    const root = sliderRootFor(args.selector);
+    if (!root) {
+      return { status: 'not_found', found: false, reason: 'slider_not_visible', selector: args.selector ?? null,
+        note: 'No visible slider/jigsaw verification widget matched. Trigger the action that opens it first; an absent widget is not proof that the page has no challenge.' };
+    }
+    return sliderProbeReport(root);
+  }
+  if (name === 'browser_slider_refresh') {
+    const root = sliderRootFor(args.selector);
+    if (!root) return { status: 'not_found', found: false, dispatched: false, reason: 'slider_not_visible' };
+    const parts = sliderPartsOf(root);
+    let control = parts.refresh;
+    if (!control) {
+      control = [...root.querySelectorAll('button,[role=button],a,i,span')]
+        .find(el => visible(el, true) && /刷新|换一张|点击刷新|refresh/i.test(`${squash(el.textContent)} ${el.getAttribute('title') || ''} ${el.getAttribute('aria-label') || ''}`));
+    }
+    if (!control) return { status: 'skipped', found: true, dispatched: false, reason: 'refresh_control_not_found',
+      note: 'No refresh control was found. The current image may still be usable; solve will use whatever is displayed now.' };
+    const beforeToken = sliderTokenOf(parts);
+    control.click();
+    const deadline = Date.now() + Math.min(4000, Math.max(500, Number(args.timeoutMs) || 2500));
+    let afterToken = beforeToken;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      afterToken = sliderTokenOf(sliderPartsOf(root));
+      if (afterToken && afterToken !== beforeToken) break;
+    }
+    return { status: 'success', found: true, dispatched: true, refreshed: Boolean(afterToken && afterToken !== beforeToken),
+      selector: shortSelector(control), text: squash(control.textContent).slice(0, 80), beforeToken, afterToken };
+  }
+  if (name === 'browser_slider_status') {
+    const root = sliderRootFor(args.selector);
+    if (!root) return { status: 'success', phase: 'closed', present: false, reason: 'slider_not_visible' };
+    return { status: 'success', ...sliderPhaseOf(root, typeof args.baselineToken === 'string' ? args.baselineToken : null) };
+  }
+  if (name === 'browser_slider_solve') {
+    const root = sliderRootFor(args.selector);
+    if (!root) return { status: 'not_found', found: false, reason: 'slider_not_visible' };
+    const parts = sliderPartsOf(root);
+    if (!parts.background || !parts.piece) {
+      return { status: 'no_solution', found: true, reason: !parts.background ? 'background_not_found' : 'piece_not_found',
+        selectors: { root: shortSelector(root), piece: SLIDER_PIECE_SELECTORS, background: SLIDER_BG_SELECTORS } };
+    }
+    if (parts.background.tagName === 'CANVAS') {
+      return { status: 'unsupported', found: true, reason: 'canvas_background',
+        note: 'This widget paints its background into a canvas, so the two images cannot be read as pixels here. Use browser_screenshot plus the visual/coordinate route; do not guess the offset.' };
+    }
+    const backgroundUrl = parseSliderUrl(parts.background);
+    const pieceUrl = parseSliderUrl(parts.piece);
+    if (!backgroundUrl || !pieceUrl) {
+      return { status: 'no_solution', found: true, reason: 'image_source_not_found' };
+    }
+    const loadImage = (url, cors) => new Promise((resolve, reject) => {
+      const img = new Image();
+      if (cors) img.crossOrigin = 'anonymous';
+      const timer = setTimeout(() => { img.src = ''; reject(new Error('image_load_timeout')); }, 4000);
+      img.onload = () => { clearTimeout(timer); resolve(img); };
+      img.onerror = () => { clearTimeout(timer); reject(new Error('image_load_failed')); };
+      img.src = url;
+    });
+    const pixelsOf = img => {
+      if (img.naturalWidth * img.naturalHeight > 1600 * 1600) throw new Error('image_too_large');
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      return { width: canvas.width, height: canvas.height, data: ctx.getImageData(0, 0, canvas.width, canvas.height).data };
+    };
+    const loadPixels = async url => {
+      try { return pixelsOf(await loadImage(url, true)); } catch (error) { if (String(error.message) === 'image_too_large') throw error; }
+      try { return pixelsOf(await loadImage(url, false)); } catch (error) { if (String(error.message) === 'image_too_large') throw error; }
+      try {
+        const response = await fetch(url, { credentials: 'include' });
+        if (!response.ok) throw new Error(`http_${response.status}`);
+        const bitmap = await createImageBitmap(await response.blob());
+        const canvas = document.createElement('canvas');
+        canvas.width = bitmap.width; canvas.height = bitmap.height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close?.();
+        return { width: canvas.width, height: canvas.height, data: ctx.getImageData(0, 0, canvas.width, canvas.height).data };
+      } catch { return null; }
+    };
+    let background, piece;
+    try { background = await loadPixels(backgroundUrl); piece = await loadPixels(pieceUrl); }
+    catch (error) {
+      const reason = String(error.message) === 'image_too_large' ? 'image_too_large' : 'image_read_failed';
+      return { status: 'unreadable', found: true, reason, note: 'The challenge images could not be decoded into pixels (cross-origin taint or size limit). Use browser_screenshot and the visual route; do not guess an offset.' };
+    }
+    if (!background || !piece) {
+      return { status: 'unreadable', found: true, reason: 'cross_origin_images',
+        note: 'Both challenge images exist but their pixels cannot be read from this page (cross-origin without CORS). Use browser_screenshot plus the visual/coordinate route.' };
+    }
+    const bgWidth = background.width, bgHeight = background.height;
+    const pieceWidth = piece.width, pieceHeight = piece.height;
+    if (pieceWidth >= bgWidth || pieceHeight > bgHeight) {
+      return { status: 'no_solution', found: true, reason: 'unexpected_image_geometry',
+        background: { width: bgWidth, height: bgHeight }, piece: { width: pieceWidth, height: pieceHeight } };
+    }
+    const points = [];
+    for (let y = 0; y < pieceHeight; y++) {
+      for (let x = 0; x < pieceWidth; x++) {
+        const i = (y * pieceWidth + x) * 4;
+        if (piece.data[i + 3] > 10) points.push({ x, y, value: (piece.data[i] + piece.data[i + 1] + piece.data[i + 2]) / 3 });
+      }
+    }
+    if (points.length < 30) {
+      return { status: 'no_solution', found: true, reason: 'piece_mask_empty', opaquePiece: true,
+        note: 'The piece image has no usable alpha mask. Inspect it with browser_screenshot before trying another route.' };
+    }
+    const stride = Math.max(1, Math.floor(points.length / 6000));
+    const sample = stride > 1 ? points.filter((_, index) => index % stride === 0) : points;
+    const backgroundLuma = new Float32Array(bgWidth * bgHeight);
+    for (let i = 0; i < bgWidth * bgHeight; i++) {
+      const j = i * 4;
+      backgroundLuma[i] = (background.data[j] + background.data[j + 1] + background.data[j + 2]) / 3;
+    }
+    const maxOffset = bgWidth - pieceWidth;
+    const scores = new Float32Array(maxOffset + 1);
+    for (let offset = 0; offset <= maxOffset; offset++) {
+      let n = 0, sumP = 0, sumB = 0, sumPP = 0, sumBB = 0, sumPB = 0;
+      for (const point of sample) {
+        const bv = backgroundLuma[point.y * bgWidth + offset + point.x];
+        n += 1; sumP += point.value; sumB += bv;
+        sumPP += point.value * point.value; sumBB += bv * bv; sumPB += point.value * bv;
+      }
+      const covariance = n * sumPB - sumP * sumB;
+      const denominator = Math.sqrt((n * sumPP - sumP * sumP) * (n * sumBB - sumB * sumB));
+      scores[offset] = denominator > 1e-6 ? covariance / denominator : -1;
+    }
+    let bestScore = -1, bestOffset = 0;
+    for (let offset = 0; offset <= maxOffset; offset++) {
+      if (scores[offset] > bestScore) { bestScore = scores[offset]; bestOffset = offset; }
+    }
+    let secondScore = -1;
+    for (let offset = 0; offset <= maxOffset; offset++) {
+      if (Math.abs(offset - bestOffset) > 5 && scores[offset] > secondScore) secondScore = scores[offset];
+    }
+    const backgroundRect = rectOf(parts.background);
+    const pieceRect = rectOf(parts.piece);
+    const barRect = rectOf(parts.bar);
+    const scale = backgroundRect && bgWidth > 0 ? backgroundRect.width / bgWidth : 1;
+    const cssDelta = Math.round(bestOffset * scale);
+    const startX = barRect ? Math.round(barRect.x + Math.min(Math.max(0, Number(args.startInsetPx) || 20), Math.max(0, barRect.width / 2 - 1)))
+      : Math.round(pieceRect.x + pieceRect.width / 2);
+    const startY = Math.round(pieceRect.y + pieceRect.height / 2);
+    const endX = Math.min(innerWidth - 1, Math.max(1, startX + cssDelta));
+    const delta = {
+      offsetNaturalPx: bestOffset,
+      cssDeltaPx: cssDelta,
+      scale: Math.round(scale * 10000) / 10000,
+      tolerancePx: 5
+    };
+    const confidence = bestScore < 0.35 ? 'low' : (bestScore < 0.6 ? 'medium' : 'high');
+    return {
+      status: 'solved', found: true,
+      selector: shortSelector(root), pieceSelector: shortSelector(parts.piece),
+      delta, correlation: Math.round(bestScore * 1000) / 1000, secondCorrelation: Math.round(secondScore * 1000) / 1000,
+      margin: Math.round((bestScore - secondScore) * 1000) / 1000, confidence,
+      sampleCount: sample.length, candidates: maxOffset + 1,
+      images: { background: { width: bgWidth, height: bgHeight }, piece: { width: pieceWidth, height: pieceHeight } },
+      start: { x: startX, y: startY },
+      end: { x: endX, y: startY },
+      token: sliderTokenOf(parts),
+      ...(endX !== startX + cssDelta ? { clamped: true } : {}),
+      note: confidence === 'low'
+        ? 'Best correlation is weak. Inspect the current challenge with browser_screenshot before dragging; a wrong drag is counted by the site as a failed attempt.'
+        : 'Offset was computed locally from the two images. Drag once, then judge the outcome with browser_slider_status; never assume success from dispatch alone.'
+    };
+  }
   if (name === 'browser_expect') {
-    const state = expectationState(args.expect || {}, { changeBaseline: args.changeBaseline || null });
-    return { ...state, ...(args.wantBaseline ? { changeBaseline: changeSnapshot() } : {}) };
+    const state = expectationState(args.expect || {}, { changeBaseline: args.changeBaseline || null, targetBaseline: args.targetBaseline || null });
+    return { ...state, ...(args.wantBaseline ? { changeBaseline: changeSnapshot(), targetBaseline: targetBaselineFor(args.expect || {}) } : {}) };
   }
   if (name === 'browser_expect_verify') {
-    return await verify(args.expect || {}, args.timeoutMs ?? 3000, { changeBaseline: args.changeBaseline || null });
+    return await verify(args.expect || {}, args.timeoutMs ?? 3000, { changeBaseline: args.changeBaseline || null, targetBaseline: args.targetBaseline || null });
   }
   const state = stateForRef(args.ref);
   const entry = state?.refs.get(args.ref);
@@ -3055,8 +3457,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   if (name === 'browser_upload') return applyUpload(el, args, 'ref');
   if (name === 'browser_upload_verified') {
     const changeBaseline = changeSnapshot();
+    const targetBaseline = targetBaselineFor(args.expect || {});
     const selected = await pageOperation('browser_upload', args, allowedOrigins, allSites);
-    const result = await verify(args.expect || {}, args.timeoutMs ?? 3000, { fileName: selected.fileName, changeBaseline });
+    const result = await verify(args.expect || {}, args.timeoutMs ?? 3000, { fileName: selected.fileName, changeBaseline, targetBaseline });
     return { selected, verification: result, status: result.status };
   }
   if (name === 'browser_select') {
@@ -3187,6 +3590,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   }
   if (name === 'browser_click_verified') {
     const changeBaseline = changeSnapshot();
+    const targetBaseline = targetBaselineFor(args.expect || {});
     const baseline = expectationState(args.expect || {});
     if (baseline.satisfied) {
       return { status: 'not_dispatched', reason: 'expected_condition_already_satisfied', dispatched: false, retryable: false,
@@ -3203,7 +3607,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     if (clicked?.dispatched === false) return { ...clicked, status: 'not_dispatched' };
     let result;
     try {
-      result = await verify(args.expect || {}, args.timeoutMs ?? 3000, { changeBaseline });
+      result = await verify(args.expect || {}, args.timeoutMs ?? 3000, { changeBaseline, targetBaseline });
     } catch {
       return { status: 'uncertain', reason: 'verification_interrupted_after_dispatch', dispatched: true, retryable: false,
         recommendedNextAction: 'The click was dispatched but page verification was interrupted. Re-observe and independently verify the outcome before any new action; do not click again automatically.' };
@@ -3292,6 +3696,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
   }
   if (name === 'browser_fill_verified') {
     const changeBaseline = changeSnapshot();
+    // Captured before the value is written: a geometry or attribute baseline
+    // taken after the fill would already include the change it is meant to detect.
+    const targetBaseline = targetBaselineFor(args.secret === true ? {} : (args.expect || {}));
     const filled = await pageOperation('browser_fill', args, allowedOrigins, allSites);
     const current = el.isContentEditable ? el.textContent : el.value;
     // A secret fill compares against the text that was sent and nothing else. A
@@ -3303,7 +3710,7 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     // Other expectations are dropped with it: the only outcome that matters for a
     // credential write is whether the field holds what we wrote.
     const secretExpect = args.secret === true;
-    const result = await verify(secretExpect ? { valueMatches: args.text } : (args.expect || { valueMatches: args.text }), args.timeoutMs ?? 3000, { value: current, getValue: () => el.isConnected ? (el.isContentEditable ? el.textContent : el.value) : undefined, changeBaseline });
+    const result = await verify(secretExpect ? { valueMatches: args.text } : (args.expect || { valueMatches: args.text }), args.timeoutMs ?? 3000, { value: current, getValue: () => el.isConnected ? (el.isContentEditable ? el.textContent : el.value) : undefined, changeBaseline, targetBaseline });
     const secretNote = secretExpect ? { expectValueMatchesIgnored: 'secret fill compares against the text that was sent; a caller-supplied expectation is not used' } : {};
     if (result.status !== 'success') return { filled, verification: { ...result, status: 'not_observed' }, status: 'uncertain', ...secretNote,
       reason: 'filled_value_not_observed', dispatched: true, retryable: false,
@@ -3324,8 +3731,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
     const option = [...el.options].find(o => o.value === args.value && !o.disabled && !o.closest('optgroup[disabled]'));
     if (!option) throw new Error('Available option not found');
     const changeBaseline = changeSnapshot();
+    const targetBaseline = targetBaselineFor(expect);
     el.value = args.value; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
-    const result = await verify(expect, args.timeoutMs ?? 5000, { ...valueContext, changeBaseline });
+    const result = await verify(expect, args.timeoutMs ?? 5000, { ...valueContext, changeBaseline, targetBaseline });
     if (result.status !== 'success') {
       return { selected: true, verification: { ...result, status: 'not_observed' }, status: 'uncertain', outcome: 'no_change',
         reason: 'selected_value_not_observed', dispatched: true, retryable: false,
@@ -3350,8 +3758,9 @@ export async function pageOperation(name, args, allowedOrigins, allSites = false
         recommendedNextAction: 'The expectation already holds before the option was chosen, so nothing was clicked. matchedIn names what satisfied it; choose a condition that only the choice produces.' };
     }
     const changeBaseline = changeSnapshot();
+    const targetBaseline = targetBaselineFor(expect);
     const result = await chooseOption(el, exact, args.timeoutMs ?? 5000);
-    const verifyResult = await verify(expect, args.timeoutMs ?? 5000, { ...valueContext, changeBaseline });
+    const verifyResult = await verify(expect, args.timeoutMs ?? 5000, { ...valueContext, changeBaseline, targetBaseline });
     if (verifyResult.status !== 'success') {
       return { ...result, verification: { ...verifyResult, status: 'not_observed' }, status: 'uncertain', outcome: 'no_change',
         reason: 'choice_outcome_not_observed', dispatched: true, retryable: false,

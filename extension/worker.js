@@ -215,8 +215,14 @@ async function probeTabForTimeout(tabId) {
 // Pure so the classification can be asserted without Chrome. `hidden` follows
 // Chrome's own visibility rule: an inactive tab or a minimized window produces
 // a hidden document; a merely unfocused window does not.
+// A hidden document throttles setTimeout and never paints, so an expression
+// that awaits a sleep chain can outlive any budget without being wrong. Naming
+// that risk turns a bare timeout into an actionable route.
+const TIMER_OR_PAINT_DEPENDENT_EVAL = new Set(['browser_eval', 'browser_eval_verified']);
+
 function classifyCommandTimeout({ name, readOnly, probe, debuggerPaused, budgetMs, elapsedMs }) {
   const hidden = Boolean(probe?.available) && (probe.tabActive === false || probe.windowState === 'minimized');
+  const hiddenTimerRisk = hidden && TIMER_OR_PAINT_DEPENDENT_EVAL.has(name);
   const occlusion = probe?.available ? {
     tabActive: probe.tabActive === true,
     windowFocused: probe.windowFocused,
@@ -251,16 +257,28 @@ function classifyCommandTimeout({ name, readOnly, probe, debuggerPaused, budgetM
       reason: debuggerPaused.reason ?? null,
       autoResumeInMs: debuggerPaused.autoResumeInMs ?? null
     } : null,
-    occlusion
+    occlusion,
+    ...(hiddenTimerRisk ? {
+      timerThrottling: {
+        visibilityState: 'hidden',
+        why: 'A hidden document throttles setTimeout and requestAnimationFrame, so an async expression that awaits a sleep chain can exceed any budget without failing.'
+      }
+    } : null)
   };
   const base = { code, reason, tool: name, evidence, dispatched: null };
   if (readOnly === true) {
     return { ...base, status: 'waiting', retryable: true,
       suggestedDelayMs: 1000,
       nextPollTool: 'browser_wait_until_ready', nextPollArgs: { timeoutMs: 5000, idle: true },
-      recommendedNextAction: code === 'TAB_OCCLUDED'
-        ? 'This capture path needs painted frames and the document was hidden. Retry once; DOM and CDP reads normally work in a background tab. Do not activate the window or tab to make automation succeed - if frames still cannot be produced, ask the human to bring the tab forward.'
-        : 'The extension answered with its own timeout and no outcome. Keep the task alive, poll once, then retry the read with smaller budgets. Never treat this waiting result as bridge failure.' };
+      recommendedNextAction: hiddenTimerRisk
+        ? 'The tab is hidden and the eval outlived its budget: hidden documents throttle timers, so an expression that awaits sleeps can hang while doing nothing wrong. Replace it with one synchronous expression that computes and returns in a single tick; do not activate the tab to make a sleep complete.'
+        : code === 'TAB_OCCLUDED'
+          ? 'This capture path needs painted frames and the document was hidden. Retry once; DOM and CDP reads normally work in a background tab. Do not activate the window or tab to make automation succeed - if frames still cannot be produced, ask the human to bring the tab forward.'
+          : 'The extension answered with its own timeout and no outcome. Keep the task alive, poll once, then retry the read with smaller budgets. Never treat this waiting result as bridge failure.' };
+  }
+  if (hiddenTimerRisk) {
+    return { ...base, status: 'uncertain', retryable: false, requiresObservation: true,
+      recommendedNextAction: 'The eval outlived its budget in a hidden tab, where timers are throttled: the expression may have partially run and its end state is unobserved. Re-observe the page before any new write, and if it must be repeated, use one synchronous expression instead of a sleep chain; never replay it automatically.' };
   }
   return { ...base, status: 'uncertain', retryable: false, requiresObservation: true,
     recommendedNextAction: 'The command outlived its budget inside the extension and no result was observed. Do not replay it; re-observe the page and verify whether it took effect before any new write.' };
@@ -1394,7 +1412,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
     const prepared = await page(name);
     return prepared.coordinateToken ? { ...prepared, foreground: state.foreground } : prepared;
   }
-  if (name === 'browser_action') {
+  const runBrowserAction = async (args) => {
     if (args.expectedUrl !== tab.url) throw new Error('Observation URL is stale. Read page again.');
     const viewport = await page('browser_viewport');
     if (viewport.url !== args.expectedUrl) throw new Error('Observation URL changed');
@@ -1411,7 +1429,33 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       const state = await pointerForeground({ invalidateCoordinate: true, requireForeground: args.requireForeground === true });
       if (!state.ready) return state.result;
     }
+    if (args.action === 'Swipe' && args.synthetic === true) {
+      const state = await pointerForeground({ invalidateCoordinate: true, requireForeground: args.requireForeground === true });
+      if (!state.ready) return state.result;
+      const checked = await page('browser_validate_coordinate', { ...args, consume: false });
+      if (checked.status !== 'ready') return checked;
+      const point = {
+        x: checked.x, y: checked.y,
+        endX: Math.min(checked.width - 1, args.endX / 1000 * checked.width),
+        endY: Math.min(checked.height - 1, args.endY / 1000 * checked.height)
+      };
+      let synthetic;
+      try {
+        synthetic = await page('browser_synthetic_swipe', { ...point, steps: args.steps });
+      } finally {
+        await page('browser_validate_coordinate', { ...args, consume: true }).catch(() => {});
+      }
+      if (!synthetic?.dispatched) {
+        return { ...synthetic, status: 'failed', retryable: false, dispatched: false,
+          recommendedNextAction: synthetic?.reason === 'start_unresolved'
+            ? 'The coordinate no longer resolves to an element. Re-observe and prepare a new coordinate; nothing was dragged.'
+            : 'The synchronous page swipe did not dispatch. Re-observe the page and use the normal Swipe path or a page-specific script.' };
+      }
+      return { ...synthetic, status: 'success', retryable: false, dispatched: 'Swipe', inspectOutcome: true,
+        recommendedNextAction: 'Synthetic page events were dispatched in one synchronous tick. Verify the visible result (success text, overlay closed, image refreshed) before the next action; isTrusted is false by design.' };
+    }
     let coordinateResult;
+    let pointerResult = null;
     await guarded(async send => {
       if (args.action === 'Type') {
         if (!viewport.editable) throw new Error('Focus an editable non-password field before Type');
@@ -1422,7 +1466,8 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       if (coordinateResult.status !== 'ready') return;
       const point = { x: coordinateResult.x, y: coordinateResult.y, endX: Math.min(coordinateResult.width - 1, args.endX / 1000 * coordinateResult.width), endY: Math.min(coordinateResult.height - 1, args.endY / 1000 * coordinateResult.height) };
       try {
-        const pointerCompleted = await pointer(send, { ...point, action: { Tap: 'click', 'Double Tap': 'double', 'Long Press': 'long', Hover: 'hover', Swipe: 'drag' }[args.action],
+        pointerResult = await pointer(send, { ...point, action: { Tap: 'click', 'Double Tap': 'double', 'Long Press': 'long', Hover: 'hover', Swipe: 'drag' }[args.action],
+          steps: args.steps,
           beforeMove: async () => {
             const state = await pointerForeground({ invalidateCoordinate: true, requireForeground: args.requireForeground === true });
             if (!state.ready) { coordinateResult = state.result; return false; }
@@ -1440,17 +1485,104 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
             }
             return true;
           } });
-        if (!pointerCompleted && pointerPressesAttempted > 0) {
+        if (!pointerResult.completed && pointerPressesAttempted > 0) {
           coordinateResult = { status: 'uncertain', retryable: false, reason: 'pointer_action_partially_dispatched',
             dispatched: true, pointerPressesDispatched: pointerPressesAttempted,
-            recommendedNextAction: 'The pointer action was only partially dispatched. Inspect the page and verify the outcome before any new action; do not replay automatically.' };
+            ...(pointerResult.release ? { pointerRelease: pointerResult.release } : {}),
+            recommendedNextAction: 'The pointer action was only partially dispatched. Inspect the page and verify the outcome before any new action; do not replay automatically. pointerRelease reports whether a release was dispatched and at which coordinate.' };
         }
       } finally {
         await page('browser_validate_coordinate', { ...args, consume: true }).catch(() => {});
       }
     });
     if (coordinateResult && coordinateResult.status !== 'ready') return coordinateResult;
-    return { dispatched: args.action, inspectOutcome: true };
+    return { dispatched: args.action, inspectOutcome: true, ...(pointerResult?.release ? { pointerRelease: pointerResult.release } : {}) };
+  };
+  if (name === 'browser_action') return await runBrowserAction(args);
+  if (name === 'browser_slider_probe') {
+    return await page('browser_slider_probe', { selector: args.selector });
+  }
+  if (name === 'browser_slider_solve_verified') {
+    if (args.expectedUrl && args.expectedUrl !== tab.url) throw new Error('Observation URL is stale. Read page again.');
+    const selector = args.selector;
+    const maxAttempts = Math.min(3, Math.max(1, Number.isInteger(args.maxAttempts) ? args.maxAttempts : 2));
+    const refreshFirst = args.refreshFirst !== false;
+    const observations = [];
+    const pre = await page('browser_slider_probe', { selector });
+    if (pre?.found !== true) {
+      return { status: 'failed', reason: 'slider_not_found', dispatched: false, retryable: false, probe: pre ?? null,
+        recommendedNextAction: 'No visible slider/jigsaw challenge was found, so nothing was dispatched. Trigger the action that opens it (for example click 获取验证码) and call this tool again.' };
+    }
+    if (!pre.piece || !pre.background) {
+      return { status: 'unsupported', reason: 'slider_parts_not_found', dispatched: false, retryable: false, probe: pre,
+        recommendedNextAction: 'A verification container is visible but its background/piece pair could not be resolved. Use browser_screenshot and the visual/coordinate route; do not guess a drag.' };
+    }
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (!(await commandStillActive())) {
+        return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected',
+          dispatched: observations.length > 0, nextPollTool: 'browser_health', attempts: observations.length, observations };
+      }
+      // A stale challenge silently fails no matter how good the offset is: the
+      // token is short-lived (about two minutes on CNIPA). Refresh first on every
+      // attempt, then solve immediately on the image we just received.
+      const refresh = (refreshFirst || attempt > 1)
+        ? await page('browser_slider_refresh', { selector, timeoutMs: args.refreshTimeoutMs ?? 2500 })
+        : { status: 'skipped', dispatched: false, reason: 'refresh_disabled' };
+      const solved = await page('browser_slider_solve', { selector, startInsetPx: args.startInsetPx });
+      if (solved?.status !== 'solved') {
+        observations.push({ attempt, refresh: refresh?.status ?? null, solve: solved?.status ?? null, reason: solved?.reason ?? null });
+        if (solved?.status === 'unreadable' || solved?.status === 'unsupported') {
+          return { ...solved, status: 'unsupported', dispatched: false, retryable: false,
+            attempts: observations.length, observations, refresh, probe: pre,
+            recommendedNextAction: solved?.note || 'The challenge images cannot be read here. Use the visual/coordinate route; do not guess an offset.' };
+        }
+        continue;
+      }
+      const confidenceRank = { low: 0, medium: 1, high: 2 };
+      if (args.requireConfidence && confidenceRank[solved.confidence] < confidenceRank[args.requireConfidence]) {
+        return { status: 'failed', reason: 'confidence_below_requirement', dispatched: false, retryable: false,
+          solve: solved, attempts: observations.length, observations,
+          recommendedNextAction: `The best correlation (${solved.confidence}) is below the requested ${args.requireConfidence} confidence. Inspect the challenge with browser_screenshot; no drag was dispatched.` };
+      }
+      const drag = await page('browser_synthetic_swipe', {
+        x: solved.start.x, y: solved.start.y, endX: solved.end.x, endY: solved.end.y,
+        steps: Math.min(24, Math.max(2, Number.isInteger(args.steps) ? args.steps : 14)),
+        selector: solved.pieceSelector
+      });
+      if (!drag?.dispatched) {
+        observations.push({ attempt, solve: 'solved', drag: drag?.reason ?? 'not_dispatched' });
+        return { status: 'failed', reason: 'drag_not_dispatched', dispatched: false, retryable: false,
+          attempts: observations.length, observations, solve: solved, drag,
+          recommendedNextAction: 'The offset was computed but the drag could not be dispatched (the handle was not found). Re-observe the widget and probe again; nothing was dragged.' };
+      }
+      const baselineToken = solved.token ?? null;
+      const deadline = Date.now() + Math.min(10000, Math.max(1000, Number(args.timeoutMs) || 4000));
+      let status = null;
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        status = await page('browser_slider_status', { selector, baselineToken });
+        if (status?.phase && status.phase !== 'pending') break;
+      }
+      observations.push({ attempt,
+        solve: { offsetNaturalPx: solved.delta?.offsetNaturalPx, cssDeltaPx: solved.delta?.cssDeltaPx, correlation: solved.correlation, confidence: solved.confidence },
+        drag: drag.target ?? null, status: status ?? null, refreshed: refresh?.refreshed === true });
+      // Success must be observed: the overlay closed or the widget painted its own
+      // pass marker. A dispatch is not a solution.
+      if (status?.phase === 'closed' || status?.phase === 'passed') {
+        return { status: 'success', dispatched: true, retryable: false, attempts: observations.length,
+          outcome: status.phase === 'closed' ? 'overlay_closed' : 'pass_marker',
+          verification: status, solve: solved, drag, observations,
+          recommendedNextAction: 'Success was observed. Continue the original flow (click 获取验证码 again if the code was not sent, then read the inbox); re-probe if the challenge reappears.' };
+      }
+      if (status?.phase === 'failed') continue;
+      return { status: 'uncertain', dispatched: true, retryable: false, requiresObservation: true,
+        reason: 'slider_outcome_not_observed', verification: status ?? null,
+        solve: solved, drag, attempts: observations.length, observations,
+        recommendedNextAction: 'The drag was dispatched but neither success nor failure was observed before the deadline. Re-observe the page; do not drag again automatically.' };
+    }
+    return { status: 'failed', dispatched: observations.length > 0, retryable: false,
+      reason: 'slider_failed_after_attempts', attempts: observations.length, observations,
+      recommendedNextAction: 'Every attempt ended in an observed failure or a fresh challenge. Stop and inspect the widget with browser_screenshot; blind retries count as failed attempts on the site.' };
   }
   if (name === 'browser_navigate') {
     if (!(await commandStillActive())) return { status: 'waiting', retryable: true, reason: 'bridge_command_cancelled_or_disconnected', dispatched: false, nextPollTool: 'browser_health' };
@@ -1496,7 +1628,7 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
         navigation: { from: urlBefore, to: urlAfter }, reason: 'document_replaced_by_navigation',
         recommendedNextAction: 'The action navigated, which is the evidence it was dispatched; the old document that held the expectation is gone. Confirm the outcome on the new page; do not repeat the action.' };
     };
-    const baseResult = await page('browser_action', args);
+    const baseResult = await runBrowserAction(args);
     if (baseResult?.__aibError) throw new Error(baseResult.__aibError);
     if (baseResult?.status === 'waiting') return baseResult;
     if (baseResult?.dispatched === false || baseResult?.dispatched === undefined) {
@@ -1507,7 +1639,8 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       verification = await page('browser_expect_verify', {
         expect: args.expect,
         timeoutMs: args.timeoutMs ?? 3000,
-        changeBaseline: pre?.changeBaseline ?? null
+        changeBaseline: pre?.changeBaseline ?? null,
+        targetBaseline: pre?.targetBaseline ?? null
       });
     } catch {
       const moved = await movedResult();
@@ -1666,7 +1799,8 @@ async function execute(name, args, commandContext = { socket, epoch: connectionE
       verification = await page('browser_expect_verify', {
         expect: args.expect,
         timeoutMs: args.timeoutMs ?? 3000,
-        changeBaseline: pre?.changeBaseline ?? null
+        changeBaseline: pre?.changeBaseline ?? null,
+        targetBaseline: pre?.targetBaseline ?? null
       });
     } catch {
       const moved = await movedResult();

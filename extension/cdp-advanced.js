@@ -779,24 +779,66 @@ export function createCdpAdvanced({ sessions }) {
   // print to PDF
   // -------------------------------------------------------------------------
 
+  const PDF_OVERLAY_PROBE = `(() => {
+    const selectors = ['dialog[open]', '[role="dialog"]', '[aria-modal="true"]', '.ant-modal-wrap', '.ant-modal-root', '.el-dialog__wrapper', '.el-overlay', '.verify-wrap'];
+    const kinds = [];
+    const seen = new Set();
+    for (const selector of selectors) {
+      let nodes = [];
+      try { nodes = document.querySelectorAll(selector); } catch { continue; }
+      for (const el of nodes) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        const box = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        if (box.width < 2 || box.height < 2) continue;
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) continue;
+        kinds.push(selector);
+      }
+    }
+    return { count: kinds.length, kinds: [...new Set(kinds)].slice(0, 8) };
+  })()`;
+
+  async function tabReading(tabId) {
+    try { return chrome.tabs?.get ? await chrome.tabs.get(tabId) : null; } catch { return null; }
+  }
+
   async function pdfSave(tab, args) {
     const { send } = await ensureSession(tab);
+    const before = await tabReading(tab.id);
+    const sourceUrl = before?.url ?? tab.url ?? null;
+    let overlay = null;
+    try {
+      const probe = await send('Runtime.evaluate', { expression: PDF_OVERLAY_PROBE, returnByValue: true });
+      overlay = probe?.result?.value ?? null;
+    } catch { overlay = null; }
+    // Print media is what "Save as PDF" means, but a visible modal often lives
+    // outside the print stylesheet and disappears from the PDF. When the caller
+    // leaves media at auto and an overlay is visibly open, print what the screen
+    // shows; an explicit media value is always obeyed.
+    const requestedMedia = ['auto', 'print', 'screen'].includes(args.media) ? args.media : 'auto';
+    const media = requestedMedia === 'auto' ? (overlay?.count > 0 ? 'screen' : 'print') : requestedMedia;
     let result;
     try {
-      result = await send('Page.printToPDF', {
-        printBackground: args.printBackground !== false,
-        landscape: args.landscape === true,
-        scale: Number.isFinite(args.scale) ? Math.min(2, Math.max(0.1, args.scale)) : 1,
-        paperWidth: Number.isFinite(args.paperWidth) ? args.paperWidth : 8.27,
-        paperHeight: Number.isFinite(args.paperHeight) ? args.paperHeight : 11.69,
-        marginTop: 0.4, marginBottom: 0.4, marginLeft: 0.4, marginRight: 0.4,
-        preferCSSPageSize: args.preferCSSPageSize === true,
-        transferMode: 'ReturnAsBase64'
-      });
+      if (media === 'screen') await send('Emulation.setEmulatedMedia', { media: 'screen' });
+      try {
+        result = await send('Page.printToPDF', {
+          printBackground: args.printBackground !== false,
+          landscape: args.landscape === true,
+          scale: Number.isFinite(args.scale) ? Math.min(2, Math.max(0.1, args.scale)) : 1,
+          paperWidth: Number.isFinite(args.paperWidth) ? args.paperWidth : 8.27,
+          paperHeight: Number.isFinite(args.paperHeight) ? args.paperHeight : 11.69,
+          marginTop: 0.4, marginBottom: 0.4, marginLeft: 0.4, marginRight: 0.4,
+          preferCSSPageSize: args.preferCSSPageSize === true,
+          transferMode: 'ReturnAsBase64'
+        });
+      } finally {
+        if (media === 'screen') await send('Emulation.setEmulatedMedia', { media: '' }).catch(() => {});
+      }
     } catch (error) {
-      return failed('browser_pdf_save', error);
+      return failed('browser_pdf_save', error, { sourceUrl, media, overlays: overlay });
     }
-    if (!result?.data) return failed('browser_pdf_save', new Error('Chrome returned no PDF data for that tab.'));
+    if (!result?.data) return failed('browser_pdf_save', new Error('Chrome returned no PDF data for that tab.'), { sourceUrl, media, overlays: overlay });
     // The PDF goes to disk through the download manager instead of through the
     // socket: a printed page is routinely a megabyte of base64, which would be
     // the largest payload this bridge ever sends for a read-only operation.
@@ -818,21 +860,48 @@ export function createCdpAdvanced({ sessions }) {
       // Chrome does not always keep the requested name - measured: a data URL was
       // saved as download.pdf regardless - so the real path is read back instead
       // of being assumed from the argument.
-      let landed = null;
-      try {
-        const [item] = await chrome.downloads.search({ id: downloadId });
-        landed = item?.filename ?? null;
-      } catch { landed = null; }
+      let item = null;
+      try { const [found] = await chrome.downloads.search({ id: downloadId }); item = found ?? null; } catch { item = null; }
+      const after = await tabReading(tab.id);
+      const tabBlanked = Boolean(sourceUrl && /^https?:/i.test(sourceUrl) && after?.url && /^about:/i.test(after.url));
+      const warnings = [];
+      if (overlay?.count > 0 && media !== 'screen') {
+        warnings.push({ code: 'overlay_not_in_print_media', severity: 'warning',
+          message: 'A visible dialog or overlay was open while printing with print media. If the PDF is missing it, retry with media:"screen".' });
+      }
+      if (tabBlanked) {
+        warnings.push({ code: 'source_tab_blanked', severity: 'warning',
+          message: 'The source tab now reports an about: page instead of its original URL. The PDF still completed, but later page tools will refuse that tab as restricted until it is navigated back.' });
+      }
+      if (!item) {
+        warnings.push({ code: 'download_record_not_visible', severity: 'info',
+          message: 'The download manager accepted an id but search did not return a row. Use the returned downloadId and filename as evidence; browser_downloads may not list every print handoff.' });
+      }
       return {
         status: 'success', retryable: false, tabId: tab.id, downloadId, bytes,
-        filename: landed, requestedFilename: args.filename ?? null,
-        note: (landed && args.filename && !String(landed).endsWith(String(args.filename))
+        filename: item?.filename ?? null, requestedFilename: args.filename ?? null,
+        sourceUrl, media,
+        mediaReason: requestedMedia === 'auto' ? (overlay?.count > 0 ? 'open_overlay' : 'default_print') : 'caller_choice',
+        overlays: overlay,
+        download: item ? {
+          id: item.id ?? downloadId, state: item.state ?? null, exists: item.exists !== false,
+          bytesReceived: item.bytesReceived ?? null, totalBytes: item.totalBytes ?? null,
+          danger: item.danger ?? null, filename: item.filename ?? null
+        } : null,
+        downloadRecordVisible: Boolean(item),
+        tabBlanked,
+        ...(tabBlanked ? {
+          tabAfterUrl: after?.url ?? null,
+          recovery: sourceUrl ? `The print completed. Navigate this tab back to sourceUrl if it is needed again; do not call browser_eval on the about: page.` : null
+        } : {}),
+        ...(warnings.length ? { warnings } : {}),
+        note: (item?.filename && args.filename && !String(item.filename).endsWith(String(args.filename))
           ? 'Chrome saved it under a different name than the one requested; filename is the path it actually used. '
           : '') + 'Printed through the same path as "Save as PDF" and handed to the download manager; read browser_downloads to confirm where it landed. A page that is still loading prints whatever has been laid out so far.'
       };
     } catch (error) {
       return failed('browser_pdf_save', error, {
-        bytes,
+        bytes, sourceUrl, media, overlays: overlay,
         hint: 'The print itself succeeded; handing the file to the download manager did not. A very large PDF can be refused as a data URL - lower the page count or print a narrower section.'
       });
     }

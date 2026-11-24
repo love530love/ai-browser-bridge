@@ -13,29 +13,81 @@ export async function withDebugger(tabId, fn) {
   try { return await fn((method, params = {}) => chrome.debugger.sendCommand(target, method, params)); }
   finally { await chrome.debugger.detach(target).catch(() => {}); }
 }
-export async function pointer(send, { x, y, action = 'click', endX, endY, beforeMove, beforePress }) {
+const pageReleaseExpression = (x, y) => `(() => {
+  const target = document.elementFromPoint(${Number(x)}, ${Number(y)}) || document.body || document.documentElement;
+  const init = { bubbles: true, cancelable: true, composed: true, clientX: ${Number(x)}, clientY: ${Number(y)}, button: 0, buttons: 0, view: window };
+  target.dispatchEvent(new MouseEvent('mouseup', init));
+  try { target.dispatchEvent(new PointerEvent('pointerup', { ...init, pointerId: 1, pointerType: 'mouse', isPrimary: true })); } catch {}
+  try { target.dispatchEvent(new PointerEvent('pointercancel', { ...init, pointerId: 1, pointerType: 'mouse', isPrimary: true })); } catch {}
+  return { tag: target.tagName || null };
+})()`;
+
+export async function pointer(send, { x, y, action = 'click', endX, endY, beforeMove, beforePress, steps, releaseWatchdogMs = 6000 }) {
   const button = action === 'right' ? 'right' : 'left';
-  if (beforeMove && !(await beforeMove())) return false;
-  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-  if (action === 'hover') return true;
-  const count = action === 'double' ? 2 : 1;
-  let pressed = false;
+  if (beforeMove && !(await beforeMove())) return { completed: false, released: false, release: null };
+  const totalSteps = action === 'drag' ? Math.min(24, Math.max(2, Math.trunc(Number(steps)) || 8)) : 1;
+  let pressed = false, cancelled = false, aborted = false;
+  let lastX = x, lastY = y, releaseInfo = null, watchdog = null;
+  const release = async reason => {
+    if (!pressed) return releaseInfo;
+    pressed = false;
+    cancelled = true;
+    let method = 'cdp';
+    let error = null;
+    try {
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lastX, y: lastY, button, buttons: 0, clickCount: 1 });
+    } catch (cdpError) {
+      method = 'page';
+      try {
+        await send('Runtime.evaluate', { expression: pageReleaseExpression(lastX, lastY), returnByValue: true });
+      } catch (pageError) {
+        method = null;
+        error = pageError?.message ?? cdpError?.message ?? 'release_failed';
+      }
+    }
+    releaseInfo = { reason, method, released: method !== null, x: lastX, y: lastY, ...(error ? { error: String(error).slice(0, 200) } : {}) };
+    if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+    return releaseInfo;
+  };
   try {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    if (action === 'hover') return { completed: true, released: false, release: null };
+    const count = action === 'double' ? 2 : 1;
     for (let i = 1; i <= count; i++) {
-      if (beforePress && !(await beforePress(i))) return false;
+      if (cancelled) break;
+      if (beforePress && !(await beforePress(i))) { aborted = true; break; }
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons: button === 'right' ? 2 : 1, clickCount: i });
       pressed = true;
+      // A hung Input.dispatchMouseEvent never reaches the finally block, which is
+      // exactly how a backgrounded tab was left pressed. This watchdog releases
+      // on the last known coordinate from an independent CDP call.
+      watchdog = setTimeout(() => { void release('watchdog'); }, Math.max(1000, Number(releaseWatchdogMs) || 6000));
       if (action === 'long') await new Promise(resolve => setTimeout(resolve, 600));
-      if (action === 'drag') for (let step = 1; step <= 8; step++) {
-        await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + (endX - x) * step / 8, y: y + (endY - y) * step / 8, button, buttons: 1 });
+      if (action === 'drag') for (let step = 1; step <= totalSteps; step++) {
+        if (cancelled) break;
+        lastX = x + (endX - x) * step / totalSteps;
+        lastY = y + (endY - y) * step / totalSteps;
+        await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: lastX, y: lastY, button, buttons: 1 });
       }
-      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: action === 'drag' ? endX : x, y: action === 'drag' ? endY : y, button, buttons: 0, clickCount: i });
-      pressed = false;
+      if (!cancelled) {
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: action === 'drag' ? lastX : x, y: action === 'drag' ? lastY : y, button, buttons: 0, clickCount: i });
+        pressed = false;
+        if (!releaseInfo) releaseInfo = { reason: 'gesture_end', method: 'cdp', released: true, x: action === 'drag' ? lastX : x, y: action === 'drag' ? lastY : y };
+      }
+      if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+      if (cancelled) break;
     }
+    return { completed: !cancelled && !aborted, released: Boolean(releaseInfo?.released), release: releaseInfo };
+  } catch (error) {
+    // Release before returning so the caller sees whether the button was lifted
+    // and by which method. The finally block below cannot help here: a value
+    // returned from catch is built before finally runs.
+    if (pressed) await release('gesture_failed').catch(() => {});
+    return { completed: false, released: Boolean(releaseInfo?.released), release: releaseInfo, error: String(error?.message ?? error).slice(0, 200) };
   } finally {
-    if (pressed) await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0 }).catch(() => {});
+    if (pressed) await release('gesture_failed').catch(() => {});
+    if (watchdog) { clearTimeout(watchdog); watchdog = null; }
   }
-  return true;
 }
 export async function key(send, chord) {
   const parts = chord.split('+'); const name = parts.pop();
